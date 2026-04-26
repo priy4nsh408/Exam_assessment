@@ -1,0 +1,9 @@
+ollama
+python-dotenv
+streamlit
+langchain-community
+sentence-transformers
+chromadb
+unstructured[local-inference]
+docx2txt
+pypdf
