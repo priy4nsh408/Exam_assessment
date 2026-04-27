@@ -1,268 +1,103 @@
+"""
+CLI entry point — thin wrapper over app.engine.
+For the full UI, run:  streamlit run streamlit_app.py
+"""
+import sys
 import os
-import random
-import time
 
-# 🔹 Core pipeline imports
-from ingestion.pipeline import load_documents
-from ingestion.metadata_extractor import enrich_metadata
-from chunking.chunker import chunk_docs
-from vector_store.chroma_client import create_vector_db
-from vector_store.retriever import retrieve_context
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# 🔹 Generation + Validation
-from generation.generator import generate_question
-from tagging.hybrid_mapper import validate_question
-
-# 🔹 PYQ Processing
-from pyq_processing.parser import load_pyqs, extract_questions
+from app.engine import (
+    get_available_subjects,
+    get_available_units,
+    get_available_pyq_years,
+    is_subject_indexed,
+    setup_subject,
+    run_generation,
+    BT_LEVELS,
+    CO_OPTIONS,
+)
 
 
-def get_teacher_preferences():
-    """Get CO and BT preferences from teacher"""
-    print("\n" + "="*60)
-    print("📋 QUESTION GENERATION - TEACHER PREFERENCES")
-    print("="*60)
-    
-    # Available options
-    available_bt = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
-    available_co = ["CO1", "CO2", "CO3", "CO4", "CO5"]
-    
-    print("\n✨ Available Bloom Levels:")
-    for i, bt in enumerate(available_bt, 1):
-        print(f"  {i}. {bt}")
-    
-    print("\n✨ Available Course Outcomes:")
-    for i, co in enumerate(available_co, 1):
-        print(f"  {i}. {co}")
-    
-    # Get number of questions
-    while True:
-        try:
-            num_q = int(input("\n📌 How many questions to generate? (1-50): "))
-            if 1 <= num_q <= 50:
-                break
-            print("⚠️ Please enter a number between 1 and 50")
-        except ValueError:
-            print("⚠️ Invalid input. Please enter a number.")
-    
-    # Get Bloom Levels selection
-    print("\n📝 Select Bloom Levels (comma-separated numbers, e.g., 1,3,5 or 'all'):")
-    print("  'all' = use all levels, 'random' = random for each question")
-    bt_input = input("  Your choice: ").strip().lower()
-    
-    if bt_input == "all":
-        selected_bt = available_bt
-    elif bt_input == "random":
-        selected_bt = available_bt  # Will randomize in loop
-    else:
-        try:
-            indices = [int(x.strip()) - 1 for x in bt_input.split(",")]
-            selected_bt = [available_bt[i] for i in indices if 0 <= i < len(available_bt)]
-            if not selected_bt:
-                selected_bt = available_bt
-                print("⚠️ Invalid selection. Using all Bloom Levels.")
-        except:
-            selected_bt = available_bt
-            print("⚠️ Invalid input. Using all Bloom Levels.")
-    
-    # Get Course Outcomes selection
-    print("\n📝 Select Course Outcomes (comma-separated numbers, e.g., 1,2,3 or 'all'):")
-    print("  'all' = use all COs, 'random' = random for each question")
-    co_input = input("  Your choice: ").strip().lower()
-    
-    if co_input == "all":
-        selected_co = available_co
-    elif co_input == "random":
-        selected_co = available_co  # Will randomize in loop
-    else:
-        try:
-            indices = [int(x.strip()) - 1 for x in co_input.split(",")]
-            selected_co = [available_co[i] for i in indices if 0 <= i < len(available_co)]
-            if not selected_co:
-                selected_co = available_co
-                print("⚠️ Invalid selection. Using all Course Outcomes.")
-        except:
-            selected_co = available_co
-            print("⚠️ Invalid input. Using all Course Outcomes.")
-    
-    return num_q, selected_bt, selected_co, bt_input, co_input
+def _pick(prompt, options, allow_all=True):
+    print(f"\n{prompt}")
+    for i, o in enumerate(options, 1):
+        print(f"  {i}. {o}")
+    raw = input("  Enter numbers (comma-separated), 'all', or 'random': ").strip().lower()
+    if raw == "all" or raw == "":
+        return options, "all"
+    if raw == "random":
+        return options, "random"
+    try:
+        idxs = [int(x.strip()) - 1 for x in raw.split(",")]
+        chosen = [options[i] for i in idxs if 0 <= i < len(options)]
+        return chosen if chosen else (options, "all")
+    except Exception:
+        return options, "all"
 
 
 def main():
-    # -------------------------------
-    # 1. Load Documents (Content)
-    # -------------------------------
-    docs = load_documents("./data/raw/BDT")
+    print("\n" + "=" * 60)
+    print("  EXAM QUESTION ENGINE — CLI")
+    print("=" * 60)
 
-    if not docs:
-        print("❌ No documents loaded.")
+    subjects = get_available_subjects()
+    if not subjects:
+        print("No subjects found. Add course materials to ./data/raw/<Subject>/")
         return
 
-    print(f"✅ Loaded {len(docs)} documents")
+    print("\nAvailable subjects:")
+    for i, s in enumerate(subjects, 1):
+        indexed = "indexed" if is_subject_indexed(s) else "NOT indexed"
+        print(f"  {i}. {s} [{indexed}]")
 
-    # -------------------------------
-    # 2. Add Metadata
-    # -------------------------------
-    docs = enrich_metadata(docs)
+    choice = int(input("\nSelect subject number: ").strip()) - 1
+    subject = subjects[choice]
 
-    # -------------------------------
-    # 3. Chunk
-    # -------------------------------
-    chunks = chunk_docs(docs)
+    if not is_subject_indexed(subject):
+        print(f"\nBuilding index for {subject}...")
+        setup_subject(subject, progress_callback=lambda p, m: print(f"  [{int(p*100)}%] {m}"))
 
-    if not chunks:
-        print("❌ Chunking failed.")
-        return
+    units = get_available_units(subject)
+    years = get_available_pyq_years(subject)
 
-    print(f"✅ Created {len(chunks)} chunks")
+    selected_units, _ = _pick("Select units:", units)
+    selected_bt, bt_mode = _pick("Select Bloom levels:", BT_LEVELS)
+    selected_co, co_mode = _pick("Select Course Outcomes:", CO_OPTIONS)
 
-    # -------------------------------
-    # 4. Vector DB (Create / Load)
-    # -------------------------------
-    db_path = "./data/db/chroma"
-
-    if os.path.exists(db_path):
-        vectordb = create_vector_db(None)
-        print("✅ Loaded existing Vector DB")
-    else:
-        vectordb = create_vector_db(chunks)
-        print("✅ Created new Vector DB")
-
-    # -------------------------------
-    # 5. Retrieve Context
-    # -------------------------------
-    query = "beam deflection simply supported beam UDL"
-
-    context = ""  # ✅ initialize first
-
-    try:
-       context_docs =retrieve_context(vectordb, query)
-
-       if not context_docs:
-          print("⚠️ Retrieval failed — using fallback context")
-          context = "Explain the concept clearly with relevant formulas."
-       else:
-          # 🔁 Handle BOTH cases (string OR Document list)
-          if isinstance(context_docs, str):
-             context = context_docs
-          else:
-            context = "\n".join(
-                [doc.page_content for doc in context_docs if hasattr(doc, "page_content")]
-            )
-
-    except Exception as e:
-      print(f"⚠️ Retrieval error: {e}")
-    context = "Explain the concept clearly with relevant formulas."
-
-    # ✅ Now this will NEVER crash
-    print("\n🔍 Retrieved Context Preview:\n")
-    print(context[:500])
-
-    # -------------------------------
-# 6. Load + Extract PYQs
-# -------------------------------
-pyq_path = "./data/pyqs/BDT/2021"
-
-if not os.path.exists(pyq_path):
-    print(f"❌ PYQ path not found: {pyq_path}")
-    pyqs = []
-else:
-    print("📂 PYQ Files:", os.listdir(pyq_path))
-
-    pyq_docs = load_pyqs(pyq_path)
-
-    print(f"📄 Loaded {len(pyq_docs)} PYQ pages")
-
-    questions = extract_questions(pyq_docs)
-
-    print(f"📘 Extracted {len(questions)} PYQs")
-
-    pyqs = [
-        {
-            "question": q,
-            "bt": "Understand",
-            "co": "CO1",
-            "unit": "Unit 1"
-        }
-        for q in questions
-    ]
-    # -------------------------------
-    # 7. Select Example PYQ
-    # -------------------------------
-    example = random.choice(pyqs)
-
-    print("\n📘 Reference PYQ:\n")
-    print(example["question"])
-
-    # -------------------------------
-    # 8. Get Teacher Preferences & Generate Questions
-    # -------------------------------
-    num_questions, selected_bt, selected_co, bt_mode, co_mode = get_teacher_preferences()
-    
-    generated_questions = []
-    
-    for q_num in range(num_questions):
-        print(f"\n{'='*60}")
-        print(f"🔁 GENERATING QUESTION {q_num + 1}/{num_questions}")
-        print(f"{'='*60}")
-        
-        # Select BT based on mode
-        if bt_mode == "random":
-            bt = random.choice(selected_bt)
-        else:
-            bt = selected_bt[q_num % len(selected_bt)]
-        
-        # Select CO based on mode
-        if co_mode == "random":
-            co = random.choice(selected_co)
-        else:
-            co = selected_co[q_num % len(selected_co)]
-        
-        print(f"📋 Bloom Level: {bt} | CO: {co}")
-        
-        question = None
-        validation = None
-        context =''
-        # Attempt to generate and validate question
-        for attempt in range(3):
-            print(f"\n  ↻ Attempt {attempt + 1}/3")
-            
-            question = generate_question(context, example, bt, co)
-            print(f"  Generated: {question[:100]}...")
-            
-            validation = validate_question(question, bt, co)
-            
-            if "Yes" in validation:
-                print(f"  ✅ Validation Passed")
+    while True:
+        try:
+            num_q = int(input("\nHow many questions to generate? (1-50): "))
+            if 1 <= num_q <= 50:
                 break
-            else:
-                print(f"  ⚠️ Validation Failed, retrying...")
-                time.sleep(2)  # Shorter delay between retries
-        
-        # Store the generated question
-        generated_questions.append({
-            "number": q_num + 1,
-            "question": question,
-            "bloom_level": bt,
-            "course_outcome": co,
-            "validation": validation
-        })
-        
-        time.sleep(1)  # Brief delay between questions
+        except ValueError:
+            pass
 
-    # -------------------------------
-    # Final Output - All 10 Questions
-    # -------------------------------
-    print(f"\n{'='*60}")
-    print(f"🎯 ALL {num_questions} GENERATED QUESTIONS")
-    print(f"{'='*60}\n")
-    
-    for q in generated_questions:
-        print(f"\nQ{q['number']}. [Bloom Level: {q['bloom_level']}, Course Outcome: {q['course_outcome']}]")
+    pyq_year = None
+    if years:
+        print(f"\nAvailable PYQ years: {', '.join(years)} (or press Enter to use all)")
+        y = input("  Year: ").strip()
+        pyq_year = y if y in years else None
+
+    print(f"\nGenerating {num_q} questions for {subject}...\n")
+
+    for result in run_generation(
+        subject=subject,
+        selected_units=selected_units,
+        selected_bt=selected_bt,
+        selected_co=selected_co,
+        num_questions=num_q,
+        pyq_year=pyq_year,
+    ):
+        print(f"\nQ{result['number']}. [{result['bloom_level']}] [{result['course_outcome']}] [{result['marks']}M] — {result['unit']}")
         print("-" * 60)
-        print(f"\n📝 QUESTION:\n{q['question']}\n")
-        print(f"✅ VALIDATION:\n{q['validation']}\n")
-        print("=" * 60)
+        print(result["question"])
+        print("Validation:", "PASSED" if result["passed"] else "UNCERTAIN")
+        print("Saved to bank with ID:", result["id"])
+
+    print(f"\n{'='*60}")
+    print(f"Done. All questions saved to question bank.")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

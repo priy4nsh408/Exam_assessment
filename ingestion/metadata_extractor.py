@@ -1,17 +1,16 @@
 import re
 
-def enrich_metadata(docs):
+
+def enrich_metadata(docs, subject="Unknown"):
     for doc in docs:
         source = doc.metadata.get("source", "")
 
-        # 🔍 Extract unit number using regex
-        match = re.search(r'Unit[- ]?(\d+)', source, re.IGNORECASE)
-
+        match = re.search(r'[Uu]nit[- ]?(\d+)', source)
         if match:
             doc.metadata["unit"] = f"Unit {match.group(1)}"
         else:
             doc.metadata["unit"] = "Unknown"
 
-        doc.metadata["subject"] = "BDT"
+        doc.metadata["subject"] = subject
 
     return docs
