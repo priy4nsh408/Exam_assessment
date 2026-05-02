@@ -144,6 +144,47 @@ def select_pyq_set(pyq_base):
 
 
 # =========================================================
+# UNIT SELECTION
+# =========================================================
+def select_unit(chunks):
+    """
+    Extract available units from chunks metadata
+    and let user select one
+    """
+    units = set()
+    
+    for chunk in chunks:
+        unit = chunk.metadata.get("unit", "Unknown")
+        if unit != "Unknown":
+            units.add(unit)
+    
+    units = sorted(list(units))
+    
+    if not units:
+        print("⚠️ No units found in metadata")
+        return None
+    
+    print("\n📖 AVAILABLE UNITS:\n")
+    
+    for i, unit in enumerate(units, 1):
+        print(f"{i}. {unit}")
+    
+    while True:
+        try:
+            choice = int(input("\nSelect Unit Number: "))
+            
+            if 1 <= choice <= len(units):
+                selected_unit = units[choice - 1]
+                print(f"\n✅ Selected Unit: {selected_unit}")
+                return selected_unit
+        
+        except:
+            pass
+        
+        print("⚠️ Invalid Selection")
+
+
+# =========================================================
 # TEACHER PREFERENCES
 # =========================================================
 def get_teacher_preferences():
@@ -345,12 +386,24 @@ def main():
         print("✅ Created new Vector DB")
 
     # =====================================================
-    # 6. QUERY INPUT
+    # 6. UNIT SELECTION
     # =====================================================
-    query = input("\n🔍 Enter Topic / Query: ")
+    selected_unit = select_unit(chunks)
+
+    if not selected_unit:
+        print("❌ Unit selection failed")
+        return
 
     # =====================================================
-    # 7. RETRIEVE CONTEXT
+    # 7. SEMANTIC QUERY (OPTIONAL - for similarity checking)
+    # =====================================================
+    semantic_query = input("\n🔍 Enter Topic/Query (optional, for semantic similarity): ").strip()
+    
+    if not semantic_query:
+        semantic_query = ""
+
+    # =====================================================
+    # 8. RETRIEVE CONTEXT
     # =====================================================
     context = ""
 
@@ -358,7 +411,8 @@ def main():
 
         context_docs = retrieve_context(
             vectordb,
-            query
+            query=semantic_query,  # Can be empty or specific query for semantic filtering
+            unit=selected_unit
         )
 
         if not context_docs:
@@ -389,7 +443,10 @@ def main():
     # Reduce token usage
     context = context[:2000]
 
-    print("\n🔍 CONTEXT PREVIEW:\n")
+    print("\n✅ CONTEXT LOADED FOR:", selected_unit)
+    if semantic_query:
+        print(f"🔍 Semantic Filter: {semantic_query}")
+    print("📖 CONTENT PREVIEW:\n")
     print(context[:500])
 
     # =====================================================
