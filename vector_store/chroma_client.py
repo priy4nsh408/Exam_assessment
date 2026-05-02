@@ -1,7 +1,9 @@
 
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+
 import os
+
 
 # =========================================================
 # CREATE / LOAD VECTOR DATABASE
@@ -10,20 +12,9 @@ def create_vector_db(
     chunks=None,
     persist_directory="./data/db/chroma"
 ):
+
     """
-    Creates or loads a Chroma Vector Database.
-
-    Parameters:
-    ---------------------------------
-    chunks : list
-        List of LangChain documents/chunks
-
-    persist_directory : str
-        Path where Chroma DB is stored
-
-    Returns:
-    ---------------------------------
-    vectordb : Chroma object
+    Creates or loads Chroma Vector DB
     """
 
     # =====================================================
@@ -34,18 +25,44 @@ def create_vector_db(
     )
 
     # =====================================================
-    # CREATE DIRECTORY IF NOT EXISTS
+    # COLLECTION NAME
     # =====================================================
-    os.makedirs(persist_directory, exist_ok=True)
+    collection_name = os.path.basename(
+        persist_directory
+    ).lower()
+
+    # Sanitize collection name for ChromaDB (only alphanumeric, dots, underscores, hyphens)
+    import re
+    collection_name = re.sub(r'[^a-zA-Z0-9._-]', '_', collection_name)
+    collection_name = re.sub(r'_+', '_', collection_name)  # Replace multiple underscores with single
+    collection_name = collection_name.strip('_')  # Remove leading/trailing underscores
+
+    # Ensure it starts and ends with alphanumeric
+    if not collection_name[0].isalnum():
+        collection_name = 'db_' + collection_name
+    if not collection_name[-1].isalnum():
+        collection_name = collection_name + '_db'
 
     # =====================================================
-    # LOAD EXISTING DATABASE
+    # CREATE DIRECTORY
+    # =====================================================
+    os.makedirs(
+        persist_directory,
+        exist_ok=True
+    )
+
+    # =====================================================
+    # LOAD EXISTING DB
     # =====================================================
     if chunks is None:
 
-        print(f"📂 Loading Vector DB from: {persist_directory}")
+        print(
+            f"\n📂 Loading Vector DB: "
+            f"{collection_name}"
+        )
 
         vectordb = Chroma(
+            collection_name=collection_name,
             persist_directory=persist_directory,
             embedding_function=embeddings
         )
@@ -53,22 +70,20 @@ def create_vector_db(
         return vectordb
 
     # =====================================================
-    # CREATE NEW DATABASE
+    # CREATE NEW DB
     # =====================================================
-    print(f"🧠 Creating New Vector DB at: {persist_directory}")
+    print(
+        f"\n🧠 Creating Vector DB: "
+        f"{collection_name}"
+    )
 
     vectordb = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
+        collection_name=collection_name,
         persist_directory=persist_directory
     )
 
-    # =====================================================
-    # SAVE DATABASE
-    # =====================================================
-    vectordb.persist()
-
-    print("✅ Vector DB Saved Successfully")
+    print("✅ Vector DB Created Successfully")
 
     return vectordb
-

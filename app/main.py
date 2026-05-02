@@ -1,4 +1,5 @@
 
+import difflib
 import os
 import random
 import time
@@ -15,7 +16,41 @@ from generation.generator import generate_question
 from tagging.hybrid_mapper import validate_question
 
 # 🔹 PYQ Processing
-from pyq_processing.parser import load_pyqs, extract_questions
+from pyq_processing.parser import load_pyqs, extract_questions, load_single_pyq_file
+
+
+def normalize_folder_name(name):
+    return "".join(
+        ch for ch in name.lower()
+        if ch.isalnum()
+    )
+
+
+def resolve_subject_folder(base_path, subject):
+    if not os.path.isdir(base_path):
+        return None
+
+    normalized_target = normalize_folder_name(subject)
+    candidates = [
+        folder for folder in os.listdir(base_path)
+        if os.path.isdir(os.path.join(base_path, folder))
+    ]
+
+    for folder in candidates:
+        if normalize_folder_name(folder) == normalized_target:
+            return os.path.join(base_path, folder)
+
+    closest = difflib.get_close_matches(
+        subject,
+        candidates,
+        n=1,
+        cutoff=0.6
+    )
+
+    if closest:
+        return os.path.join(base_path, closest[0])
+
+    return None
 
 
 # =========================================================
@@ -55,31 +90,57 @@ def select_subject():
 # PYQ SET SELECTION
 # =========================================================
 def select_pyq_set(pyq_base):
+    # First check if there are subdirectories (year-based organization)
     available_sets = [
         folder for folder in os.listdir(pyq_base)
         if os.path.isdir(os.path.join(pyq_base, folder))
     ]
 
-    if not available_sets:
-        print("❌ No PYQ folders found")
-        return None
+    if available_sets:
+        # Year-based organization (like BDT/2021, BDT/2022)
+        print("\n📅 AVAILABLE PYQ SETS:\n")
 
-    print("\n📅 AVAILABLE PYQ SETS:\n")
+        for i, year in enumerate(available_sets, 1):
+            print(f"{i}. {year}")
 
-    for i, year in enumerate(available_sets, 1):
-        print(f"{i}. {year}")
+        while True:
+            try:
+                choice = int(input("\nSelect PYQ Set: "))
 
-    while True:
-        try:
-            choice = int(input("\nSelect PYQ Set: "))
+                if 1 <= choice <= len(available_sets):
+                    return available_sets[choice - 1]
 
-            if 1 <= choice <= len(available_sets):
-                return available_sets[choice - 1]
+            except:
+                pass
 
-        except:
-            pass
+            print("⚠️ Invalid Selection")
+    else:
+        # Files directly in folder (like Propulsion/*.pdf)
+        available_files = [
+            file for file in os.listdir(pyq_base)
+            if os.path.isfile(os.path.join(pyq_base, file)) and file.lower().endswith('.pdf')
+        ]
 
-        print("⚠️ Invalid Selection")
+        if not available_files:
+            print("❌ No PYQ folders found")
+            return None
+
+        print("\n📄 AVAILABLE PYQ FILES:\n")
+
+        for i, file in enumerate(available_files, 1):
+            print(f"{i}. {file}")
+
+        while True:
+            try:
+                choice = int(input("\nSelect PYQ File: "))
+
+                if 1 <= choice <= len(available_files):
+                    return available_files[choice - 1]
+
+            except:
+                pass
+
+            print("⚠️ Invalid Selection")
 
 
 # =========================================================
@@ -213,8 +274,24 @@ def main():
     print(f"\n✅ Selected Subject: {subject}")
 
     raw_path = f"./data/raw/{subject}"
-    pyq_base = f"./data/pyqs/{subject}"
+    pyq_folder = resolve_subject_folder("./data/pyqs", subject)
+
+    if not pyq_folder:
+        available = [
+            folder for folder in os.listdir("./data/pyqs")
+            if os.path.isdir(os.path.join("./data/pyqs", folder))
+        ]
+        print(
+            "❌ No matching PYQ subject folder found for",
+            subject
+        )
+        print("   Available PYQ subjects:", ", ".join(available))
+        return
+
+    pyq_base = pyq_folder
     db_path = f"./data/db/chroma/{subject}"
+
+    print(f"🔗 Resolved PYQ folder: {pyq_base}")
 
     # =====================================================
     # 2. LOAD DOCUMENTS
@@ -330,7 +407,13 @@ def main():
 
     print(f"\n📂 Loading PYQs from: {selected_set}")
 
-    pyq_docs = load_pyqs(pyq_path)
+    # Check if selected_set is a file or directory
+    if os.path.isfile(pyq_path):
+        # Single file selected (like Propulsion/*.pdf)
+        pyq_docs = load_single_pyq_file(pyq_path, selected_set)
+    else:
+        # Directory selected (like BDT/2021/)
+        pyq_docs = load_pyqs(pyq_path)
 
     questions = extract_questions(pyq_docs)
 
@@ -341,12 +424,21 @@ def main():
     # =====================================================
     question_bank_questions = []
 
-    qb_path = os.path.join(
-        pyq_base,
-        "question_bank"
-    )
+    qb_path = None
 
-    if os.path.exists(qb_path):
+    for folder in os.listdir(pyq_base):
+        candidate_path = os.path.join(pyq_base, folder)
+
+        if not os.path.isdir(candidate_path):
+            continue
+
+        normalized_name = folder.strip().lower().replace("_", " ")
+
+        if normalized_name == "question bank":
+            qb_path = candidate_path
+            break
+
+    if qb_path and os.path.exists(qb_path):
 
         print("\n📚 Loading Question Bank...")
 
