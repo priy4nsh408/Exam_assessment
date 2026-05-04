@@ -35,19 +35,28 @@ def retrieve_context(
         # =================================================
         # BUILD FILTER
         # =================================================
-        filters = {}
+        if subject and unit:
+            filters = {
+                "$and": [
+                    {"subject": {"$eq": subject}},
+                    {"unit": {"$eq": unit}}
+                ]
+            }
+        elif subject:
+            filters = {"subject": {"$eq": subject}}
+        elif unit:
+            filters = {"unit": {"$eq": unit}}
+        else:
+            filters = {}
 
-        if subject:
-            filters["subject"] = subject
-
-        if unit:
-            filters["unit"] = unit
+        # Debug filter format
+        if filters:
+            print(f"🔧 Chroma where filter: {filters}")
 
         # =================================================
         # RETRIEVE DOCUMENTS
         # =================================================
         if filters:
-
             docs = vectordb.similarity_search(
                 query,
                 k=k,

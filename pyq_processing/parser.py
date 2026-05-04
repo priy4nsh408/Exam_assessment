@@ -1,5 +1,7 @@
-from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 import os
+import re
+
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 
 
 def load_pyqs(folder_path):
@@ -48,7 +50,7 @@ def load_pyqs(folder_path):
             doc.metadata["file"] = file
             doc.metadata["year"] = year  # ✅ FIXED
 
-        docs.extend(loaded)
+        docs.extend(filtered_docs)
 
     return docs
 
@@ -94,9 +96,47 @@ def load_single_pyq_file(file_path, file_name):
         doc.metadata["file"] = file_name
         doc.metadata["year"] = "Unknown"  # Single file, no year folder
 
-    docs.extend(loaded)
+    docs.extend(filtered_docs)
 
     return docs
+
+
+def _is_valid_question_line(line):
+    normalized = re.sub(r"\s+", " ", line).strip()
+
+    if not normalized or "?" not in normalized:
+        return False
+
+    if len(normalized) < 20:
+        return False
+
+    if not re.search(r"[A-Za-z]{2}", normalized):
+        return False
+
+    alpha_ratio = sum(1 for c in normalized if c.isalpha()) / len(normalized)
+    digit_ratio = sum(1 for c in normalized if c.isdigit()) / len(normalized)
+
+    if alpha_ratio < 0.35 or digit_ratio > 0.45:
+        return False
+
+    return True
+
+
+def _question_quality(line):
+    normalized = re.sub(r"\s+", " ", line).strip()
+    total = len(normalized)
+    if total == 0:
+        return 0.0
+
+    alpha_count = sum(1 for c in normalized if c.isalpha())
+    digit_count = sum(1 for c in normalized if c.isdigit())
+    punct_count = sum(1 for c in normalized if c in "?!.,;:")
+
+    alpha_ratio = alpha_count / total
+    digit_ratio = digit_count / total
+    length_score = min(total, 120) / 120
+
+    return alpha_ratio * 2.0 - digit_ratio * 0.4 + length_score * 0.25 + punct_count * 0.05
 
 
 def extract_questions(docs):
@@ -107,16 +147,13 @@ def extract_questions(docs):
 
         for line in lines:
             line = line.strip()
-
-            # ✅ Basic cleaning
             if not line:
                 continue
 
-            # Keep only meaningful questions
-            if "?" in line and len(line) > 10:
-                questions.append(line)
+            if _is_valid_question_line(line):
+                questions.append(re.sub(r"\s+", " ", line).strip())
 
-    # ✅ Remove duplicates
     questions = list(set(questions))
+    questions.sort(key=_question_quality, reverse=True)
 
     return questions
