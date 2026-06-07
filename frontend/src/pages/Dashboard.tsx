@@ -1,4 +1,5 @@
-import { Brain, FileText, Clock, TrendingUp, CheckCircle, AlertCircle, Activity, Users } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Brain, Clock, TrendingUp, AlertCircle, Activity } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { StatCard } from '../components/ui/StatCard'
 import {
@@ -46,6 +47,11 @@ const recentQuestions = [
 ]
 
 export default function Dashboard() {
+  const [stats, setStats] = useState<any>(null)
+  useEffect(() => {
+    fetch('/api/stats').then(r => r.json()).then(setStats).catch(() => {})
+  }, [])
+
   return (
     <div>
       <Header
@@ -64,7 +70,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard
             label="Questions Generated"
-            value="1,248"
+            value={stats?.total_questions != null ? String(stats.total_questions) : '1,248'}
             sub="across 4 subjects"
             icon={Brain}
             color="indigo"
@@ -72,7 +78,7 @@ export default function Dashboard() {
           />
           <StatCard
             label="Time Saved"
-            value="186 hrs"
+            value={stats?.time_saved != null ? `${stats.time_saved} hrs` : '186 hrs'}
             sub="vs. manual preparation"
             icon={Clock}
             color="emerald"
@@ -80,14 +86,14 @@ export default function Dashboard() {
           />
           <StatCard
             label="Pending Grades"
-            value="47"
+            value={stats?.pending_grades != null ? String(stats.pending_grades) : '47'}
             sub="submissions awaiting AI"
             icon={AlertCircle}
             color="amber"
           />
           <StatCard
             label="Avg CO Attainment"
-            value="76.8%"
+            value={stats?.avg_co_attainment != null ? `${stats.avg_co_attainment}%` : '76.8%'}
             sub="target: 70%"
             icon={TrendingUp}
             color="violet"

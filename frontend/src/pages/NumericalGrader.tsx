@@ -34,13 +34,27 @@ export default function NumericalGrader() {
   const [showResult, setShowResult] = useState(false)
   const [grading, setGrading] = useState(false)
   const [overrideScore, setOverrideScore] = useState('')
+  const [numericalResult, setNumericalResult] = useState<any>(null)
 
   const handleGrade = async () => {
     setGrading(true)
-    await new Promise(r => setTimeout(r, 2000))
+    const res = await fetch('/api/eval/numerical', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: 'A Carnot engine operates between 900 K and 300 K producing 200 kW. Find efficiency, heat supplied, heat rejected.',
+        student_solution: 'Step 1: η = 1 - 300/900 = 0.667\nStep 2: Q_H = 200 × 0.667 = 133.4 kW\nStep 3: Q_L = 133.4 - 200 = -66.6 kW',
+        subject: 'Thermodynamics',
+        max_marks: 10
+      })
+    })
+    const data = await res.json()
+    setNumericalResult(data)
     setGrading(false)
     setShowResult(true)
   }
+
+  const displayData = numericalResult ?? MOCK
 
   return (
     <div>
@@ -76,7 +90,7 @@ export default function NumericalGrader() {
               <h2 className="text-sm font-semibold text-gray-900 mb-3">Error Summary</h2>
               <div className="space-y-2">
                 {Object.entries(ERROR_LABELS).map(([k, v]) => {
-                  const count = MOCK.steps.filter(s => s.errorType === k).length
+                  const count = displayData.steps.filter((s: any) => s.errorType === k).length
                   return (
                     <div key={k} className={`flex items-center justify-between px-2.5 py-1.5 rounded border text-xs ${count > 0 ? ERROR_COLORS[k] : 'bg-gray-50 text-gray-400 border-gray-100'}`}>
                       <span>{v}</span>
@@ -111,17 +125,17 @@ export default function NumericalGrader() {
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <h2 className="text-sm font-semibold text-gray-900">{MOCK.name} · {MOCK.student}</h2>
-                    <p className="text-xs text-gray-500">{MOCK.questionText}</p>
+                    <h2 className="text-sm font-semibold text-gray-900">{displayData.name} · {displayData.student}</h2>
+                    <p className="text-xs text-gray-500">{displayData.questionText}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-2xl font-bold text-gray-900">{MOCK.aiScore}<span className="text-sm font-normal text-gray-400">/{MOCK.maxScore}</span></p>
-                    <p className="text-xs text-gray-400">Step accuracy: {MOCK.steps.filter(s => s.correct).length}/{MOCK.totalSteps}</p>
+                    <p className="text-2xl font-bold text-gray-900">{displayData.aiScore}<span className="text-sm font-normal text-gray-400">/{displayData.maxScore}</span></p>
+                    <p className="text-xs text-gray-400">Step accuracy: {displayData.steps.filter((s: any) => s.correct).length}/{displayData.totalSteps}</p>
                   </div>
                 </div>
               </div>
 
-              {MOCK.steps.map(step => (
+              {displayData.steps.map((step: any) => (
                 <div key={step.step} className={`card p-4 border-l-4 ${step.correct ? 'border-l-emerald-400' : 'border-l-red-400'}`}>
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
@@ -154,8 +168,8 @@ export default function NumericalGrader() {
                 <h3 className="text-sm font-semibold text-gray-900 mb-3">Faculty Override</h3>
                 <div className="flex items-end gap-3">
                   <div className="flex-1">
-                    <label className="label">Override Score (/{MOCK.maxScore})</label>
-                    <input type="number" className="input" placeholder={String(MOCK.aiScore)} value={overrideScore} onChange={e => setOverrideScore(e.target.value)} />
+                    <label className="label">Override Score (/{displayData.maxScore})</label>
+                    <input type="number" className="input" placeholder={String(displayData.aiScore)} value={overrideScore} onChange={e => setOverrideScore(e.target.value)} />
                   </div>
                   <button className="btn-primary" disabled={!overrideScore}>Apply</button>
                 </div>

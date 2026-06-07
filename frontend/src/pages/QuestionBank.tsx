@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Search, Trash2, Download, Eye } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { BloomBadge } from '../components/ui/BloomBadge'
@@ -24,8 +24,17 @@ export default function QuestionBank() {
   const [search, setSearch] = useState('')
   const [filterType, setFilterType] = useState('all')
   const [filterSubject, setFilterSubject] = useState('all')
+  const [questions, setQuestions] = useState<any[]>(ALL_QUESTIONS)
+  const [loading, setLoading] = useState(true)
 
-  const filtered = ALL_QUESTIONS.filter(q => {
+  useEffect(() => {
+    fetch('/api/questions')
+      .then(r => r.json())
+      .then(data => { setQuestions(data.questions || data || []); setLoading(false) })
+      .catch(() => { setQuestions(ALL_QUESTIONS); setLoading(false) })
+  }, [])
+
+  const filtered = questions.filter(q => {
     const matchSearch = q.text.toLowerCase().includes(search.toLowerCase()) || q.id.toLowerCase().includes(search)
     const matchType = filterType === 'all' || q.type === filterType
     const matchSubject = filterSubject === 'all' || q.subject === filterSubject
@@ -36,7 +45,7 @@ export default function QuestionBank() {
     <div>
       <Header
         title="Question Bank"
-        subtitle={`${ALL_QUESTIONS.length} questions · ChromaDB + SQLite persistence`}
+        subtitle={`${questions.length} questions · ChromaDB + SQLite persistence`}
         actions={
           <button className="btn-secondary"><Download className="w-4 h-4" /> Export Bank</button>
         }

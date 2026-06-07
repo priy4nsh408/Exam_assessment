@@ -33,11 +33,38 @@ const MOCK_RESULTS = [
 ]
 
 export default function TheoryEvaluator() {
-  const [results] = useState(MOCK_RESULTS)
-  const [selected, setSelected] = useState<typeof MOCK_RESULTS[0] | null>(null)
+  const [results, setResults] = useState<any[]>(MOCK_RESULTS)
+  const [selected, setSelected] = useState<any | null>(null)
   const [overrideScore, setOverrideScore] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
-  const [uploading, setUploading] = useState(false)
+  const [grading, setGrading] = useState(false)
+
+  const handleGrade = async () => {
+    setGrading(true)
+    const res = await fetch('/api/eval/theory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: "State and derive the first law of thermodynamics for an open system.",
+        student_answer: "The first law states energy is conserved. Q = W + ΔU for closed systems.",
+        subject: "Thermodynamics",
+        model_answer: "",
+        max_marks: 10
+      })
+    })
+    const data = await res.json()
+    setResults([{
+      student: '1RV23ME001', name: 'Demo Student', question: 'Q-052',
+      answer: 'Student answer submitted',
+      aiScore: data.ai_score, maxScore: data.max_score,
+      confidence: data.confidence,
+      conceptScore: data.concept_score, detailScore: data.detail_score,
+      feedback: data.feedback,
+      keywords: data.keywords || { found: [], missing: [], coverage_ratio: 0 },
+      co: 'CO1', status: 'graded'
+    }])
+    setGrading(false)
+  }
 
   return (
     <div>
@@ -52,8 +79,8 @@ export default function TheoryEvaluator() {
               <p className="text-xs font-medium text-gray-600">Drop PDF or images here</p>
               <p className="text-xs text-gray-400">or click to browse</p>
             </div>
-            <button className="btn-primary w-full justify-center mt-3" onClick={async () => { setUploading(true); await new Promise(r => setTimeout(r, 1200)); setUploading(false) }}>
-              {uploading ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Grading...</> : 'Grade All Submissions'}
+            <button className="btn-primary w-full justify-center mt-3" onClick={handleGrade} disabled={grading}>
+              {grading ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Grading...</> : 'Grade All Submissions'}
             </button>
           </div>
 
@@ -129,13 +156,13 @@ export default function TheoryEvaluator() {
                   <div>
                     <p className="text-xs font-medium text-emerald-700 mb-2">Found ({selected.keywords.found.length})</p>
                     <div className="flex flex-wrap gap-1.5">
-                      {selected.keywords.found.map(k => <span key={k} className="badge bg-emerald-50 text-emerald-700">{k}</span>)}
+                      {selected.keywords.found.map((k: string) => <span key={k} className="badge bg-emerald-50 text-emerald-700">{k}</span>)}
                     </div>
                   </div>
                   <div>
                     <p className="text-xs font-medium text-red-600 mb-2">Missing ({selected.keywords.missing.length})</p>
                     <div className="flex flex-wrap gap-1.5">
-                      {selected.keywords.missing.map(k => <span key={k} className="badge bg-red-50 text-red-600">{k}</span>)}
+                      {selected.keywords.missing.map((k: string) => <span key={k} className="badge bg-red-50 text-red-600">{k}</span>)}
                     </div>
                   </div>
                 </div>

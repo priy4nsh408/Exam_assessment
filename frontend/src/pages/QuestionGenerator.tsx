@@ -49,16 +49,45 @@ export default function QuestionGenerator() {
   const [count, setCount] = useState(4)
   const [marks, setMarks] = useState(10)
   const [loading, setLoading] = useState(false)
-  const [questions, setQuestions] = useState<typeof MOCK_QUESTIONS>([])
+  const [questions, setQuestions] = useState<any[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [agentStatuses, setAgentStatuses] = useState<Record<string, string>>({})
 
   const handleGenerate = async () => {
     setLoading(true)
-    await new Promise(r => setTimeout(r, 2200))
-    setQuestions(MOCK_QUESTIONS)
-    setSelected(new Set(MOCK_QUESTIONS.map(q => q.id)))
-    setLoading(false)
+    setQuestions([])
+    setAgentStatuses({
+      'Bloom Analyzer': 'idle', 'Scout (RAG)': 'idle', 'Generator': 'idle',
+      'Quality Validator': 'idle', 'Difficulty Validator': 'idle',
+      'Correctness Validator': 'idle', 'Pedagogy Tagger': 'idle',
+      'Syllabus Guardian': 'idle', 'Archivist': 'idle',
+    })
+
+    const params = new URLSearchParams({
+      subject, unit, bloom_level: String(bloomLevel),
+      question_type: questionType, co, count: String(count)
+    })
+
+    const eventSource = new EventSource(`/api/questions/generate/stream?${params}`)
+
+    eventSource.onmessage = (e) => {
+      const data = JSON.parse(e.data)
+      if (data.agent) {
+        setAgentStatuses(prev => ({ ...prev, [data.agent]: data.status }))
+      }
+      if (data.done) {
+        setQuestions(data.questions || [])
+        setSelected(new Set((data.questions || []).map((q: any) => q.id)))
+        setLoading(false)
+        eventSource.close()
+      }
+    }
+    eventSource.onerror = () => {
+      setLoading(false)
+      eventSource.close()
+    }
   }
+
 
   const toggleSelect = (id: string) => {
     const next = new Set(selected)
@@ -157,26 +186,19 @@ export default function QuestionGenerator() {
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Agent Pipeline</h2>
             <div className="space-y-2">
-              {[
-                { name: 'Bloom Analyzer', status: loading ? 'running' : questions.length ? 'done' : 'idle' },
-                { name: 'Scout (RAG)', status: loading ? 'running' : questions.length ? 'done' : 'idle' },
-                { name: 'Generator', status: loading ? 'running' : questions.length ? 'done' : 'idle' },
-                { name: 'Validator', status: questions.length ? 'done' : 'idle' },
-                { name: 'Pedagogy Tagger', status: questions.length ? 'done' : 'idle' },
-                { name: 'Syllabus Guardian', status: questions.length ? 'done' : 'idle' },
-                { name: 'Archivist', status: questions.length ? 'done' : 'idle' },
-              ].map(agent => (
-                <div key={agent.name} className="flex items-center justify-between">
-                  <span className="text-xs text-gray-600">{agent.name}</span>
+              {Object.entries(agentStatuses).map(([name, status]) => (
+                <div key={name} className="flex items-center justify-between">
+                  <span className="text-xs text-gray-600">{name}</span>
                   <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                    agent.status === 'done' ? 'bg-emerald-50 text-emerald-600' :
-                    agent.status === 'running' ? 'bg-indigo-50 text-indigo-600 animate-pulse' :
+                    status === 'done' ? 'bg-emerald-50 text-emerald-600' :
+                    status === 'running' ? 'bg-indigo-50 text-indigo-600 animate-pulse' :
                     'bg-gray-100 text-gray-400'
-                  }`}>
-                    {agent.status}
-                  </span>
+                  }`}>{status}</span>
                 </div>
               ))}
+              {Object.keys(agentStatuses).length === 0 && (
+                <p className="text-xs text-gray-400">Pipeline idle — click Generate to start</p>
+              )}
             </div>
           </div>
         </div>
@@ -227,8 +249,8 @@ export default function QuestionGenerator() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-2 flex-wrap">
                         <span className="text-xs font-mono text-gray-400">{q.id}</span>
-                        <BloomBadge level={q.bloomLevel} />
-                        <span className="badge bg-gray-100 text-gray-600 capitalize">{q.type}</span>
+                        <BloomBadge level={q.bloom_level ?? q.bloomLevel} />
+                        <span className="badge bg-gray-100 text-gray-600 capitalize">{q.question_type ?? q.type}</span>
                         <span className="badge bg-indigo-50 text-indigo-600">{q.co}</span>
                         <span className="badge bg-slate-50 text-slate-600">{q.po}</span>
                         <span className={`badge ${q.difficulty === 'hard' ? 'bg-red-50 text-red-600' : q.difficulty === 'medium' ? 'bg-amber-50 text-amber-600' : 'bg-green-50 text-green-600'}`}>
