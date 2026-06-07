@@ -7,18 +7,33 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
+from pathlib import Path
 import uuid
 import random
+import sys
+import os
 from datetime import datetime, timedelta
 
 # Try to import generation pipeline; fall back gracefully
 try:
-    import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'generation'))
     from generator import generate_questions as _gen_questions
     HAS_GENERATOR = True
 except ImportError:
     HAS_GENERATOR = False
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+try:
+    from evaluation.theory_evaluator import evaluate_theory
+    THEORY_EVAL_AVAILABLE = True
+except ImportError:
+    THEORY_EVAL_AVAILABLE = False
+
+try:
+    from evaluation.numerical_grader import grade_numerical
+    NUMERICAL_GRADER_AVAILABLE = True
+except ImportError:
+    NUMERICAL_GRADER_AVAILABLE = False
 
 app = FastAPI(title="MechAssess API", version="1.0.0")
 
@@ -407,6 +422,53 @@ async def health():
         "generator_available": HAS_GENERATOR,
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
+
+
+# ─── Evaluation endpoints ──────────────────────────────────────────────────────
+
+class TheoryEvalRequest(BaseModel):
+    question: str
+    student_answer: str
+    subject: str
+    model_answer: str = ""
+    max_marks: int = 10
+
+@app.post("/api/eval/theory")
+async def eval_theory(req: TheoryEvalRequest):
+    if THEORY_EVAL_AVAILABLE:
+        result = evaluate_theory(
+            req.question, req.student_answer, req.subject,
+            req.model_answer, req.max_marks
+        )
+    else:
+        result = {
+            "ai_score": 6.0, "max_score": req.max_marks,
+            "concept_score": 3.0, "detail_score": 3.0,
+            "confidence": 0.72, "feedback": "Theory evaluator not available.",
+            "keywords": {"found": [], "missing": [], "coverage_ratio": 0},
+            "similarity": 0.5,
+        }
+    return result
+
+
+class NumericalGradeRequest(BaseModel):
+    question: str
+    student_solution: str
+    subject: str = "Thermodynamics"
+    rubric_steps: list = []
+    max_marks: int = 10
+
+@app.post("/api/eval/numerical")
+async def eval_numerical(req: NumericalGradeRequest):
+    if NUMERICAL_GRADER_AVAILABLE:
+        result = grade_numerical(
+            req.question, req.student_solution,
+            req.rubric_steps or None, req.subject, req.max_marks
+        )
+    else:
+        result = {"ai_score": 5.0, "max_score": req.max_marks,
+                  "steps": [], "feedback": "Numerical grader not available.", "confidence": 0.4}
+    return result
 
 
 if __name__ == "__main__":
