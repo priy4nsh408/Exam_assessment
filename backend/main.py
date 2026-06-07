@@ -10,16 +10,24 @@ import uuid
 import random
 import threading
 import time
+import shutil
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # ── Import LangGraph pipeline ─────────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+try:
+    from evaluation.drawing_evaluator import evaluate_drawing
+    DRAWING_EVAL_AVAILABLE = True
+except ImportError:
+    DRAWING_EVAL_AVAILABLE = False
 
 try:
     from generation.langgraph_pipeline import (
@@ -455,6 +463,34 @@ async def create_exam(body: ExamCreateRequest):
     }
     MOCK_EXAMS.append(exam)
     return exam
+
+
+@app.post("/api/eval/drawing")
+async def eval_drawing(
+    file: UploadFile = File(None),
+    max_marks: int = Form(20),
+    student_usn: str = Form(""),
+    assignment: str = Form(""),
+):
+    image_path = None
+    if file and file.filename:
+        upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        image_path = str(upload_dir / file.filename)
+        with open(image_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+    if DRAWING_EVAL_AVAILABLE:
+        result = evaluate_drawing(image_path, max_marks)
+    else:
+        result = {
+            "ai_score": 14.0, "max_score": max_marks, "confidence": 0.6,
+            "detected_elements": [], "violations": [],
+            "violation_deductions": 0, "vlm_output": {},
+            "preprocessing_applied": False,
+            "feedback": "Drawing evaluator module not available.",
+        }
+    return result
 
 
 if __name__ == "__main__":

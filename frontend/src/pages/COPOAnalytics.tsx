@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { Header } from '../components/layout/Header'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -5,20 +6,12 @@ import {
   LineChart, Line, Legend, Cell
 } from 'recharts'
 
-const coData = [
+const DEFAULT_CO_DATA = [
   { co: 'CO1', description: 'Apply laws of thermodynamics', attainment: 78, target: 70, students: 48, total: 62 },
   { co: 'CO2', description: 'Analyze power cycles', attainment: 65, target: 70, students: 40, total: 62 },
   { co: 'CO3', description: 'Solve SOM problems', attainment: 82, target: 70, students: 51, total: 62 },
   { co: 'CO4', description: 'Apply fluid mechanics principles', attainment: 71, target: 70, students: 44, total: 62 },
   { co: 'CO5', description: 'Interpret engineering drawings', attainment: 88, target: 70, students: 55, total: 62 },
-]
-
-const radarData = [
-  { co: 'CO1', value: 78, fullMark: 100 },
-  { co: 'CO2', value: 65, fullMark: 100 },
-  { co: 'CO3', value: 82, fullMark: 100 },
-  { co: 'CO4', value: 71, fullMark: 100 },
-  { co: 'CO5', value: 88, fullMark: 100 },
 ]
 
 const trendData = [
@@ -45,6 +38,19 @@ const corr: Record<number, string> = {
 }
 
 export default function COPOAnalytics() {
+  const [coData, setCoData] = useState(DEFAULT_CO_DATA)
+
+  useEffect(() => {
+    fetch('/api/analytics/co')
+      .then(r => r.json())
+      .then(data => {
+        if (data.co_data && Array.isArray(data.co_data)) setCoData(data.co_data)
+      })
+      .catch(() => {})
+  }, [])
+
+  const radarData = coData.map(c => ({ co: c.co, value: c.attainment, fullMark: 100 }))
+
   return (
     <div>
       <Header title="CO/PO Analytics" subtitle="Course Outcome attainment analysis and Program Outcome mapping" />

@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { Header } from '../components/layout/Header'
 
 const STUDENTS = [
@@ -19,6 +20,17 @@ function COCell({ value }: { value: number }) {
 }
 
 export default function Students() {
+  const [students, setStudents] = useState(STUDENTS)
+
+  useEffect(() => {
+    fetch('/api/students')
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data) && data.length > 0) setStudents(data)
+      })
+      .catch(() => {})
+  }, [])
+
   return (
     <div>
       <Header title="Students" subtitle="Per-student performance across all CO/PO dimensions" />
@@ -40,7 +52,7 @@ export default function Students() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {STUDENTS.map(s => {
+              {students.map(s => {
                 const atRisk = s.avg < 60
                 return (
                   <tr key={s.usn} className={`hover:bg-gray-50 transition-colors ${atRisk ? 'bg-red-50/30' : ''}`}>

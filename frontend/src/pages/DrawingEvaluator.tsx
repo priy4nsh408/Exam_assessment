@@ -30,6 +30,25 @@ const vlmOutput = {
 export default function DrawingEvaluator() {
   const [result, setResult] = useState(false)
   const [processing, setProcessing] = useState(false)
+  const [drawingResult, setDrawingResult] = useState<any>(null)
+
+  const handleEvaluate = async () => {
+    setProcessing(true)
+    const formData = new FormData()
+    formData.append('max_marks', '20')
+    formData.append('student_usn', '1RV23AS060')
+    formData.append('assignment', 'Drawing Sheet 3')
+
+    try {
+      const res = await fetch('/api/eval/drawing', { method: 'POST', body: formData })
+      const data = await res.json()
+      setDrawingResult(data)
+    } catch {
+      setDrawingResult(null)
+    }
+    setProcessing(false)
+    setResult(true)
+  }
 
   return (
     <div>
@@ -47,7 +66,7 @@ export default function DrawingEvaluator() {
               <div><label className="label">Student USN</label><input className="input" defaultValue="1RV23AS060" /></div>
               <div><label className="label">Assignment</label><select className="select"><option>Drawing Sheet 3 — Orthographic Projection</option></select></div>
             </div>
-            <button className="btn-primary w-full justify-center mt-3" onClick={async () => { setProcessing(true); await new Promise(r => setTimeout(r, 2500)); setProcessing(false); setResult(true) }}>
+            <button className="btn-primary w-full justify-center mt-3" onClick={handleEvaluate}>
               {processing ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Processing with YOLOv8...</> : 'Evaluate Drawing'}
             </button>
           </div>
@@ -56,7 +75,7 @@ export default function DrawingEvaluator() {
             <div className="card p-5">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">IS/BIS Violations</h2>
               <div className="space-y-2">
-                {VIOLATIONS.map((v, i) => (
+                {(drawingResult?.violations ?? VIOLATIONS).map((v: any, i: number) => (
                   <div key={i} className={`p-2.5 rounded-lg border text-xs ${v.severity === 'major' ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
                     <div className="flex items-center justify-between mb-0.5">
                       <span className="font-mono text-[10px] text-gray-500">{v.clause}</span>
@@ -98,13 +117,13 @@ export default function DrawingEvaluator() {
                     <p className="text-xs text-gray-500">Drawing Sheet 3 — Orthographic Projection</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-2xl font-bold text-amber-600">16<span className="text-sm font-normal text-gray-400">/20</span></p>
-                    <p className="text-xs text-gray-400">3 IS violations found · -6 pts total</p>
+                    <p className="text-2xl font-bold text-amber-600">{drawingResult?.ai_score ?? 16}<span className="text-sm font-normal text-gray-400">/{drawingResult?.max_score ?? 20}</span></p>
+                    <p className="text-xs text-gray-400">{drawingResult?.violations?.length ?? 3} IS violations found · -6 pts total</p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-3 gap-3">
-                  {DETECTED.map(d => (
+                  {(drawingResult?.detected_elements ?? DETECTED).map((d: any) => (
                     <div key={d.element} className={`rounded-lg p-3 border text-center ${d.status === 'detected' ? 'bg-gray-50 border-gray-200' : 'bg-red-50 border-red-200'}`}>
                       <p className="text-xs font-medium text-gray-700 mb-1">{d.element}</p>
                       <p className={`text-lg font-bold ${d.status === 'detected' ? 'text-gray-800' : 'text-red-600'}`}>{d.score}</p>
@@ -118,7 +137,7 @@ export default function DrawingEvaluator() {
 
               <div className="card p-5">
                 <h3 className="text-sm font-semibold text-gray-900 mb-3">VLM Interpretation (LLaVA output)</h3>
-                <pre className="text-xs bg-gray-50 rounded-lg p-4 border border-gray-100 overflow-auto text-gray-700 font-mono leading-relaxed">{JSON.stringify(vlmOutput, null, 2)}</pre>
+                <pre className="text-xs bg-gray-50 rounded-lg p-4 border border-gray-100 overflow-auto text-gray-700 font-mono leading-relaxed">{JSON.stringify(drawingResult?.vlm_output ?? vlmOutput, null, 2)}</pre>
               </div>
             </div>
           )}

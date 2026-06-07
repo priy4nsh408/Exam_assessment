@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { CheckCircle, XCircle, AlertTriangle } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 
@@ -15,7 +15,17 @@ const flagConfig: Record<string, { label: string; color: string }> = {
 }
 
 export default function FacultyOverride() {
+  const [pending, setPending] = useState(PENDING)
   const [overrides, setOverrides] = useState<Record<string, { score: string; reason: string; done: boolean }>>({})
+
+  useEffect(() => {
+    fetch('/api/submissions?status=flagged')
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data) && data.length > 0) setPending(data)
+      })
+      .catch(() => {})
+  }, [])
 
   const setField = (id: string, field: 'score' | 'reason', value: string) => {
     setOverrides(prev => {
@@ -26,6 +36,17 @@ export default function FacultyOverride() {
   const approve = (id: string) => setOverrides(prev => ({ ...prev, [id]: { ...prev[id], score: prev[id]?.score ?? '', reason: prev[id]?.reason ?? '', done: true } }))
   const acceptAI = (id: string) => setOverrides(prev => ({ ...prev, [id]: { ...prev[id], score: prev[id]?.score ?? '', reason: 'Accepted AI score', done: true } }))
 
+  const applyOverride = async (id: string, score: string, reason: string) => {
+    try {
+      await fetch(`/api/submissions/${id}/override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ score: parseFloat(score), reason }),
+      })
+    } catch {}
+    approve(id)
+  }
+
   return (
     <div>
       <Header title="Faculty Override Panel" subtitle="Human-in-the-loop review for low-confidence and disputed grades" />
@@ -33,14 +54,14 @@ export default function FacultyOverride() {
         <div className="card p-4 flex items-center gap-4">
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <AlertTriangle className="w-4 h-4 text-amber-500" />
-            <span><strong>{PENDING.length}</strong> submissions flagged for review</span>
+            <span><strong>{pending.length}</strong> submissions flagged for review</span>
           </div>
           <span className="text-gray-300">|</span>
           <p className="text-xs text-gray-500">Flagged when AI confidence is below 0.80 or student raises dispute</p>
         </div>
 
         <div className="space-y-3">
-          {PENDING.map(sub => {
+          {pending.map(sub => {
             const ov = overrides[sub.id]
             const done = ov?.done
             const flag = flagConfig[sub.flag]
@@ -84,7 +105,7 @@ export default function FacultyOverride() {
                       <button
                         className="btn-primary"
                         disabled={!ov?.score || done}
-                        onClick={() => approve(sub.id)}
+                        onClick={() => applyOverride(sub.id, ov?.score ?? '', ov?.reason ?? '')}
                       >
                         <CheckCircle className="w-4 h-4" /> Apply
                       </button>
