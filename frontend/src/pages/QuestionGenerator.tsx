@@ -57,10 +57,10 @@ export default function QuestionGenerator() {
     setLoading(true)
     setQuestions([])
     setAgentStatuses({
-      'Bloom Analyzer': 'idle', 'Scout (RAG)': 'idle', 'Generator': 'idle',
-      'Quality Validator': 'idle', 'Difficulty Validator': 'idle',
-      'Correctness Validator': 'idle', 'Pedagogy Tagger': 'idle',
-      'Syllabus Guardian': 'idle', 'Archivist': 'idle',
+      'BloomAnalyzer': 'idle', 'Scout': 'idle', 'Generator': 'idle',
+      'QualityValidator': 'idle', 'DifficultyValidator': 'idle',
+      'CorrectnessValidator': 'idle', 'PedagogyTagger': 'idle',
+      'SyllabusGuardian': 'idle', 'Archivist': 'idle',
     })
 
     const params = new URLSearchParams({
@@ -186,16 +186,24 @@ export default function QuestionGenerator() {
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Agent Pipeline</h2>
             <div className="space-y-2">
-              {Object.entries(agentStatuses).map(([name, status]) => (
+              {Object.entries(agentStatuses).map(([name, status]) => {
+                const labels: Record<string, string> = {
+                  BloomAnalyzer: 'Bloom Analyzer', Scout: 'Scout (RAG)',
+                  Generator: 'Generator', QualityValidator: 'Quality Validator',
+                  DifficultyValidator: 'Difficulty Validator', CorrectnessValidator: 'Correctness Validator',
+                  PedagogyTagger: 'Pedagogy Tagger', SyllabusGuardian: 'Syllabus Guardian', Archivist: 'Archivist',
+                }
+                return (
                 <div key={name} className="flex items-center justify-between">
-                  <span className="text-xs text-gray-600">{name}</span>
+                  <span className="text-xs text-gray-600">{labels[name] || name}</span>
                   <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
                     status === 'done' ? 'bg-emerald-50 text-emerald-600' :
                     status === 'running' ? 'bg-indigo-50 text-indigo-600 animate-pulse' :
                     'bg-gray-100 text-gray-400'
                   }`}>{status}</span>
                 </div>
-              ))}
+                )
+              })}
               {Object.keys(agentStatuses).length === 0 && (
                 <p className="text-xs text-gray-400">Pipeline idle — click Generate to start</p>
               )}

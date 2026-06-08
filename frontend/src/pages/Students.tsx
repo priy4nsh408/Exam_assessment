@@ -26,7 +26,8 @@ export default function Students() {
     fetch('/api/students')
       .then(r => r.json())
       .then(data => {
-        if (Array.isArray(data) && data.length > 0) setStudents(data)
+        const arr = data.students || data
+        if (Array.isArray(arr) && arr.length > 0) setStudents(arr)
       })
       .catch(() => {})
   }, [])

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Upload, CheckCircle } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 
@@ -38,31 +38,34 @@ export default function TheoryEvaluator() {
   const [overrideScore, setOverrideScore] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
   const [grading, setGrading] = useState(false)
+  const [answerText, setAnswerText] = useState('')
+  const [question, setQuestion] = useState('State and derive the first law of thermodynamics for an open system.')
+  const [subject, setSubject] = useState('Thermodynamics')
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const handleGrade = async () => {
+    if (!answerText.trim()) { alert('Paste or type the student answer first.'); return }
     setGrading(true)
-    const res = await fetch('/api/eval/theory', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question: "State and derive the first law of thermodynamics for an open system.",
-        student_answer: "The first law states energy is conserved. Q = W + ΔU for closed systems.",
-        subject: "Thermodynamics",
-        model_answer: "",
-        max_marks: 10
+    try {
+      const res = await fetch('/api/eval/theory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, student_answer: answerText, subject, model_answer: '', max_marks: 10 })
       })
-    })
-    const data = await res.json()
-    setResults([{
-      student: '1RV23ME001', name: 'Demo Student', question: 'Q-052',
-      answer: 'Student answer submitted',
-      aiScore: data.ai_score, maxScore: data.max_score,
-      confidence: data.confidence,
-      conceptScore: data.concept_score, detailScore: data.detail_score,
-      feedback: data.feedback,
-      keywords: data.keywords || { found: [], missing: [], coverage_ratio: 0 },
-      co: 'CO1', status: 'graded'
-    }])
+      const data = await res.json()
+      const newResult = {
+        student: `S-${Date.now()}`, name: 'Student', question: 'Custom',
+        answer: answerText,
+        aiScore: data.ai_score ?? 0, maxScore: data.max_score ?? 10,
+        confidence: data.confidence ?? 0,
+        conceptScore: data.concept_score ?? 0, detailScore: data.detail_score ?? 0,
+        feedback: data.feedback ?? '',
+        keywords: data.keywords || { found: [], missing: [], coverage_ratio: 0 },
+        co: 'CO1', status: 'graded'
+      }
+      setResults(prev => [newResult, ...prev])
+      setSelected(newResult)
+    } catch { alert('Grading failed — is the backend running?') }
     setGrading(false)
   }
 
@@ -74,10 +77,24 @@ export default function TheoryEvaluator() {
         <div className="col-span-1 space-y-4">
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Upload Submissions</h2>
-            <div className="border-2 border-dashed border-gray-200 rounded-lg p-6 text-center hover:border-indigo-300 transition-colors cursor-pointer">
-              <Upload className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-              <p className="text-xs font-medium text-gray-600">Drop PDF or images here</p>
-              <p className="text-xs text-gray-400">or click to browse</p>
+            <div>
+              <label className="label">Question</label>
+              <input className="input mb-2" value={question} onChange={e => setQuestion(e.target.value)} placeholder="Enter question text" />
+              <label className="label">Subject</label>
+              <select className="select mb-2" value={subject} onChange={e => setSubject(e.target.value)}>
+                <option>Thermodynamics</option>
+                <option>Strength of Materials</option>
+                <option>Fluid Mechanics</option>
+                <option>Engineering Drawing</option>
+              </select>
+              <label className="label">Student Answer</label>
+              <textarea
+                className="input resize-none"
+                rows={5}
+                value={answerText}
+                onChange={e => setAnswerText(e.target.value)}
+                placeholder="Paste or type the student's answer here..."
+              />
             </div>
             <button className="btn-primary w-full justify-center mt-3" onClick={handleGrade} disabled={grading}>
               {grading ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Grading...</> : 'Grade All Submissions'}

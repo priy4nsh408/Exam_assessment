@@ -22,7 +22,8 @@ export default function FacultyOverride() {
     fetch('/api/submissions?status=flagged')
       .then(r => r.json())
       .then(data => {
-        if (Array.isArray(data) && data.length > 0) setPending(data)
+        const arr = data.submissions || data
+        if (Array.isArray(arr) && arr.length > 0) setPending(arr)
       })
       .catch(() => {})
   }, [])
