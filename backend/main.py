@@ -173,6 +173,16 @@ def _normalize_question(q: dict) -> dict:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.get("/")
+async def root():
+    return {
+        "service": "MechAssess API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/api/health",
+        "note": "Open http://localhost:5173 in your browser for the dashboard UI."
+    }
+
 @app.get("/api/health")
 async def health():
     return {
