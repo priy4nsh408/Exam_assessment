@@ -44,7 +44,17 @@ export default function COPOAnalytics() {
     fetch('/api/analytics/co')
       .then(r => r.json())
       .then(data => {
-        if (data.co_data && Array.isArray(data.co_data)) setCoData(data.co_data)
+        const arr = data.co_analytics || data.co_data
+        if (arr && Array.isArray(arr)) {
+          setCoData(arr.map((c: any) => ({
+            co: c.co,
+            description: c.description,
+            attainment: c.averageAttainment ?? c.attainment ?? 0,
+            target: c.target ?? 70,
+            students: c.studentsAchieved ?? c.students ?? 0,
+            total: c.totalStudents ?? c.total ?? 62,
+          })))
+        }
       })
       .catch(() => {})
   }, [])

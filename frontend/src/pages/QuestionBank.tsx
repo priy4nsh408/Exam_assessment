@@ -30,9 +30,23 @@ export default function QuestionBank() {
   useEffect(() => {
     fetch('/api/questions')
       .then(r => r.json())
-      .then(data => { setQuestions(data.questions || data || []); setLoading(false) })
+      .then(data => {
+        const qs = data.questions || data || []
+        setQuestions(qs.length > 0 ? qs : ALL_QUESTIONS)
+        setLoading(false)
+      })
       .catch(() => { setQuestions(ALL_QUESTIONS); setLoading(false) })
   }, [])
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this question from the bank?')) return
+    try {
+      await fetch(`/api/questions/${id}`, { method: 'DELETE' })
+      setQuestions(prev => prev.filter(q => q.id !== id))
+    } catch {
+      alert('Failed to delete question.')
+    }
+  }
 
   const filtered = questions.filter(q => {
     const matchSearch = q.text.toLowerCase().includes(search.toLowerCase()) || q.id.toLowerCase().includes(search)
@@ -106,7 +120,7 @@ export default function QuestionBank() {
                       <button className="w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors">
                         <Eye className="w-3.5 h-3.5" />
                       </button>
-                      <button className="w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors">
+                      <button onClick={() => handleDelete(q.id)} className="w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>

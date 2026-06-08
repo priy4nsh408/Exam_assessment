@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Upload, ImageIcon } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 
@@ -31,13 +31,22 @@ export default function DrawingEvaluator() {
   const [result, setResult] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [drawingResult, setDrawingResult] = useState<any>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [usnValue, setUsnValue] = useState('1RV23AS060')
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] ?? null
+    setSelectedFile(f)
+  }
 
   const handleEvaluate = async () => {
     setProcessing(true)
     const formData = new FormData()
     formData.append('max_marks', '20')
-    formData.append('student_usn', '1RV23AS060')
+    formData.append('student_usn', usnValue)
     formData.append('assignment', 'Drawing Sheet 3')
+    if (selectedFile) formData.append('file', selectedFile)
 
     try {
       const res = await fetch('/api/eval/drawing', { method: 'POST', body: formData })
@@ -57,13 +66,19 @@ export default function DrawingEvaluator() {
         <div className="col-span-1 space-y-4">
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Upload Drawing</h2>
-            <div className="border-2 border-dashed border-gray-200 rounded-lg p-8 text-center cursor-pointer hover:border-indigo-300 transition-colors">
+            <input ref={fileRef} type="file" accept="image/*,.pdf" className="hidden" onChange={handleFileChange} />
+            <div
+              className="border-2 border-dashed border-gray-200 rounded-lg p-8 text-center cursor-pointer hover:border-indigo-300 transition-colors"
+              onClick={() => fileRef.current?.click()}
+            >
               <ImageIcon className="w-10 h-10 text-gray-200 mx-auto mb-2" />
-              <p className="text-xs font-medium text-gray-600">Photograph or scan</p>
-              <p className="text-xs text-gray-400">JPEG / PNG · max 10 MB</p>
+              {selectedFile
+                ? <p className="text-xs font-medium text-indigo-600">{selectedFile.name}</p>
+                : <><p className="text-xs font-medium text-gray-600">Click to select drawing</p><p className="text-xs text-gray-400">JPEG / PNG · max 10 MB</p></>
+              }
             </div>
             <div className="mt-3 space-y-2">
-              <div><label className="label">Student USN</label><input className="input" defaultValue="1RV23AS060" /></div>
+              <div><label className="label">Student USN</label><input className="input" value={usnValue} onChange={e => setUsnValue(e.target.value)} /></div>
               <div><label className="label">Assignment</label><select className="select"><option>Drawing Sheet 3 — Orthographic Projection</option></select></div>
             </div>
             <button className="btn-primary w-full justify-center mt-3" onClick={handleEvaluate}>

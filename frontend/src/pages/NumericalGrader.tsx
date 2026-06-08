@@ -35,6 +35,7 @@ export default function NumericalGrader() {
   const [grading, setGrading] = useState(false)
   const [overrideScore, setOverrideScore] = useState('')
   const [numericalResult, setNumericalResult] = useState<any>(null)
+  const [solutionText, setSolutionText] = useState('Step 1: η = 1 - 300/900 = 0.667\nStep 2: Q_H = 200 × 0.667 = 133.4 kW\nStep 3: Q_L = 133.4 - 200 = -66.6 kW')
 
   const handleGrade = async () => {
     setGrading(true)
@@ -43,13 +44,33 @@ export default function NumericalGrader() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         question: 'A Carnot engine operates between 900 K and 300 K producing 200 kW. Find efficiency, heat supplied, heat rejected.',
-        student_solution: 'Step 1: η = 1 - 300/900 = 0.667\nStep 2: Q_H = 200 × 0.667 = 133.4 kW\nStep 3: Q_L = 133.4 - 200 = -66.6 kW',
+        student_solution: solutionText,
         subject: 'Thermodynamics',
         max_marks: 10
       })
     })
     const data = await res.json()
-    setNumericalResult(data)
+    // Normalize API response fields to match display expectations
+    const normalized = {
+      student: '1RV23ME004', name: 'Student', question: 'Q-053',
+      questionText: 'A Carnot engine operates between 900 K and 300 K producing 200 kW.',
+      aiScore: data.ai_score ?? data.total_earned ?? 0,
+      maxScore: data.max_score ?? data.total_marks ?? 10,
+      confidence: data.confidence ?? 0.8,
+      totalSteps: (data.steps || []).length,
+      steps: (data.steps || []).map((s: any) => ({
+        step: s.step,
+        description: s.description,
+        expected: s.expected,
+        student: s.student_work ?? s.student ?? '',
+        correct: s.correct,
+        marks: s.marks,
+        earned: s.earned,
+        errorType: s.error_type === 'correct' ? null : s.error_type ?? null,
+        deduction: s.marks - s.earned,
+      }))
+    }
+    setNumericalResult(normalized)
     setGrading(false)
     setShowResult(true)
   }
@@ -73,11 +94,14 @@ export default function NumericalGrader() {
                 <select className="select"><option>Q-053 — Carnot Cycle (10 marks)</option></select>
               </div>
               <div>
-                <label className="label">Upload Solution (image/PDF)</label>
-                <div className="border-2 border-dashed border-gray-200 rounded-lg p-4 text-center cursor-pointer hover:border-indigo-300 transition-colors">
-                  <Upload className="w-6 h-6 text-gray-300 mx-auto mb-1" />
-                  <p className="text-xs text-gray-400">Drop file or click</p>
-                </div>
+                <label className="label">Student Solution (type or paste each step)</label>
+                <textarea
+                  className="input resize-none font-mono text-xs"
+                  rows={6}
+                  value={solutionText}
+                  onChange={e => setSolutionText(e.target.value)}
+                  placeholder="Step 1: formula&#10;Step 2: substitution&#10;Step 3: result"
+                />
               </div>
               <button className="btn-primary w-full justify-center" onClick={handleGrade} disabled={grading}>
                 {grading ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Running DeepSeek-R1...</> : 'Grade Step-by-Step'}
