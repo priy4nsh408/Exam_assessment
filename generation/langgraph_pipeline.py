@@ -73,7 +73,13 @@ def question_sha256(text: str) -> str:
 
 def is_duplicate(sha: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT 1 FROM questions WHERE sha256 = ?", (sha,)).fetchone()
+    try:
+        row = conn.execute("SELECT 1 FROM questions WHERE sha256 = ?", (sha,)).fetchone()
+    except sqlite3.OperationalError:
+        # Table doesn't exist yet (e.g. brand-new DB) - nothing to be a duplicate of.
+        conn.close()
+        init_db()
+        return False
     conn.close()
     return row is not None
 
@@ -564,6 +570,11 @@ def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
     Main entry point. Returns list of generated question dicts.
     Falls back to mock questions if LangGraph or Ollama unavailable.
     """
+    # Ensure the DB/table exist before ANY agent runs - pedagogy_tagger_agent
+    # (and others) query the questions table for dedup purposes well before
+    # archivist_agent would otherwise have created it on a brand-new DB.
+    init_db()
+
     initial_state: PipelineState = {
         "subject": subject,
         "unit": unit,
