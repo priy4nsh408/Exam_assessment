@@ -465,6 +465,16 @@ async def get_questions(
     return {"questions": [], "total": 0}
 
 
+@app.get("/api/questions/{question_id}")
+async def get_question(question_id: str):
+    if not HAS_PIPELINE:
+        raise HTTPException(status_code=503, detail="Pipeline not available")
+    question = _db_get_question_by_id(question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return _normalize_question(question)
+
+
 @app.delete("/api/questions/{question_id}")
 async def delete_question_route(question_id: str):
     if HAS_PIPELINE:
