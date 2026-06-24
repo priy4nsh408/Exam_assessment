@@ -1,9 +1,12 @@
 ollama
 python-dotenv
 streamlit
-langchain-community
-sentence-transformers
-chromadb
+langchain-community==0.3.0
+langchain-core==0.3.15
+langchain-chroma==0.1.4
+langchain-huggingface==0.1.2
+sentence-transformers==3.2.1
+chromadb==0.5.15
 unstructured[local-inference]
 docx2txt
 pypdf
