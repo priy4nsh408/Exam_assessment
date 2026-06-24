@@ -464,7 +464,9 @@ def scout_agent(state: PipelineState) -> PipelineState:
         k = 3 + state["bloom_level"]
 
         persist_dir = str(Path(__file__).parent.parent / "data" / "db" / "chroma" / state["subject"])
+        print(f"🔎 Scout: about to load vectordb from {persist_dir}", file=sys.stderr, flush=True)
         vectordb = create_vector_db(chunks=None, persist_directory=persist_dir)
+        print(f"🔎 Scout: vectordb={'loaded' if vectordb is not None else 'None'}", file=sys.stderr, flush=True)
 
         unit_num_match = re.search(r'Unit[_ -]?(\d+)', state["unit"], re.IGNORECASE)
         unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
@@ -498,6 +500,7 @@ def scout_agent(state: PipelineState) -> PipelineState:
             )
             print(f"🔎 Scout: fallback (no unit) returned {len(context)} chars", file=sys.stderr, flush=True)
 
+        print(f"🔎 Scout: FINAL context length = {len(context)} chars", file=sys.stderr, flush=True)
         state["context_chunks"] = [context] if context else []
         if not context:
             state["errors"].append(
