@@ -135,10 +135,27 @@ export default function DataSource() {
             <FolderUp className="w-5 h-5 text-indigo-500" />
             <h3 className="text-sm font-semibold text-gray-900">Upload Subject Material</h3>
           </div>
-          <p className="text-xs text-gray-500">
-            Select a folder organized by unit. Expected structure: <code className="bg-gray-100 px-1 rounded">SubjectFolder/Unit-1/file.pdf</code>, <code className="bg-gray-100 px-1 rounded">SubjectFolder/Unit-2/file.pdf</code>, etc.
-            Files placed directly in the folder (without a unit subfolder) will have their unit extracted from the filename.
-          </p>
+          <div className="text-xs text-gray-500 space-y-2">
+            <p>Select a folder organized by unit. Each unit subfolder should contain the PDF(s) for that unit.</p>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-[11px] text-gray-600 leading-relaxed">
+              <p className="font-semibold text-gray-700 mb-1 font-sans text-xs">📁 Required Folder Structure:</p>
+              <p>SubjectFolder/</p>
+              <p className="pl-4">├── Unit-1/</p>
+              <p className="pl-8">│&nbsp;&nbsp; └── chapter1.pdf</p>
+              <p className="pl-4">├── Unit-2/</p>
+              <p className="pl-8">│&nbsp;&nbsp; └── chapter2.pdf</p>
+              <p className="pl-4">├── Unit-3/</p>
+              <p className="pl-8">│&nbsp;&nbsp; └── chapter3.pdf</p>
+              <p className="pl-4">├── Unit-4/</p>
+              <p className="pl-8">│&nbsp;&nbsp; └── chapter4.pdf</p>
+              <p className="pl-4">└── Unit-5/</p>
+              <p className="pl-8">&nbsp;&nbsp;&nbsp; └── chapter5.pdf</p>
+            </div>
+            <p className="text-gray-400">
+              Supported formats: <strong>.pdf</strong>, <strong>.docx</strong>, <strong>.pptx</strong>, <strong>.txt</strong>.
+              Files placed directly in the root folder (without a unit subfolder) will have their unit extracted from the filename (e.g. <code className="bg-gray-100 px-1 rounded">Unit-1.pdf</code>).
+            </p>
+          </div>
 
           <div className="flex items-end gap-3 flex-wrap">
             <div className="flex-1 min-w-[200px]">
