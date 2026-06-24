@@ -557,6 +557,7 @@ def evaluate_drawing(
         "ai_score": ai_score,
         "max_score": max_marks,
         "confidence": confidence,
+        "detection_mode": "heuristic",  # YOLOv8 stub until training data available
         "rubric": rubric,
         "expected_parts": exp_parts,
         "expected_dimensions": exp_dims,

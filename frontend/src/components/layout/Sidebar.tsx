@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, FileText, Brain,
   BarChart3, Users, CheckSquare, BookOpen, Cpu, Database,
-  Activity, ScrollText, FlaskConical
+  Activity, ScrollText, TestTube2
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -14,7 +14,7 @@ const navItems = [
   { label: 'Data Source',        icon: Database,        path: '/data-sources' },
   { divider: true, label: 'Evaluation' },
   { label: 'Evaluate Scripts',   icon: ScrollText,      path: '/eval/script' },
-  { label: 'Train Engine',       icon: FlaskConical,    path: '/eval/train' },
+  { label: 'Train Engine',       icon: TestTube2,    path: '/eval/train' },
   { label: 'Validation (κ)',     icon: Activity,        path: '/eval/validate' },
   { divider: true, label: 'Analytics' },
   { label: 'CO/PO Analytics',   icon: BarChart3,       path: '/analytics' },

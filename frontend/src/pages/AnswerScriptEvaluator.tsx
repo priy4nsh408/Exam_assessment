@@ -4,7 +4,7 @@ import {
   Upload, FileText, ChevronDown, ChevronRight,
   CheckCircle, AlertCircle, Brain, Calculator, PenTool,
   Loader2, BarChart3, Eye, AlertTriangle, Download,
-  Users, X, Plus,
+  Users, X,
 } from 'lucide-react'
 
 const SUBJECTS = [

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Header } from '../components/layout/Header'
 import {
   Upload, Trash2, Brain, Calculator, PenTool,
-  CheckCircle, AlertCircle, FlaskConical, FileText, Loader2,
+  CheckCircle, AlertCircle, TestTube2, FileText, Loader2,
 } from 'lucide-react'
 
 const SUBJECTS = [
@@ -99,7 +99,7 @@ export default function TrainingEngine() {
         {/* What this does */}
         <div className="card p-5 bg-indigo-50 border-indigo-100 space-y-2">
           <div className="flex items-center gap-2">
-            <FlaskConical className="w-5 h-5 text-indigo-600" />
+            <TestTube2 className="w-5 h-5 text-indigo-600" />
             <p className="text-sm font-semibold text-indigo-800">How training works</p>
           </div>
           <div className="grid grid-cols-3 gap-4 text-xs text-indigo-700">
@@ -208,7 +208,7 @@ export default function TrainingEngine() {
           {loading && <p className="text-sm text-gray-400 py-4 text-center">Loading…</p>}
           {!loading && refs.length === 0 && (
             <div className="text-center py-8">
-              <FlaskConical className="w-8 h-8 text-gray-200 mx-auto mb-2" />
+              <TestTube2 className="w-8 h-8 text-gray-200 mx-auto mb-2" />
               <p className="text-sm text-gray-400">No training references uploaded yet.</p>
               <p className="text-xs text-gray-300 mt-1">Upload reference answers above to improve evaluation accuracy.</p>
             </div>
