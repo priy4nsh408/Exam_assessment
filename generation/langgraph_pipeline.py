@@ -404,9 +404,11 @@ Each question must:
 - For numerical: include specific numerical values
 - For drawing: specify what exactly to draw
 
-Output ONLY a numbered list of questions. No preamble, no explanations.
-1. [Question 1]
-2. [Question 2]
+Output ONLY a numbered list of questions. No preamble, no explanations, no
+question labels or brackets - just the number, a period, and the question
+text itself.
+1. Explain how X relates to Y in this context.
+2. Calculate the value of Z given the following conditions...
 ..."""
 
     raw = llm_call(prompt, temperature=0.7)
@@ -417,6 +419,13 @@ Output ONLY a numbered list of questions. No preamble, no explanations.
             match = re.match(r"^\d+[\.\)]\s*(.+)", line)
             if match:
                 q = match.group(1).strip()
+                # Defensively strip a leading "[Question N]"/"[Q1]"-style
+                # label some LLMs echo despite the prompt no longer showing
+                # one as an example - this is noise, not a real unfilled
+                # template placeholder, and was previously causing
+                # correctness_validator_agent to wrongly reject otherwise-
+                # complete questions just for containing a leading "[".
+                q = re.sub(r"^\[\s*Q(?:uestion)?\.?\s*\d+\s*\]\s*", "", q, flags=re.IGNORECASE).strip()
                 if len(q) > 20:
                     questions.append(q)
 
@@ -487,11 +496,24 @@ def difficulty_validator_agent(state: PipelineState) -> PipelineState:
 
 def correctness_validator_agent(state: PipelineState) -> PipelineState:
     """Checks that question text doesn't contain contradictions or obvious errors."""
-    # Basic heuristic: remove questions with brackets indicating template gaps
+    # Heuristic: remove questions that still contain an unfilled template
+    # placeholder. Deliberately narrower than "any '[' character" - that
+    # used to also reject perfectly good questions that happened to start
+    # with an echoed "[Question N]" label (a generator_agent prompt-format
+    # issue, fixed separately) or that legitimately use brackets for units
+    # (e.g. "[kJ/kg]") or references. A real unfilled placeholder reads like
+    # "[topic]", "[insert value here]", "[X]" - a short, lowercase-ish
+    # bracketed token standing in for content, not a number/unit/label.
+    placeholder_pattern = re.compile(r"\[\s*(?:[a-zA-Z][a-zA-Z \-]{0,30})\s*\]")
     filtered = []
     reasons = list(state.get("drop_reasons", []))
     for q in state["validated_questions"]:
-        if "[" in q or "___" in q:
+        has_blank_run = "___" in q
+        placeholder_match = placeholder_pattern.search(q)
+        # Exclude bracketed content that's actually numeric/units (e.g.
+        # "[kJ/kg]", "[50mm]") - those aren't unfilled placeholders.
+        is_real_placeholder = placeholder_match and not re.search(r"\d", placeholder_match.group(0))
+        if has_blank_run or is_real_placeholder:
             reasons.append(
                 f'CorrectnessValidator dropped "{q[:60]}..." - still contains an unfilled '
                 f"template placeholder (\"[...]\" or \"___\")."
@@ -861,10 +883,14 @@ def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
     plus the shared subject/chapter/question_type for the whole batch.
 
     Internally groups specs that share the same (bloom_level, co) into a
-    single underlying generation run (since that's what the agent pipeline
-    retrieves context and writes questions for). Each spec's own `marks`
-    is passed straight into generation (pedagogy_tagger_agent honors it
-    directly) rather than overwritten afterward.
+    single underlying generation run - NOT also grouped by marks, since
+    marks doesn't affect what gets generated/retrieved, only how the
+    result is tagged afterward. Grouping by marks too would split one
+    Bloom/CO batch into several separate LLM generation runs whenever
+    marks differ row-to-row (e.g. 4 questions all at L3/CO1 but with
+    different marks each), multiplying LLM round-trips for no benefit.
+    Each spec's own `marks` is instead applied as a fast post-hoc override
+    after generation (no extra LLM call).
 
     Returns (questions, drop_reasons):
       - questions: one dict per spec that successfully generated, in the
@@ -877,18 +903,25 @@ def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
     """
     from collections import defaultdict
 
-    groups = defaultdict(list)  # (bloom_level, co, marks) -> [spec_index, ...]
+    groups = defaultdict(list)  # (bloom_level, co) -> [spec_index, ...]
     for idx, spec in enumerate(specs):
-        groups[(spec["bloom_level"], spec["co"], spec.get("marks"))].append(idx)
+        groups[(spec["bloom_level"], spec["co"])].append(idx)
 
     results_by_index: dict = {}
     drop_reasons_by_index: dict = {}
-    for (bloom_level, co, marks), indices in groups.items():
+    for (bloom_level, co), indices in groups.items():
         generated, reasons = run_pipeline_with_diagnostics(
             subject=subject, unit=unit, bloom_level=bloom_level,
-            question_type=question_type, co=co, count=len(indices), marks=marks,
+            question_type=question_type, co=co, count=len(indices),
         )
         for idx, q in zip(indices, generated):
+            requested_marks = specs[idx].get("marks")
+            if requested_marks and q.get("marks") != requested_marks:
+                q["marks"] = requested_marks
+                try:
+                    update_question_fields(q["id"], {"marks": requested_marks})
+                except Exception:
+                    pass
             results_by_index[idx] = q
         # Any indices in this group beyond len(generated) didn't get a
         # question - attribute the group's collected drop reasons to them
