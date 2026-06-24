@@ -454,28 +454,22 @@ def bloom_analyzer_agent(state: PipelineState) -> PipelineState:
 def scout_agent(state: PipelineState) -> PipelineState:
     """Retrieves relevant context from ChromaDB with adaptive k based on Bloom level."""
     import sys
-    print("🔎 SCOUT AGENT CALLED", file=sys.stderr, flush=True)
-    print(f"🔎 SCOUT state keys: subject={state.get('subject')}, unit={state.get('unit')}", file=sys.stderr, flush=True)
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from vector_store.retriever import retrieve_context, retrieve_pyq_context, retrieve_question_bank, _fallback_keyword_retrieve
+
+    k = 3 + state["bloom_level"]
+    persist_dir = str(Path(__file__).parent.parent / "data" / "db" / "chroma" / state["subject"])
+
+    unit_num_match = re.search(r'Unit[_ -]?(\d+)', state["unit"], re.IGNORECASE)
+    unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
+
+    print(f"🔎 Scout: subject={state['subject']!r}, unit={unit_filter!r}", file=sys.stderr, flush=True)
+
+    # 1. Try vector similarity search
+    context = ""
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent))
         from vector_store.chroma_client import create_vector_db
-        from vector_store.retriever import retrieve_context, retrieve_pyq_context, retrieve_question_bank, _fallback_keyword_retrieve
-
-        k = 3 + state["bloom_level"]
-
-        persist_dir = str(Path(__file__).parent.parent / "data" / "db" / "chroma" / state["subject"])
-        print(f"🔎 Scout: about to load vectordb from {persist_dir}", file=sys.stderr, flush=True)
         vectordb = create_vector_db(chunks=None, persist_directory=persist_dir)
-        print(f"🔎 Scout: vectordb={'loaded' if vectordb is not None else 'None'}", file=sys.stderr, flush=True)
-
-        unit_num_match = re.search(r'Unit[_ -]?(\d+)', state["unit"], re.IGNORECASE)
-        unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
-
-        # 1. Retrieve raw data context
-        print(f"🔎 Scout: subject={state['subject']!r}, unit_filter={unit_filter!r}, persist_dir={persist_dir}", file=sys.stderr, flush=True)
-        print(f"🔎 Scout: vectordb={'loaded' if vectordb is not None else 'None (using fallback)'}", file=sys.stderr, flush=True)
-
-        context = ""
         if vectordb is not None:
             context = retrieve_context(
                 vectordb,
@@ -487,71 +481,55 @@ def scout_agent(state: PipelineState) -> PipelineState:
                 persist_directory=persist_dir,
             )
             print(f"🔎 Scout: vector search returned {len(context)} chars", file=sys.stderr, flush=True)
-
-        if not context:
-            context = _fallback_keyword_retrieve(
-                persist_dir, subject=state["subject"], unit=unit_filter, query=state["unit"], k=k
-            )
-            print(f"🔎 Scout: fallback (with unit) returned {len(context)} chars", file=sys.stderr, flush=True)
-
-        if not context and unit_filter:
-            context = _fallback_keyword_retrieve(
-                persist_dir, subject=state["subject"], query=state["unit"], k=k
-            )
-            print(f"🔎 Scout: fallback (no unit) returned {len(context)} chars", file=sys.stderr, flush=True)
-
-        print(f"🔎 Scout: FINAL context length = {len(context)} chars", file=sys.stderr, flush=True)
-        state["context_chunks"] = [context] if context else []
-        if not context:
-            state["errors"].append(
-                f"Scout agent: no ChromaDB content found for subject={state['subject']!r}, "
-                f"unit filter={unit_filter!r} - check that this subject/unit was actually "
-                f"ingested (data/raw/{state['subject']}/...) and that the folder name matches exactly."
-            )
-
-        # 2. Retrieve PYQ / question bank context
-        try:
-            pyq_ctx = retrieve_pyq_context(
-                state["subject"], unit=unit_filter,
-                query=f"{state['unit']} {state['question_type']} exam questions",
-                k=5
-            )
-            state["pyq_context"] = pyq_ctx
-            if pyq_ctx:
-                print(f"📝 Retrieved PYQ context ({len(pyq_ctx)} chars) for {state['subject']}")
-        except Exception as e:
-            state["pyq_context"] = ""
-            print(f"⚠️ PYQ retrieval skipped: {e}")
-
-        # 3. Retrieve existing questions for dedup + style reference
-        try:
-            existing = retrieve_question_bank(
-                state["subject"], unit=unit_filter,
-                bloom_level=state["bloom_level"], limit=10
-            )
-            state["existing_questions"] = existing
-            if existing:
-                print(f"📚 Found {len(existing)} existing questions for reference")
-        except Exception as e:
-            state["existing_questions"] = []
-            print(f"⚠️ Question bank retrieval skipped: {e}")
-
     except Exception as e:
-        print(f"🔎 Scout: EXCEPTION caught: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        state["context_chunks"] = []
+        print(f"🔎 Scout: vector search failed ({type(e).__name__}: {e}), trying SQLite fallback", file=sys.stderr, flush=True)
+
+    # 2. SQLite fallback with unit filter
+    if not context:
+        context = _fallback_keyword_retrieve(
+            persist_dir, subject=state["subject"], unit=unit_filter, query=state["unit"], k=k
+        )
+        print(f"🔎 Scout: SQLite fallback (with unit) returned {len(context)} chars", file=sys.stderr, flush=True)
+
+    # 3. SQLite fallback without unit filter
+    if not context and unit_filter:
+        context = _fallback_keyword_retrieve(
+            persist_dir, subject=state["subject"], query=state["unit"], k=k
+        )
+        print(f"🔎 Scout: SQLite fallback (no unit) returned {len(context)} chars", file=sys.stderr, flush=True)
+
+    print(f"🔎 Scout: FINAL context = {len(context)} chars", file=sys.stderr, flush=True)
+    state["context_chunks"] = [context] if context else []
+    if not context:
+        state["errors"].append(
+            f"Scout agent: no content found for subject={state['subject']!r}, "
+            f"unit={unit_filter!r}."
+        )
+
+    # 4. PYQ context
+    try:
+        pyq_ctx = retrieve_pyq_context(
+            state["subject"], unit=unit_filter,
+            query=f"{state['unit']} {state['question_type']} exam questions",
+            k=5
+        )
+        state["pyq_context"] = pyq_ctx
+    except Exception:
         state["pyq_context"] = ""
+
+    # 5. Existing questions for dedup
+    try:
+        existing = retrieve_question_bank(
+            state["subject"], unit=unit_filter,
+            bloom_level=state["bloom_level"], limit=10
+        )
+        state["existing_questions"] = existing
+    except Exception:
         state["existing_questions"] = []
-        err_text = str(e)
-        if "huggingface.co" in err_text or "connect" in err_text.lower() or "HFValidationError" in type(e).__name__:
-            state["errors"].append(
-                f"Scout agent: the embedding model could not be loaded ({err_text}). "
-                f"This is almost always a network/connectivity problem reaching huggingface.co "
-                f"to download the model on first use (e.g. no internet access, a corporate "
-                f"proxy/firewall, or offline mode) rather than a problem with your ingested "
-                f"data - the retrieval/filter logic itself never even ran."
-            )
-        else:
-            state["errors"].append(f"Scout agent: {e}")
+
+    # Ensure keys exist
+    state.setdefault("pyq_context", "")
+    state.setdefault("existing_questions", [])
     return state
 
 def generator_agent(state: PipelineState) -> PipelineState:
