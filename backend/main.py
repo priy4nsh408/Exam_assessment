@@ -96,6 +96,54 @@ app.add_middleware(
 # ── SQLite override persistence ───────────────────────────────────────────────
 _OVERRIDE_DB = Path(__file__).parent.parent / "data" / "overrides.db"
 
+# ── SQLite eval results persistence ──────────────────────────────────────────
+_RESULTS_DB = Path(__file__).parent.parent / "data" / "eval_results.db"
+
+def _get_results_conn():
+    _RESULTS_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_RESULTS_DB))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS eval_results (
+            id              TEXT PRIMARY KEY,
+            student_name    TEXT,
+            student_usn     TEXT,
+            subject         TEXT,
+            total_score     REAL,
+            max_total       REAL,
+            percentage      REAL,
+            questions_evaluated INTEGER,
+            report_json     TEXT,
+            evaluated_at    TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+def _save_eval_result(report: dict) -> str:
+    result_id = uuid.uuid4().hex[:12]
+    conn = _get_results_conn()
+    conn.execute("""
+        INSERT INTO eval_results
+          (id, student_name, student_usn, subject, total_score, max_total,
+           percentage, questions_evaluated, report_json, evaluated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (
+        result_id,
+        report.get("student_name", ""),
+        report.get("student_usn", ""),
+        report.get("subject", ""),
+        report.get("total_score", 0),
+        report.get("max_total", 0),
+        report.get("percentage", 0),
+        report.get("questions_evaluated", 0),
+        json.dumps(report),
+        datetime.utcnow().isoformat() + "Z",
+    ))
+    conn.commit()
+    conn.close()
+    return result_id
+
 def _get_override_conn():
     _OVERRIDE_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_OVERRIDE_DB))
@@ -1462,6 +1510,9 @@ async def eval_answer_script(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    result_id = _save_eval_result(report)
+    report["result_id"] = result_id
+
     _log_activity_safe(
         action=f"Evaluated answer script: {report['questions_evaluated']} questions, "
                f"{report['total_score']}/{report['max_total']} ({report['percentage']}%)",
@@ -1469,6 +1520,38 @@ async def eval_answer_script(
         subject=resolved_subject,
     )
     return report
+
+
+@app.get("/api/eval/results")
+async def list_eval_results():
+    """List all saved evaluation results (summary only, no full report JSON)."""
+    conn = _get_results_conn()
+    rows = conn.execute(
+        "SELECT id, student_name, student_usn, subject, total_score, max_total, "
+        "percentage, questions_evaluated, evaluated_at FROM eval_results ORDER BY evaluated_at DESC"
+    ).fetchall()
+    conn.close()
+    return {"results": [dict(r) for r in rows]}
+
+
+@app.get("/api/eval/results/{result_id}")
+async def get_eval_result(result_id: str):
+    """Get full report for a specific evaluation."""
+    conn = _get_results_conn()
+    row = conn.execute("SELECT report_json FROM eval_results WHERE id=?", (result_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return json.loads(row["report_json"])
+
+
+@app.delete("/api/eval/results/{result_id}")
+async def delete_eval_result(result_id: str):
+    conn = _get_results_conn()
+    conn.execute("DELETE FROM eval_results WHERE id=?", (result_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": result_id}
 
 
 @app.post("/api/eval/script/batch")

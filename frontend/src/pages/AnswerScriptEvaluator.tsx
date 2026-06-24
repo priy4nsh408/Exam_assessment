@@ -49,6 +49,18 @@ interface ScriptReport {
   error?: string | null
 }
 
+interface EvalSummary {
+  id: string
+  student_name: string
+  student_usn: string
+  subject: string
+  total_score: number
+  max_total: number
+  percentage: number
+  questions_evaluated: number
+  evaluated_at: string
+}
+
 interface BatchResult {
   reports: ScriptReport[]
   total_students: number
@@ -302,7 +314,8 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
 function SingleReport({ report }: { report: ScriptReport }) {
   const pct = report.percentage
   const grade = pct >= 90 ? 'O' : pct >= 80 ? 'A+' : pct >= 70 ? 'A' : pct >= 60 ? 'B+' : pct >= 50 ? 'B' : pct >= 40 ? 'C' : 'F'
-  const bannerColor = pct >= 70 ? 'bg-emerald-50 border-emerald-200' : pct >= 40 ? 'bg-amber-50 border-amber-200' : 'bg-red-50 border-red-200'
+  const scoreColor = pct >= 70 ? 'text-emerald-700' : pct >= 40 ? 'text-amber-700' : 'text-red-600'
+  const cardColor  = pct >= 70 ? 'bg-emerald-50 border-emerald-200' : pct >= 40 ? 'bg-amber-50 border-amber-200' : 'bg-red-50 border-red-200'
 
   return (
     <div className="space-y-4">
@@ -310,32 +323,31 @@ function SingleReport({ report }: { report: ScriptReport }) {
         <div className="card p-3 bg-amber-50 border-amber-200 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
           <p className="text-xs text-amber-700">
-            Pages with low OCR confidence: {report.low_confidence_pages.join(', ')}.
-            Handwriting may be unclear — review OCR text per question and override if needed.
+            Low OCR confidence on page(s): {report.low_confidence_pages.join(', ')} — handwriting may be unclear. Review OCR text per question.
           </p>
         </div>
       )}
 
-      <div className={`card p-5 grid grid-cols-2 sm:grid-cols-4 gap-4 ${bannerColor}`}>
-        <div>
-          <p className="text-xs text-gray-500 mb-1">Total Score</p>
-          <p className={`text-3xl font-bold ${pct >= 70 ? 'text-emerald-700' : pct >= 40 ? 'text-amber-700' : 'text-red-600'}`}>
-            {report.total_score}<span className="text-base text-gray-400">/{report.max_total}</span>
-          </p>
+      {/* Score summary — clean and simple */}
+      <div className={`card p-5 ${cardColor}`}>
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <p className="text-xs text-gray-500 mb-1">Marks Scored</p>
+            <p className={`text-4xl font-bold ${scoreColor}`}>
+              {report.total_score}
+              <span className="text-xl text-gray-400 font-normal"> / {report.max_total}</span>
+            </p>
+          </div>
+          <div className="text-right">
+            <p className={`text-3xl font-bold ${scoreColor}`}>{report.percentage}%</p>
+            <p className="text-lg font-semibold text-indigo-600 mt-0.5">{grade}</p>
+          </div>
         </div>
-        <div>
-          <p className="text-xs text-gray-500 mb-1">Percentage</p>
-          <p className="text-2xl font-bold text-gray-800">{report.percentage}%</p>
-        </div>
-        <div>
-          <p className="text-xs text-gray-500 mb-1">Grade</p>
-          <p className="text-2xl font-bold text-indigo-600">{grade}</p>
-        </div>
-        <div className="space-y-0.5">
-          <p className="text-xs text-gray-500">Info</p>
-          <p className="text-xs text-gray-600">📄 {report.ocr_pages} page(s)</p>
-          <p className="text-xs text-gray-600">❓ {report.questions_evaluated} question(s)</p>
-          <p className="text-xs text-gray-600">🔍 OCR conf: {Math.round(report.avg_ocr_confidence * 100)}%</p>
+        <div className="flex gap-4 mt-3 text-xs text-gray-500 flex-wrap">
+          <span>{report.questions_evaluated} question(s) evaluated</span>
+          <span>·</span>
+          <span>OCR confidence: {Math.round(report.avg_ocr_confidence * 100)}%</span>
+          {report.subject && <><span>·</span><span>{report.subject}</span></>}
         </div>
       </div>
 
@@ -483,8 +495,17 @@ export default function AnswerScriptEvaluator() {
   const [error, setError] = useState('')
 
   const [deps, setDeps] = useState<DepStatus | null>(null)
+  const [history, setHistory] = useState<EvalSummary[]>([])
+  const [historyReport, setHistoryReport] = useState<ScriptReport | null>(null)
   const fileRef    = useRef<HTMLInputElement>(null)
   const batchRef   = useRef<HTMLInputElement>(null)
+
+  const loadHistory = () => {
+    fetch('/api/eval/results')
+      .then(r => r.json())
+      .then(d => setHistory(d.results || []))
+      .catch(() => {})
+  }
 
   useEffect(() => {
     fetch('/api/health/deps')
@@ -495,6 +516,7 @@ export default function AnswerScriptEvaluator() {
       .then(r => r.json())
       .then(d => setRefs(d.references || []))
       .catch(() => {})
+    loadHistory()
   }, [])
 
   const acceptFile = useCallback((f: File) => {
@@ -538,6 +560,7 @@ export default function AnswerScriptEvaluator() {
       const res = await fetch('/api/eval/script', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
       setReport(await res.json())
+      loadHistory()
     } catch (e: any) { setError(e.message || 'Evaluation failed') }
     finally { clearInterval(t); setLoading(false); setProgress('') }
   }
@@ -735,6 +758,70 @@ export default function AnswerScriptEvaluator() {
               {selectedReport.student_name} {selectedReport.student_usn && `· ${selectedReport.student_usn}`}
             </p>
             <SingleReport report={selectedReport} />
+          </div>
+        )}
+
+        {/* History of all evaluated scripts */}
+        {history.length > 0 && !historyReport && (
+          <div className="card p-5 space-y-3">
+            <p className="text-sm font-semibold text-gray-800">Past Evaluations</p>
+            <div className="overflow-hidden rounded-lg border border-gray-100">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="text-left px-4 py-2.5 font-medium text-gray-500">Student / File</th>
+                    <th className="text-left px-4 py-2.5 font-medium text-gray-500">Subject</th>
+                    <th className="text-right px-4 py-2.5 font-medium text-gray-500">Marks</th>
+                    <th className="text-right px-4 py-2.5 font-medium text-gray-500">%</th>
+                    <th className="text-center px-4 py-2.5 font-medium text-gray-500">Grade</th>
+                    <th className="text-right px-4 py-2.5 font-medium text-gray-500">Date</th>
+                    <th className="px-4 py-2.5"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {history.map(h => {
+                    const pct = h.percentage
+                    const g = pct >= 90 ? 'O' : pct >= 80 ? 'A+' : pct >= 70 ? 'A' : pct >= 60 ? 'B+' : pct >= 50 ? 'B' : pct >= 40 ? 'C' : 'F'
+                    return (
+                      <tr key={h.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-2.5 font-medium text-gray-800">{h.student_name || '(unnamed)'}</td>
+                        <td className="px-4 py-2.5 text-gray-500">{h.subject}</td>
+                        <td className="px-4 py-2.5 text-right font-semibold text-gray-700">{h.total_score}/{h.max_total}</td>
+                        <td className={`px-4 py-2.5 text-right font-bold ${pct >= 70 ? 'text-emerald-600' : pct >= 40 ? 'text-amber-600' : 'text-red-500'}`}>{pct}%</td>
+                        <td className="px-4 py-2.5 text-center font-bold text-indigo-600">{g}</td>
+                        <td className="px-4 py-2.5 text-right text-gray-400">{new Date(h.evaluated_at).toLocaleDateString()}</td>
+                        <td className="px-4 py-2.5">
+                          <button
+                            className="text-indigo-600 hover:underline"
+                            onClick={() =>
+                              fetch(`/api/eval/results/${h.id}`)
+                                .then(r => r.json())
+                                .then(d => setHistoryReport(d))
+                            }
+                          >
+                            View →
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* History drill-down */}
+        {historyReport && (
+          <div className="space-y-3">
+            <button
+              onClick={() => setHistoryReport(null)}
+              className="flex items-center gap-2 text-sm text-indigo-600 hover:underline"
+            >
+              ← Back to history
+            </button>
+            <p className="text-sm font-semibold text-gray-800">{historyReport.student_name}</p>
+            <SingleReport report={historyReport} />
           </div>
         )}
       </div>
