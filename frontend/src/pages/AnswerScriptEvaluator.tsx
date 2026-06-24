@@ -26,7 +26,7 @@ interface AnswerResult {
   low_confidence: boolean
   feedback: string
   page_start: number
-  is_stub?: boolean
+  requires_faculty_review?: boolean
   detail: Record<string, any>
 }
 
@@ -131,9 +131,9 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
               ⚠ Low OCR ({Math.round(ans.ocr_confidence * 100)}%)
             </span>
           )}
-          {ans.is_stub && (
-            <span className="badge bg-gray-100 text-gray-500 text-[10px] shrink-0">
-              Heuristic detection
+          {ans.requires_faculty_review && (
+            <span className="badge bg-violet-50 text-violet-600 text-[10px] shrink-0">
+              Faculty review needed
             </span>
           )}
           <span className="text-xs text-gray-400 truncate hidden sm:block">{ans.question}</span>
@@ -158,12 +158,12 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
               </span>
             </div>
           )}
-          {ans.is_stub && (
-            <div className="flex items-start gap-2 text-xs bg-gray-50 border border-gray-200 rounded p-2">
-              <AlertCircle className="w-3.5 h-3.5 text-gray-400 mt-0.5 shrink-0" />
-              <span className="text-gray-500">
-                Drawing detection uses a heuristic (quadrant-based) method — YOLOv8 model not yet trained.
-                Scores are indicative; faculty review recommended.
+          {ans.requires_faculty_review && (
+            <div className="flex items-start gap-2 text-xs bg-violet-50 border border-violet-200 rounded p-2">
+              <AlertCircle className="w-3.5 h-3.5 text-violet-500 mt-0.5 shrink-0" />
+              <span className="text-violet-700">
+                Drawing score is based on text labels/annotations found via OCR. Faculty should verify
+                actual line work, proportions, and drawing quality.
               </span>
             </div>
           )}
@@ -254,16 +254,39 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
                 </div>
               )}
               {ans.q_type === 'drawing' && (
-                <div>
-                  <p className="font-medium text-gray-600 mb-1">Detected elements:</p>
-                  <div className="flex flex-wrap gap-1">
-                    {(ans.detail?.detected_elements ?? []).length === 0
-                      ? <span className="text-gray-400">None detected</span>
-                      : (ans.detail?.detected_elements ?? []).map((el: string, i: number) => (
-                        <span key={i} className="badge bg-gray-100 text-gray-600">{el}</span>
-                      ))
-                    }
+                <div className="space-y-2">
+                  <div>
+                    <p className="font-medium text-gray-600 mb-1">Labels found in drawing (OCR):</p>
+                    <div className="flex flex-wrap gap-1">
+                      {(ans.detail?.matched_parts ?? []).length === 0 && (ans.detail?.matched_dimensions ?? []).length === 0
+                        ? <span className="text-gray-400">No expected labels detected via OCR</span>
+                        : <>
+                          {(ans.detail?.matched_parts ?? []).map((el: string, i: number) => (
+                            <span key={i} className="badge bg-emerald-50 text-emerald-700">✓ {el}</span>
+                          ))}
+                          {(ans.detail?.matched_dimensions ?? []).map((el: string, i: number) => (
+                            <span key={`d${i}`} className="badge bg-blue-50 text-blue-700">✓ {el}</span>
+                          ))}
+                        </>
+                      }
+                    </div>
                   </div>
+                  {((ans.detail?.missing_parts ?? []).length > 0 || (ans.detail?.missing_dimensions ?? []).length > 0) && (
+                    <div>
+                      <p className="font-medium text-red-600 mb-1">Missing labels/dimensions:</p>
+                      <div className="flex flex-wrap gap-1">
+                        {(ans.detail?.missing_parts ?? []).map((el: string, i: number) => (
+                          <span key={i} className="badge bg-red-50 text-red-600">✗ {el}</span>
+                        ))}
+                        {(ans.detail?.missing_dimensions ?? []).map((el: string, i: number) => (
+                          <span key={`d${i}`} className="badge bg-red-50 text-red-600">✗ {el}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-gray-400 italic">
+                    Line quality, proportions, and drawing correctness require faculty visual review.
+                  </p>
                 </div>
               )}
             </div>
@@ -324,8 +347,8 @@ function SingleReport({ report }: { report: ScriptReport }) {
             </span>
           ) : null
         })}
-        {report.answers.some(a => a.is_stub) && (
-          <span className="badge bg-gray-100 text-gray-500">⚠ Drawing: heuristic detection</span>
+        {report.answers.some(a => a.q_type === 'drawing') && (
+          <span className="badge bg-violet-50 text-violet-600">Drawing: faculty review needed</span>
         )}
       </div>
 

@@ -152,16 +152,22 @@ def _evaluate_segment(seg: Dict, q_meta: Optional[Dict], subject: str, max_marks
                 expected_dimensions=None,
             )
             result.update({
-                "ai_score":   ev["ai_score"],
-                "max_score":  ev["max_score"],
-                "confidence": ev.get("confidence", 0.6),
-                "feedback":   ev.get("feedback", ""),
-                "detection_mode": ev.get("detection_mode", "heuristic"),
-                "is_stub":    ev.get("detection_mode", "heuristic") == "heuristic",
+                "ai_score":              ev["ai_score"],
+                "max_score":             ev["max_score"],
+                "confidence":            ev.get("confidence", 0.5),
+                "feedback":              ev.get("feedback", ""),
+                "detection_mode":        ev.get("detection_mode", "ocr_text"),
+                "requires_faculty_review": ev.get("requires_faculty_review", True),
+                "is_stub":               False,
                 "detail": {
                     "detected_elements": ev.get("detected_elements", []),
-                    "violations":        ev.get("violations", []),
-                    "rubric":            ev.get("rubric", []),
+                    "matched_parts":     ev.get("matched_parts", []),
+                    "missing_parts":     ev.get("missing_parts", []),
+                    "matched_dimensions":ev.get("matched_dimensions", []),
+                    "missing_dimensions":ev.get("missing_dimensions", []),
+                    "deductions":        ev.get("deductions", []),
+                    "ocr_text":          ev.get("ocr_text", ""),
+                    "violations":        [],
                 },
             })
 
