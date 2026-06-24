@@ -338,7 +338,7 @@ export default function Evaluator() {
                     </span>
                     <span className={`flex items-center gap-1 ${result.final_answer_correct ? 'text-emerald-600' : 'text-red-600'}`}>
                       {result.final_answer_correct ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                      {result.final_answer_correct ? 'Final answer correct' : 'Final answer wrong (-1)'}
+                      {result.final_answer_correct ? 'Final answer correct' : 'Final answer wrong (-2)'}
                     </span>
                   </>
                 )}

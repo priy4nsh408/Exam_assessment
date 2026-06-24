@@ -746,8 +746,8 @@ def _evaluate_numerical(question: str, student_solution: str, reference_answer: 
         deductions += 1.0
         deduction_reasons.append("Formula/equation not mentioned (-1)")
     if not answer_ok:
-        deductions += 1.0
-        deduction_reasons.append("Final answer does not match expected value (-1)")
+        deductions += 2.0
+        deduction_reasons.append("Final answer does not match expected value (-2)")
 
     ai_score = max(0.0, min(round(base_score - deductions, 1), max_marks))
 
@@ -759,7 +759,7 @@ def _evaluate_numerical(question: str, student_solution: str, reference_answer: 
     if not has_formula:
         lines.append("Deducted 1 mark: expected formula not written.")
     if not answer_ok:
-        lines.append("Deducted 1 mark: final answer incorrect.")
+        lines.append("Deducted 2 marks: final answer incorrect.")
     if has_formula and answer_ok:
         lines.append("No deductions: formula present and final answer correct.")
     lines.append(f"Total: {ai_score}/{max_marks}.")
