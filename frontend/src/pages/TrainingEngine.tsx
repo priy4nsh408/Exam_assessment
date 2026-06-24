@@ -25,6 +25,7 @@ interface RefEntry {
   filename: string
   description: string
   file_path: string
+  marks_per_q: number
   created_at: string
 }
 
@@ -40,6 +41,7 @@ export default function TrainingEngine() {
   const [subject, setSubject] = useState('Mechanical Engineering')
   const [qType, setQType] = useState('theory')
   const [description, setDescription] = useState('')
+  const [marksPerQ, setMarksPerQ] = useState(10)
   const [filterSubject, setFilterSubject] = useState('')
   const [filterType, setFilterType] = useState('')
 
@@ -67,6 +69,7 @@ export default function TrainingEngine() {
     fd.append('subject', subject)
     fd.append('q_type', qType)
     fd.append('description', description)
+    fd.append('marks_per_q', String(marksPerQ))
     try {
       const res = await fetch('/api/training/upload', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
@@ -160,13 +163,23 @@ export default function TrainingEngine() {
             </div>
           </div>
 
-          <div>
-            <label className="text-xs font-medium text-gray-600 mb-1 block">Description (optional)</label>
-            <input
-              type="text" className="input-field w-full text-sm"
-              placeholder="e.g. 'Ideal answer for Thermodynamics CO2 Q3 — Carnot cycle'"
-              value={description} onChange={e => setDescription(e.target.value)}
-            />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Marks per question</label>
+              <input
+                type="number" min={1} max={100} className="input-field w-full text-sm"
+                value={marksPerQ} onChange={e => setMarksPerQ(Number(e.target.value))}
+              />
+              <p className="text-[10px] text-gray-400 mt-1">Used automatically when this scheme is selected during evaluation</p>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Description (optional)</label>
+              <input
+                type="text" className="input-field w-full text-sm"
+                placeholder="e.g. Thermodynamics Unit 2 — VTU Dec 2023"
+                value={description} onChange={e => setDescription(e.target.value)}
+              />
+            </div>
           </div>
 
           {error && (
@@ -226,7 +239,7 @@ export default function TrainingEngine() {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-gray-800 truncate">{ref.filename}</p>
-                      <p className="text-xs text-gray-400">{ref.subject} · {ref.q_type}{ref.description ? ` · ${ref.description}` : ''}</p>
+                      <p className="text-xs text-gray-400">{ref.subject} · {ref.q_type} · {ref.marks_per_q ?? 10} marks/q{ref.description ? ` · ${ref.description}` : ''}</p>
                       <p className="text-[10px] text-gray-300">{new Date(ref.created_at).toLocaleString()}</p>
                     </div>
                   </div>

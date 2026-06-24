@@ -155,15 +155,21 @@ def _get_training_conn():
     conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE IF NOT EXISTS training_refs (
-            id          TEXT PRIMARY KEY,
-            subject     TEXT NOT NULL,
-            q_type      TEXT NOT NULL,
-            filename    TEXT NOT NULL,
-            description TEXT,
-            file_path   TEXT NOT NULL,
-            created_at  TEXT NOT NULL
+            id              TEXT PRIMARY KEY,
+            subject         TEXT NOT NULL,
+            q_type          TEXT NOT NULL,
+            filename        TEXT NOT NULL,
+            description     TEXT,
+            file_path       TEXT NOT NULL,
+            marks_per_q     REAL DEFAULT 10,
+            created_at      TEXT NOT NULL
         )
     """)
+    # migrate: add marks_per_q if missing (existing DB)
+    try:
+        conn.execute("ALTER TABLE training_refs ADD COLUMN marks_per_q REAL DEFAULT 10")
+    except Exception:
+        pass
     conn.commit()
     return conn
 
@@ -1373,9 +1379,10 @@ async def eval_validate_kappa():
 @app.post("/api/eval/script")
 async def eval_answer_script(
     file: UploadFile = File(...),
-    subject: str = Form("Mechanical Engineering"),
-    max_marks_per_q: int = Form(10),
-    exam_questions_json: str = Form(""),  # JSON array of question metadata (optional)
+    reference_id: str = Form(""),          # preferred: ID from training_refs
+    subject: str = Form(""),               # fallback if no reference_id
+    max_marks_per_q: int = Form(0),        # fallback if no reference_id (0 = use ref default)
+    exam_questions_json: str = Form(""),   # JSON array of question metadata (optional)
 ):
     """
     Full answer-script evaluation pipeline.
@@ -1406,6 +1413,21 @@ async def eval_answer_script(
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
+    # Resolve subject + marks from reference scheme if provided
+    resolved_subject = subject or "General"
+    resolved_marks   = max_marks_per_q if max_marks_per_q > 0 else 10
+
+    if reference_id.strip():
+        conn = _get_training_conn()
+        ref_row = conn.execute(
+            "SELECT subject, marks_per_q FROM training_refs WHERE id=?", (reference_id.strip(),)
+        ).fetchone()
+        conn.close()
+        if ref_row:
+            resolved_subject = ref_row["subject"]
+            if ref_row["marks_per_q"] and ref_row["marks_per_q"] > 0:
+                resolved_marks = int(ref_row["marks_per_q"])
+
     exam_questions = None
     if exam_questions_json.strip():
         try:
@@ -1416,8 +1438,8 @@ async def eval_answer_script(
     try:
         report = evaluate_answer_script(
             file_path=save_path,
-            subject=subject,
-            max_marks_per_q=max_marks_per_q,
+            subject=resolved_subject,
+            max_marks_per_q=resolved_marks,
             exam_questions=exam_questions,
             student_name=file.filename or "",
         )
@@ -1428,7 +1450,7 @@ async def eval_answer_script(
         action=f"Evaluated answer script: {report['questions_evaluated']} questions, "
                f"{report['total_score']}/{report['max_total']} ({report['percentage']}%)",
         activity_type="grade",
-        subject=subject,
+        subject=resolved_subject,
     )
     return report
 
@@ -1436,11 +1458,12 @@ async def eval_answer_script(
 @app.post("/api/eval/script/batch")
 async def eval_answer_script_batch(
     files: List[UploadFile] = File(...),
-    subject: str = Form("Mechanical Engineering"),
-    max_marks_per_q: int = Form(10),
+    reference_id: str = Form(""),
+    subject: str = Form(""),
+    max_marks_per_q: int = Form(0),
     exam_questions_json: str = Form(""),
-    student_names_json: str = Form(""),   # JSON array of names matching file order
-    student_usns_json: str = Form(""),    # JSON array of USNs matching file order
+    student_names_json: str = Form(""),
+    student_usns_json: str = Form(""),
 ):
     """
     Batch evaluation: upload multiple answer PDFs at once (or a ZIP).
@@ -1451,6 +1474,21 @@ async def eval_answer_script_batch(
 
     upload_dir = Path(__file__).parent.parent / "data" / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve subject + marks from reference scheme
+    resolved_subject = subject or "General"
+    resolved_marks   = max_marks_per_q if max_marks_per_q > 0 else 10
+
+    if reference_id.strip():
+        conn = _get_training_conn()
+        ref_row = conn.execute(
+            "SELECT subject, marks_per_q FROM training_refs WHERE id=?", (reference_id.strip(),)
+        ).fetchone()
+        conn.close()
+        if ref_row:
+            resolved_subject = ref_row["subject"]
+            if ref_row["marks_per_q"] and ref_row["marks_per_q"] > 0:
+                resolved_marks = int(ref_row["marks_per_q"])
 
     exam_questions = None
     if exam_questions_json.strip():
@@ -1503,8 +1541,8 @@ async def eval_answer_script_batch(
     try:
         batch_result = evaluate_multiple_scripts(
             file_entries=file_entries,
-            subject=subject,
-            max_marks_per_q=max_marks_per_q,
+            subject=resolved_subject,
+            max_marks_per_q=resolved_marks,
             exam_questions=exam_questions,
         )
     except Exception as e:
@@ -1515,7 +1553,7 @@ async def eval_answer_script_batch(
                f"class avg {batch_result['class_avg']}%, "
                f"{batch_result['pass_count']} pass / {batch_result['fail_count']} fail",
         activity_type="grade",
-        subject=subject,
+        subject=resolved_subject,
     )
     return batch_result
 
@@ -1550,8 +1588,9 @@ async def health_deps():
 async def upload_training_reference(
     file: UploadFile = File(...),
     subject: str = Form(...),
-    q_type: str = Form("theory"),   # theory | numerical | drawing
+    q_type: str = Form("theory"),
     description: str = Form(""),
+    marks_per_q: float = Form(10),
 ):
     """
     Upload a reference answer PDF or image to improve evaluator accuracy.
@@ -1570,10 +1609,10 @@ async def upload_training_reference(
 
     conn = _get_training_conn()
     conn.execute("""
-        INSERT INTO training_refs (id, subject, q_type, filename, description, file_path, created_at)
-        VALUES (?,?,?,?,?,?,?)
+        INSERT INTO training_refs (id, subject, q_type, filename, description, file_path, marks_per_q, created_at)
+        VALUES (?,?,?,?,?,?,?,?)
     """, (ref_id, subject, q_type, file.filename or "", description, save_path,
-          datetime.utcnow().isoformat() + "Z"))
+          marks_per_q, datetime.utcnow().isoformat() + "Z"))
     conn.commit()
     conn.close()
 

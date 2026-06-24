@@ -7,12 +7,14 @@ import {
   Users, X,
 } from 'lucide-react'
 
-const SUBJECTS = [
-  'Thermodynamics', 'Strength of Materials', 'Fluid Mechanics',
-  'Engineering Drawing', 'Basic Design & Theory', 'Propulsion',
-  'Structural Mechanics', 'Machine Design', 'Manufacturing Technology',
-  'Mechanical Engineering',
-]
+interface RefEntry {
+  id: string
+  subject: string
+  q_type: string
+  filename: string
+  description: string
+  marks_per_q: number
+}
 
 interface AnswerResult {
   q_number: number
@@ -463,8 +465,8 @@ type Mode = 'single' | 'batch'
 
 export default function AnswerScriptEvaluator() {
   const [mode, setMode] = useState<Mode>('single')
-  const [subject, setSubject] = useState('Mechanical Engineering')
-  const [maxMarks, setMaxMarks] = useState(10)
+  const [referenceId, setReferenceId] = useState('')
+  const [refs, setRefs] = useState<RefEntry[]>([])
 
   // Single mode
   const [file, setFile] = useState<File | null>(null)
@@ -488,6 +490,10 @@ export default function AnswerScriptEvaluator() {
     fetch('/api/health/deps')
       .then(r => r.json())
       .then(d => setDeps(d.ocr_pipeline))
+      .catch(() => {})
+    fetch('/api/training/references')
+      .then(r => r.json())
+      .then(d => setRefs(d.references || []))
       .catch(() => {})
   }, [])
 
@@ -528,8 +534,7 @@ export default function AnswerScriptEvaluator() {
     try {
       const fd = new FormData()
       fd.append('file', file)
-      fd.append('subject', subject)
-      fd.append('max_marks_per_q', String(maxMarks))
+      if (referenceId) fd.append('reference_id', referenceId)
       const res = await fetch('/api/eval/script', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
       setReport(await res.json())
@@ -544,8 +549,7 @@ export default function AnswerScriptEvaluator() {
     try {
       const fd = new FormData()
       batchFiles.forEach(f => fd.append('files', f))
-      fd.append('subject', subject)
-      fd.append('max_marks_per_q', String(maxMarks))
+      if (referenceId) fd.append('reference_id', referenceId)
       const res = await fetch('/api/eval/script/batch', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
       setBatchResult(await res.json())
@@ -636,27 +640,52 @@ export default function AnswerScriptEvaluator() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs font-medium text-gray-600 mb-1 block">Subject</label>
-              <select className="input-field w-full text-sm" value={subject} onChange={e => setSubject(e.target.value)}>
-                {SUBJECTS.map(s => <option key={s}>{s}</option>)}
+          <div>
+            <label className="text-xs font-medium text-gray-600 mb-1 block">Reference Answer Scheme</label>
+            {refs.length === 0 ? (
+              <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                <p className="text-xs text-amber-700">
+                  No reference schemes uploaded yet.{' '}
+                  <a href="/eval/train" className="underline font-medium">Upload one in Train Engine</a>{' '}
+                  to provide subject and marks automatically.
+                </p>
+              </div>
+            ) : (
+              <select
+                className="input-field w-full text-sm"
+                value={referenceId}
+                onChange={e => setReferenceId(e.target.value)}
+              >
+                <option value="">— Select reference scheme (optional) —</option>
+                {refs.map(r => (
+                  <option key={r.id} value={r.id}>
+                    {r.subject} · {r.marks_per_q ?? 10} marks/q{r.description ? ` · ${r.description}` : ''}
+                  </option>
+                ))}
               </select>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-gray-600 mb-1 block">Marks per question</label>
-              <input type="number" min={1} max={100} className="input-field w-full text-sm" value={maxMarks} onChange={e => setMaxMarks(Number(e.target.value))} />
-            </div>
+            )}
+            {referenceId && (() => {
+              const ref = refs.find(r => r.id === referenceId)
+              return ref ? (
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Subject: <b>{ref.subject}</b> · Marks per question: <b>{ref.marks_per_q ?? 10}</b>
+                </p>
+              ) : null
+            })()}
+            {!referenceId && refs.length > 0 && (
+              <p className="text-[10px] text-gray-400 mt-1">Without a reference, subject defaults to "General" and marks default to 10 per question.</p>
+            )}
           </div>
 
           <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500 space-y-1">
-            <p className="font-medium text-gray-600">What the engines do:</p>
+            <p className="font-medium text-gray-600">How evaluation works:</p>
             <div className="flex flex-wrap gap-x-6 gap-y-1">
-              <span className="flex items-center gap-1"><Brain className="w-3 h-3 text-indigo-500" /> Theory — keyword + semantic scoring</span>
+              <span className="flex items-center gap-1"><Brain className="w-3 h-3 text-indigo-500" /> Theory — keyword + semantic similarity scoring</span>
               <span className="flex items-center gap-1"><Calculator className="w-3 h-3 text-amber-500" /> Numerical — step-level grading + error detection</span>
-              <span className="flex items-center gap-1"><PenTool className="w-3 h-3 text-emerald-500" /> Drawing — IS/BIS compliance + element detection</span>
+              <span className="flex items-center gap-1"><PenTool className="w-3 h-3 text-emerald-500" /> Drawing — OCR label matching + faculty review flag</span>
             </div>
-            <p className="text-gray-400 mt-1">Question type is auto-detected from keywords. Add "Q1." / "1." markers in the script for best segmentation.</p>
+            <p className="text-gray-400 mt-1">Question type is auto-detected from the OCR text. Add "Q1." / "1." markers in the script for best segmentation.</p>
           </div>
 
           <button
