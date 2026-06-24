@@ -12,3 +12,7 @@ ollama==0.3.3
 python-dotenv==1.0.1
 numpy>=1.26,<2.0
 opencv-python-headless==4.10.0.84
+# Answer-script OCR pipeline
+easyocr>=1.7.1
+pdf2image>=1.17.0
+Pillow>=10.0.0

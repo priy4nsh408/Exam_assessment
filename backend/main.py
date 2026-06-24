@@ -1274,6 +1274,68 @@ async def eval_validate_kappa():
     }
 
 
+@app.post("/api/eval/script")
+async def eval_answer_script(
+    file: UploadFile = File(...),
+    subject: str = Form("Mechanical Engineering"),
+    max_marks_per_q: int = Form(10),
+    exam_questions_json: str = Form(""),  # JSON array of question metadata (optional)
+):
+    """
+    Full answer-script evaluation pipeline.
+
+    Upload a handwritten answer sheet (PDF or image). The server:
+    1. Converts PDF pages to images
+    2. Runs OCR (EasyOCR) to extract handwritten text
+    3. Segments answers by question markers (Q1, 1., Answer 1, …)
+    4. Classifies each answer as theory / numerical / drawing
+    5. Dispatches to the appropriate evaluator
+    6. Returns a unified grade report
+
+    exam_questions_json (optional): JSON array with per-question hints:
+      [{q_number, question, type, reference_answer, max_marks, ...}, ...]
+    """
+    import json as _json
+
+    try:
+        from evaluation.script_pipeline import evaluate_answer_script
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Script pipeline not available: {e}")
+
+    upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    suffix = Path(file.filename or "upload.pdf").suffix or ".pdf"
+    save_path = str(upload_dir / f"script_{uuid.uuid4().hex}{suffix}")
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    exam_questions = None
+    if exam_questions_json.strip():
+        try:
+            exam_questions = _json.loads(exam_questions_json)
+        except Exception:
+            pass
+
+    try:
+        report = evaluate_answer_script(
+            file_path=save_path,
+            subject=subject,
+            max_marks_per_q=max_marks_per_q,
+            exam_questions=exam_questions,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    _log_activity_safe(
+        action=f"Evaluated answer script: {report['questions_evaluated']} questions, "
+               f"{report['total_score']}/{report['max_total']} ({report['percentage']}%)",
+        activity_type="grade",
+        subject=subject,
+    )
+    return report
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

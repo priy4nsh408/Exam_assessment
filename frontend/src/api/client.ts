@@ -75,4 +75,11 @@ export const api = {
 
   // Validation metrics
   getValidationMetrics: () => request<any>('/eval/validate/kappa'),
+
+  // Answer-script pipeline (multipart — use FormData, bypasses JSON wrapper)
+  evalScript: (formData: FormData) =>
+    fetch(`${BASE}/eval/script`, { method: 'POST', body: formData }).then(r => {
+      if (!r.ok) return r.json().then((e: any) => Promise.reject(new Error(e.detail || r.statusText)))
+      return r.json()
+    }),
 }
