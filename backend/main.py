@@ -162,14 +162,22 @@ def _get_training_conn():
             description     TEXT,
             file_path       TEXT NOT NULL,
             marks_per_q     REAL DEFAULT 10,
+            questions_json  TEXT DEFAULT '[]',
+            parse_warnings  TEXT DEFAULT '[]',
             created_at      TEXT NOT NULL
         )
     """)
-    # migrate: add marks_per_q if missing (existing DB)
-    try:
-        conn.execute("ALTER TABLE training_refs ADD COLUMN marks_per_q REAL DEFAULT 10")
-    except Exception:
-        pass
+    # migrate existing DBs
+    for col, default in [
+        ("marks_per_q",    "10"),
+        ("questions_json", "'[]'"),
+        ("parse_warnings", "'[]'"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE training_refs ADD COLUMN {col} REAL DEFAULT {default}" if col == "marks_per_q"
+                         else f"ALTER TABLE training_refs ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
     conn.commit()
     return conn
 
@@ -1413,22 +1421,30 @@ async def eval_answer_script(
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # Resolve subject + marks from reference scheme if provided
+    # Resolve subject + marks + exam_questions from reference scheme
     resolved_subject = subject or "General"
     resolved_marks   = max_marks_per_q if max_marks_per_q > 0 else 10
+    exam_questions   = None
 
     if reference_id.strip():
         conn = _get_training_conn()
         ref_row = conn.execute(
-            "SELECT subject, marks_per_q FROM training_refs WHERE id=?", (reference_id.strip(),)
+            "SELECT subject, marks_per_q, questions_json FROM training_refs WHERE id=?",
+            (reference_id.strip(),)
         ).fetchone()
         conn.close()
         if ref_row:
-            resolved_subject = ref_row["subject"]
+            resolved_subject = ref_row["subject"] or resolved_subject
             if ref_row["marks_per_q"] and ref_row["marks_per_q"] > 0:
                 resolved_marks = int(ref_row["marks_per_q"])
+            try:
+                parsed_qs = _json.loads(ref_row["questions_json"] or "[]")
+                if parsed_qs:
+                    exam_questions = parsed_qs
+            except Exception:
+                pass
 
-    exam_questions = None
+    # exam_questions_json from request overrides scheme (allows manual override)
     if exam_questions_json.strip():
         try:
             exam_questions = _json.loads(exam_questions_json)
@@ -1475,22 +1491,29 @@ async def eval_answer_script_batch(
     upload_dir = Path(__file__).parent.parent / "data" / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve subject + marks from reference scheme
+    # Resolve subject + marks + questions from reference scheme
     resolved_subject = subject or "General"
     resolved_marks   = max_marks_per_q if max_marks_per_q > 0 else 10
+    exam_questions   = None
 
     if reference_id.strip():
         conn = _get_training_conn()
         ref_row = conn.execute(
-            "SELECT subject, marks_per_q FROM training_refs WHERE id=?", (reference_id.strip(),)
+            "SELECT subject, marks_per_q, questions_json FROM training_refs WHERE id=?",
+            (reference_id.strip(),)
         ).fetchone()
         conn.close()
         if ref_row:
-            resolved_subject = ref_row["subject"]
+            resolved_subject = ref_row["subject"] or resolved_subject
             if ref_row["marks_per_q"] and ref_row["marks_per_q"] > 0:
                 resolved_marks = int(ref_row["marks_per_q"])
+            try:
+                parsed_qs = _json.loads(ref_row["questions_json"] or "[]")
+                if parsed_qs:
+                    exam_questions = parsed_qs
+            except Exception:
+                pass
 
-    exam_questions = None
     if exam_questions_json.strip():
         try:
             exam_questions = _json.loads(exam_questions_json)
@@ -1587,46 +1610,83 @@ async def health_deps():
 @app.post("/api/training/upload")
 async def upload_training_reference(
     file: UploadFile = File(...),
-    subject: str = Form(...),
-    q_type: str = Form("theory"),
+    subject: str = Form(""),          # optional — detected from scheme if blank
     description: str = Form(""),
-    marks_per_q: float = Form(10),
+    default_marks: float = Form(10),  # fallback if scheme doesn't specify marks
 ):
     """
-    Upload a reference answer PDF or image to improve evaluator accuracy.
-    The file is stored in data/training_refs/<subject>/ and its path is
-    registered in training_meta.db so the evaluators can use it for
-    keyword/rubric extraction.
+    Upload an answer scheme PDF/image.
+    The server OCRs the file, extracts subject + questions + expected answers + marks,
+    and stores the structured data so student scripts can be evaluated against it.
     """
-    subj_dir = _TRAINING_DIR / subject.replace(" ", "_")
+    # Save file
+    subj_dir = _TRAINING_DIR / "schemes"
     subj_dir.mkdir(parents=True, exist_ok=True)
-
-    suffix = Path(file.filename or "ref.pdf").suffix or ".pdf"
-    ref_id  = uuid.uuid4().hex[:8]
-    save_path = str(subj_dir / f"{q_type}_{ref_id}{suffix}")
+    suffix   = Path(file.filename or "scheme.pdf").suffix or ".pdf"
+    ref_id   = uuid.uuid4().hex[:8]
+    save_path = str(subj_dir / f"scheme_{ref_id}{suffix}")
     with open(save_path, "wb") as fp:
         shutil.copyfileobj(file.file, fp)
 
+    # Parse the answer scheme
+    parsed_subject   = subject.strip()
+    questions_list   = []
+    parse_warnings   = []
+    marks_per_q      = default_marks
+
+    try:
+        from evaluation.scheme_parser import parse_answer_scheme
+        result = parse_answer_scheme(
+            file_path=save_path,
+            subject_hint=parsed_subject,
+            default_marks=int(default_marks),
+        )
+        parsed_subject  = result["subject"]
+        questions_list  = result["questions"]
+        parse_warnings  = result["parse_warnings"]
+        # Use the most common mark value from parsed questions if available
+        if questions_list:
+            mark_vals = [q["max_marks"] for q in questions_list if q.get("max_marks")]
+            if mark_vals:
+                marks_per_q = max(set(mark_vals), key=mark_vals.count)
+    except Exception as e:
+        parse_warnings.append(f"Parsing failed: {e}. File saved but no questions extracted.")
+
+    final_subject = parsed_subject or subject or "Unknown"
+
     conn = _get_training_conn()
     conn.execute("""
-        INSERT INTO training_refs (id, subject, q_type, filename, description, file_path, marks_per_q, created_at)
-        VALUES (?,?,?,?,?,?,?,?)
-    """, (ref_id, subject, q_type, file.filename or "", description, save_path,
-          marks_per_q, datetime.utcnow().isoformat() + "Z"))
+        INSERT INTO training_refs
+          (id, subject, q_type, filename, description, file_path, marks_per_q, questions_json, parse_warnings, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (
+        ref_id, final_subject, "scheme",
+        file.filename or "", description,
+        save_path, marks_per_q,
+        json.dumps(questions_list),
+        json.dumps(parse_warnings),
+        datetime.utcnow().isoformat() + "Z",
+    ))
     conn.commit()
     conn.close()
 
     _log_activity_safe(
-        action=f"Training reference uploaded: {file.filename} ({q_type}, {subject})",
-        activity_type="train", subject=subject,
+        action=f"Answer scheme uploaded: {file.filename} ({final_subject}, {len(questions_list)} questions parsed)",
+        activity_type="train", subject=final_subject,
     )
     return {
-        "id": ref_id,
-        "subject": subject,
-        "q_type": q_type,
-        "filename": file.filename,
-        "file_path": save_path,
-        "message": "Reference answer uploaded and registered for evaluator training.",
+        "id":               ref_id,
+        "subject":          final_subject,
+        "filename":         file.filename,
+        "questions_parsed": len(questions_list),
+        "marks_per_q":      marks_per_q,
+        "parse_warnings":   parse_warnings,
+        "questions":        questions_list,
+        "message": (
+            f"Scheme parsed: {len(questions_list)} questions extracted from '{file.filename}'."
+            if questions_list else
+            "File saved but no questions could be extracted. Check warnings."
+        ),
     }
 
 
