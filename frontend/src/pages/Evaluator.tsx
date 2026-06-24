@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ClipboardCheck, Upload, Loader2, AlertTriangle, CheckCircle2, XCircle, Camera, FileText, Calculator, PenTool } from 'lucide-react'
+import { ClipboardCheck, Upload, Loader2, AlertTriangle, CheckCircle2, XCircle, Camera, FileText, Calculator, PenTool, Plus, Trash2 } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 
 const TYPE_OPTIONS = [
@@ -8,6 +8,13 @@ const TYPE_OPTIONS = [
   { value: 'numerical', label: 'Numerical', icon: Calculator, desc: 'Step-level grading with formula check' },
   { value: 'drawing', label: 'Drawing', icon: PenTool, desc: 'VLM interpretation + IS/BIS compliance' },
 ]
+
+interface StudentScript {
+  id: string
+  file: File
+  preview: string
+  studentName: string
+}
 
 export default function Evaluator() {
   const [subjects, setSubjects] = useState<string[]>([])
@@ -19,13 +26,25 @@ export default function Evaluator() {
   const [questionType, setQuestionType] = useState('auto')
   const [expectedFormula, setExpectedFormula] = useState('')
   const [expectedFinalAnswer, setExpectedFinalAnswer] = useState('')
+
+  // Answer scheme PDF
+  const [schemePdf, setSchemePdf] = useState<File | null>(null)
+  const schemePdfRef = useRef<HTMLInputElement>(null)
+
+  // Multiple student answer scripts
+  const [studentScripts, setStudentScripts] = useState<StudentScript[]>([])
+  const scriptInputRef = useRef<HTMLInputElement>(null)
+
+  // Single image mode (backward compat)
   const [answerImage, setAnswerImage] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<any>(null)
+  const [batchResults, setBatchResults] = useState<any[]>([])
   const [error, setError] = useState('')
+  const [mode, setMode] = useState<'single' | 'batch'>('single')
 
   useEffect(() => {
     fetch('/api/data-sources')
@@ -37,6 +56,39 @@ export default function Evaluator() {
       })
       .catch(() => {})
   }, [])
+
+  const handleSchemeUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) setSchemePdf(file)
+  }
+
+  const handleAddScripts = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files) return
+    const newScripts: StudentScript[] = []
+    Array.from(files).forEach(file => {
+      const id = `script-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        setStudentScripts(prev => [...prev, {
+          id,
+          file,
+          preview: reader.result as string,
+          studentName: file.name.replace(/\.[^/.]+$/, ''),
+        }])
+      }
+      reader.readAsDataURL(file)
+    })
+    if (scriptInputRef.current) scriptInputRef.current.value = ''
+  }
+
+  const removeScript = (id: string) => {
+    setStudentScripts(prev => prev.filter(s => s.id !== id))
+  }
+
+  const updateScriptName = (id: string, name: string) => {
+    setStudentScripts(prev => prev.map(s => s.id === id ? { ...s, studentName: name } : s))
+  }
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -55,34 +107,66 @@ export default function Evaluator() {
   }
 
   const handleEvaluate = async () => {
-    if (!question.trim()) { setError('Please enter the question text'); return }
-    if (!studentAnswer.trim() && !answerImage) { setError('Please enter student answer or upload an answer paper image'); return }
+    if (!question.trim() && !schemePdf) { setError('Please enter the question text or upload an answer scheme PDF'); return }
+    if (mode === 'single' && !studentAnswer.trim() && !answerImage) { setError('Please enter student answer or upload an answer paper image'); return }
+    if (mode === 'batch' && studentScripts.length === 0) { setError('Please add at least one student answer script'); return }
 
     setLoading(true)
     setError('')
     setResult(null)
+    setBatchResults([])
 
-    const formData = new FormData()
-    if (answerImage) formData.append('file', answerImage)
-    formData.append('student_answer', studentAnswer)
-    formData.append('question', question)
-    formData.append('subject', subject)
-    formData.append('reference_answer', referenceAnswer)
-    formData.append('max_marks', String(maxMarks))
-    formData.append('question_type', questionType)
-    formData.append('expected_formula', expectedFormula)
-    formData.append('expected_final_answer', expectedFinalAnswer)
+    if (mode === 'batch') {
+      const results: any[] = []
+      for (const script of studentScripts) {
+        const formData = new FormData()
+        formData.append('file', script.file)
+        if (schemePdf) formData.append('scheme_pdf', schemePdf)
+        formData.append('student_answer', '')
+        formData.append('student_name', script.studentName)
+        formData.append('question', question)
+        formData.append('subject', subject)
+        formData.append('reference_answer', referenceAnswer)
+        formData.append('max_marks', String(maxMarks))
+        formData.append('question_type', questionType)
+        formData.append('expected_formula', expectedFormula)
+        formData.append('expected_final_answer', expectedFinalAnswer)
+        formData.append('save_history', 'true')
 
-    try {
-      const res = await fetch('/api/eval/unified', { method: 'POST', body: formData })
-      const data = await res.json()
-      if (!res.ok) {
-        setError(data.detail || 'Evaluation failed')
-      } else {
-        setResult(data)
+        try {
+          const res = await fetch('/api/eval/unified', { method: 'POST', body: formData })
+          const data = await res.json()
+          results.push({ ...data, studentName: script.studentName, scriptFile: script.file.name })
+        } catch (e: any) {
+          results.push({ error: e.message, studentName: script.studentName, scriptFile: script.file.name, ai_score: 0, max_score: maxMarks })
+        }
       }
-    } catch (e: any) {
-      setError(e.message || 'Network error')
+      setBatchResults(results)
+    } else {
+      const formData = new FormData()
+      if (answerImage) formData.append('file', answerImage)
+      if (schemePdf) formData.append('scheme_pdf', schemePdf)
+      formData.append('student_answer', studentAnswer)
+      formData.append('question', question)
+      formData.append('subject', subject)
+      formData.append('reference_answer', referenceAnswer)
+      formData.append('max_marks', String(maxMarks))
+      formData.append('question_type', questionType)
+      formData.append('expected_formula', expectedFormula)
+      formData.append('expected_final_answer', expectedFinalAnswer)
+      formData.append('save_history', 'true')
+
+      try {
+        const res = await fetch('/api/eval/unified', { method: 'POST', body: formData })
+        const data = await res.json()
+        if (!res.ok) {
+          setError(data.detail || 'Evaluation failed')
+        } else {
+          setResult(data)
+        }
+      } catch (e: any) {
+        setError(e.message || 'Network error')
+      }
     }
     setLoading(false)
   }
@@ -94,16 +178,66 @@ export default function Evaluator() {
     return 'text-red-600'
   }
 
+  const scoreBg = (score: number, max: number) => {
+    const pct = (score / max) * 100
+    if (pct >= 80) return 'bg-emerald-50 border-emerald-200'
+    if (pct >= 50) return 'bg-amber-50 border-amber-200'
+    return 'bg-red-50 border-red-200'
+  }
+
   return (
     <div>
-      <Header title="Answer Evaluator" subtitle="Unified grading system with OCR — upload answer papers or type answers" />
+      <Header title="Answer Evaluator" subtitle="Upload answer scheme PDF + student scripts for batch evaluation with OCR" />
 
       <div className="p-6 space-y-4">
-        {/* Input Section */}
+        {/* Mode Toggle */}
+        <div className="flex gap-2">
+          <button
+            onClick={() => setMode('single')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
+              mode === 'single' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            Single Evaluation
+          </button>
+          <button
+            onClick={() => setMode('batch')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
+              mode === 'batch' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            Batch Evaluation (Multiple Scripts)
+          </button>
+        </div>
+
         <div className="card p-5 space-y-4">
           <div className="flex items-center gap-2 mb-1">
             <ClipboardCheck className="w-5 h-5 text-indigo-500" />
-            <h3 className="text-sm font-semibold text-gray-900">Evaluate Student Answer</h3>
+            <h3 className="text-sm font-semibold text-gray-900">Evaluate Student Answer{mode === 'batch' ? 's' : ''}</h3>
+          </div>
+
+          {/* Answer Scheme PDF Upload */}
+          <div className="bg-blue-50 border-2 border-dashed border-blue-200 rounded-xl p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <FileText className="w-4 h-4 text-blue-600" />
+              <span className="text-xs font-semibold text-gray-700">Answer Scheme (PDF)</span>
+              <span className="text-[10px] text-gray-400 ml-auto">Extracts questions & reference answers from PDF</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                ref={schemePdfRef}
+                type="file"
+                accept=".pdf"
+                onChange={handleSchemeUpload}
+                className="flex-1 text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
+              />
+              {schemePdf && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-blue-700 font-medium">{schemePdf.name}</span>
+                  <button onClick={() => { setSchemePdf(null); if (schemePdfRef.current) schemePdfRef.current.value = '' }} className="text-xs text-red-500 hover:text-red-700">Clear</button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Question Type Selection */}
@@ -161,12 +295,14 @@ export default function Evaluator() {
 
           {/* Question */}
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Question</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Question <span className="text-gray-400 font-normal">(or leave blank if answer scheme PDF has it)</span>
+            </label>
             <textarea
               value={question}
               onChange={e => setQuestion(e.target.value)}
               rows={3}
-              placeholder="Enter the question text..."
+              placeholder="Enter the question text, or upload an answer scheme PDF above..."
               className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 resize-none"
             />
           </div>
@@ -174,13 +310,13 @@ export default function Evaluator() {
           {/* Reference Answer */}
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">
-              Reference / Model Answer <span className="text-gray-400 font-normal">(from source material)</span>
+              Reference / Model Answer <span className="text-gray-400 font-normal">(auto-filled from PDF if uploaded)</span>
             </label>
             <textarea
               value={referenceAnswer}
               onChange={e => setReferenceAnswer(e.target.value)}
               rows={3}
-              placeholder="Enter the expected answer or leave blank to use the question's stored answer key..."
+              placeholder="Enter the expected answer, or leave blank to use the answer scheme PDF..."
               className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 resize-none"
             />
           </div>
@@ -218,54 +354,102 @@ export default function Evaluator() {
           {/* Divider */}
           <div className="flex items-center gap-3 py-1">
             <div className="flex-1 h-px bg-gray-200" />
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">Student Answer</span>
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">
+              {mode === 'batch' ? 'Student Answer Scripts' : 'Student Answer'}
+            </span>
             <div className="flex-1 h-px bg-gray-200" />
           </div>
 
-          {/* Answer Paper Image Upload */}
-          <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-xl p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Camera className="w-4 h-4 text-indigo-500" />
-              <span className="text-xs font-semibold text-gray-700">Upload Answer Paper (OCR)</span>
-              <span className="text-[10px] text-gray-400 ml-auto">Uses LLaVA vision model to read handwriting</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleImageChange}
-                className="flex-1 text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-600 hover:file:bg-indigo-100"
-              />
-              {answerImage && (
-                <button onClick={clearImage} className="text-xs text-red-500 hover:text-red-700">Clear</button>
-              )}
-            </div>
-            {imagePreview && (
-              <div className="mt-3">
-                <img src={imagePreview} alt="Answer paper preview" className="max-h-48 rounded-lg border border-gray-200" />
+          {mode === 'batch' ? (
+            <>
+              {/* Batch: Multiple student scripts */}
+              <div className="bg-purple-50 border-2 border-dashed border-purple-200 rounded-xl p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <Upload className="w-4 h-4 text-purple-600" />
+                  <span className="text-xs font-semibold text-gray-700">Upload Student Answer Scripts</span>
+                  <span className="text-[10px] text-gray-400 ml-auto">Select multiple images — each is OCR'd and scored</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    ref={scriptInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleAddScripts}
+                    className="flex-1 text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200"
+                  />
+                </div>
               </div>
-            )}
-          </div>
 
-          {/* OR divider */}
-          <div className="flex items-center gap-3">
-            <div className="flex-1 h-px bg-gray-200" />
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">or type answer</span>
-            <div className="flex-1 h-px bg-gray-200" />
-          </div>
+              {studentScripts.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-gray-600">{studentScripts.length} script(s) added:</p>
+                  {studentScripts.map(s => (
+                    <div key={s.id} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                      <img src={s.preview} alt="" className="w-12 h-12 rounded border border-gray-200 object-cover" />
+                      <input
+                        type="text"
+                        value={s.studentName}
+                        onChange={e => updateScriptName(s.id, e.target.value)}
+                        placeholder="Student name / USN"
+                        className="flex-1 px-2 py-1 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-indigo-200"
+                      />
+                      <button onClick={() => removeScript(s.id)} className="p-1 text-red-400 hover:text-red-600">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {/* Single: Answer Paper Image Upload */}
+              <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-xl p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Camera className="w-4 h-4 text-indigo-500" />
+                  <span className="text-xs font-semibold text-gray-700">Upload Answer Paper (OCR)</span>
+                  <span className="text-[10px] text-gray-400 ml-auto">Uses LLaVA vision model to read handwriting</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageChange}
+                    className="flex-1 text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-600 hover:file:bg-indigo-100"
+                  />
+                  {answerImage && (
+                    <button onClick={clearImage} className="text-xs text-red-500 hover:text-red-700">Clear</button>
+                  )}
+                </div>
+                {imagePreview && (
+                  <div className="mt-3">
+                    <img src={imagePreview} alt="Answer paper preview" className="max-h-48 rounded-lg border border-gray-200" />
+                  </div>
+                )}
+              </div>
 
-          {/* Typed Student Answer */}
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Student Answer (typed)</label>
-            <textarea
-              value={studentAnswer}
-              onChange={e => setStudentAnswer(e.target.value)}
-              rows={5}
-              placeholder="Type or paste the student's answer here..."
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 resize-none font-mono"
-            />
-          </div>
+              {/* OR divider */}
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-px bg-gray-200" />
+                <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">or type answer</span>
+                <div className="flex-1 h-px bg-gray-200" />
+              </div>
+
+              {/* Typed Student Answer */}
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Student Answer (typed)</label>
+                <textarea
+                  value={studentAnswer}
+                  onChange={e => setStudentAnswer(e.target.value)}
+                  rows={5}
+                  placeholder="Type or paste the student's answer here..."
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 resize-none font-mono"
+                />
+              </div>
+            </>
+          )}
 
           {/* Evaluate Button */}
           <button
@@ -274,7 +458,7 @@ export default function Evaluator() {
             className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardCheck className="w-4 h-4" />}
-            {loading ? 'Evaluating...' : 'Evaluate Answer'}
+            {loading ? (mode === 'batch' ? `Evaluating ${studentScripts.length} scripts...` : 'Evaluating...') : (mode === 'batch' ? `Evaluate ${studentScripts.length} Script${studentScripts.length !== 1 ? 's' : ''}` : 'Evaluate Answer')}
           </button>
 
           {error && (
@@ -285,7 +469,67 @@ export default function Evaluator() {
           )}
         </div>
 
-        {/* Results Section */}
+        {/* Batch Results */}
+        {batchResults.length > 0 && (
+          <div className="card p-5">
+            <h3 className="text-sm font-semibold text-gray-900 mb-4">Batch Evaluation Results</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500">#</th>
+                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500">Student</th>
+                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500">File</th>
+                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500">Score</th>
+                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500">Type</th>
+                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500">OCR Confidence</th>
+                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500">Feedback</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {batchResults.map((r, i) => (
+                    <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="py-2 px-3 text-xs text-gray-500">{i + 1}</td>
+                      <td className="py-2 px-3 text-xs font-medium text-gray-800">{r.studentName}</td>
+                      <td className="py-2 px-3 text-xs text-gray-500">{r.scriptFile}</td>
+                      <td className="py-2 px-3">
+                        <span className={`text-sm font-bold ${scoreColor(r.ai_score || 0, r.max_score || maxMarks)}`}>
+                          {r.ai_score ?? '?'}/{r.max_score || maxMarks}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-50 text-indigo-700">
+                          {r.question_type || '—'}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3">
+                        {r.ocr_used ? (
+                          <span className={`text-xs font-medium ${(r.confidence || 0) >= 0.7 ? 'text-emerald-600' : (r.confidence || 0) >= 0.4 ? 'text-amber-600' : 'text-red-600'}`}>
+                            {((r.confidence || 0) * 100).toFixed(0)}%
+                            {(r.confidence || 0) < 0.5 && (
+                              <AlertTriangle className="w-3 h-3 inline ml-1 text-amber-500" />
+                            )}
+                          </span>
+                        ) : <span className="text-xs text-gray-400">N/A</span>}
+                      </td>
+                      <td className="py-2 px-3 text-xs text-gray-600 max-w-xs truncate">{r.feedback || r.error || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-4 pt-3 border-t border-gray-200 flex items-center justify-between">
+              <p className="text-xs text-gray-500">
+                Results saved to evaluation history — view in <a href="/evaluated-scripts" className="text-indigo-600 hover:underline">Evaluated Answer Scripts</a>
+              </p>
+              <div className="text-sm font-semibold text-gray-700">
+                Avg: {(batchResults.reduce((sum, r) => sum + (r.ai_score || 0), 0) / batchResults.length).toFixed(1)}/{maxMarks}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Single Result */}
         {result && (
           <div className="space-y-4">
             {/* Score Card */}
@@ -304,11 +548,13 @@ export default function Evaluator() {
                     </span>
                     <p className="text-[10px] text-gray-400 mt-0.5">
                       Confidence: {((result.confidence || 0) * 100).toFixed(0)}%
+                      {(result.confidence || 0) < 0.5 && (
+                        <span className="ml-1 text-amber-500 font-medium">(Low — consider manual review)</span>
+                      )}
                     </p>
                   </div>
                 </div>
 
-                {/* OCR Badge */}
                 {result.ocr_used && (
                   <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-purple-50 text-purple-700">
                     <Camera className="w-3 h-3" />

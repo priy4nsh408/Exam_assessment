@@ -200,6 +200,7 @@ MOCK_SUBMISSIONS = _demo.DEMO_SUBMISSIONS if HAS_DEMO_DATA else []
 MOCK_EXAMS = _demo.DEMO_EXAMS if HAS_DEMO_DATA else []
 
 GRADE_RESULTS = {}
+EVAL_HISTORY: list = []
 
 # ── SSE agent sequence ────────────────────────────────────────────────────────
 
@@ -1333,10 +1334,22 @@ async def eval_numerical(body: NumericalEvalRequest):
 
 # ── Unified Evaluation Endpoint ──────────────────────────────────────────────
 
+def _extract_text_from_pdf(pdf_path: str) -> str:
+    try:
+        from langchain_community.document_loaders import PyPDFLoader
+        loader = PyPDFLoader(pdf_path)
+        pages = loader.load()
+        return "\n".join(p.page_content for p in pages if p.page_content.strip())
+    except Exception:
+        return ""
+
+
 @app.post("/api/eval/unified")
 async def eval_unified(
     file: UploadFile = File(None),
+    scheme_pdf: UploadFile = File(None),
     student_answer: str = Form(""),
+    student_name: str = Form(""),
     answer_id: str = Form(""),
     question_id: str = Form(""),
     question: str = Form(""),
@@ -1346,22 +1359,30 @@ async def eval_unified(
     question_type: str = Form("auto"),
     expected_formula: str = Form(""),
     expected_final_answer: str = Form(""),
+    save_history: str = Form("false"),
 ):
-    """
-    Unified evaluation endpoint. Accepts:
-    - An uploaded answer paper image (OCR extracts text via LLaVA)
-    - OR typed student_answer text
-    - Auto-detects question type (theory/numerical/drawing) or accepts explicit type
-    - Applies universal equation deduction: if question requires math formula and
-      student didn't write one, deducts 1 mark
-    """
     if not UNIFIED_EVAL_AVAILABLE:
         raise HTTPException(status_code=503, detail="Unified evaluator not available")
 
+    upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # Parse answer scheme PDF if provided
+    if scheme_pdf and scheme_pdf.filename:
+        pdf_path = str(upload_dir / f"scheme_{scheme_pdf.filename}")
+        with open(pdf_path, "wb") as f:
+            shutil.copyfileobj(scheme_pdf.file, f)
+        scheme_text = _extract_text_from_pdf(pdf_path)
+        if scheme_text:
+            if not reference_answer:
+                reference_answer = scheme_text
+            if not question:
+                lines = [l.strip() for l in scheme_text.split("\n") if l.strip()]
+                if lines:
+                    question = lines[0]
+
     image_path = None
     if file and file.filename:
-        upload_dir = Path(__file__).parent.parent / "data" / "uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
         image_path = str(upload_dir / file.filename)
         with open(image_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
@@ -1390,6 +1411,28 @@ async def eval_unified(
     result["co"] = ref.get("co")
     result["hadReferenceData"] = ref["grounded"] and bool(ref["reference_answer"])
 
+    if save_history.lower() == "true":
+        eval_id = f"EVAL-{str(uuid.uuid4())[:8].upper()}"
+        record = {
+            "id": eval_id,
+            "student_name": student_name or "Unknown",
+            "question": (ref["question_text"] or question)[:200],
+            "subject": ref["subject"] or subject,
+            "question_type": result.get("question_type", "theory"),
+            "ai_score": result.get("ai_score", 0),
+            "max_score": result.get("max_score", max_marks),
+            "confidence": result.get("confidence", 0),
+            "ocr_used": result.get("ocr_used", False),
+            "ocr_method": result.get("ocr_method", "none"),
+            "feedback": result.get("feedback", ""),
+            "explanation": result.get("explanation", ""),
+            "overridden": False,
+            "evaluated_at": datetime.utcnow().isoformat() + "Z",
+            "script_file": file.filename if file and file.filename else None,
+        }
+        EVAL_HISTORY.insert(0, record)
+        result["eval_id"] = eval_id
+
     _log_activity_safe(
         action=f"Evaluated 1 {result.get('question_type', 'unified')} submission "
                f"({result.get('ai_score')}/{result.get('max_score')})",
@@ -1397,6 +1440,38 @@ async def eval_unified(
         detail=ref.get("question_id") or "",
     )
     return result
+
+
+@app.get("/api/eval/history")
+async def get_eval_history():
+    return {"evaluations": EVAL_HISTORY, "total": len(EVAL_HISTORY)}
+
+
+@app.post("/api/eval/history/{eval_id}/override")
+async def override_eval(eval_id: str, body: OverrideRequest):
+    rec = next((r for r in EVAL_HISTORY if r["id"] == eval_id), None)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Evaluation record not found")
+    rec["overridden"] = True
+    rec["override_score"] = body.score
+    rec["override_reason"] = body.reason
+    rec["overridden_by"] = "faculty"
+    rec["overridden_at"] = datetime.utcnow().isoformat() + "Z"
+    _log_activity_safe(
+        action=f"Faculty override on {eval_id} ({rec['ai_score']} → {body.score})",
+        activity_type="override", subject=rec.get("subject", ""), detail=body.reason,
+    )
+    return rec
+
+
+@app.delete("/api/eval/history/{eval_id}")
+async def delete_eval(eval_id: str):
+    global EVAL_HISTORY
+    before = len(EVAL_HISTORY)
+    EVAL_HISTORY = [r for r in EVAL_HISTORY if r["id"] != eval_id]
+    if len(EVAL_HISTORY) == before:
+        raise HTTPException(status_code=404, detail="Evaluation record not found")
+    return {"success": True, "id": eval_id}
 
 
 if __name__ == "__main__":

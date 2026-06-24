@@ -6,6 +6,7 @@ import QuestionBank from './pages/QuestionBank'
 import ExamPapers from './pages/ExamPapers'
 import DataSource from './pages/DataSource'
 import Evaluator from './pages/Evaluator'
+import EvaluatedScripts from './pages/EvaluatedScripts'
 import COPOAnalytics from './pages/COPOAnalytics'
 import Students from './pages/Students'
 import FacultyOverride from './pages/FacultyOverride'
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="exams" element={<ExamPapers />} />
           <Route path="data-sources" element={<DataSource />} />
           <Route path="evaluate" element={<Evaluator />} />
+          <Route path="evaluated-scripts" element={<EvaluatedScripts />} />
           <Route path="analytics" element={<COPOAnalytics />} />
           <Route path="students" element={<Students />} />
           <Route path="override" element={<FacultyOverride />} />

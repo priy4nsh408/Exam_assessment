@@ -13,6 +13,7 @@ const navItems = [
   { label: 'Data Source', icon: Database, path: '/data-sources' },
   { divider: true, label: 'Evaluation' },
   { label: 'Answer Evaluator', icon: CheckSquare, path: '/evaluate' },
+  { label: 'Evaluated Scripts', icon: FileText, path: '/evaluated-scripts' },
   { divider: true, label: 'Analytics' },
   { label: 'CO/PO Analytics', icon: BarChart3, path: '/analytics' },
   { label: 'Students', icon: Users, path: '/students' },
