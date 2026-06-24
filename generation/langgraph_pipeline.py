@@ -487,6 +487,7 @@ def scout_agent(state: PipelineState) -> PipelineState:
             subject=state["subject"],
             unit=unit_filter,
             k=k,
+            raise_on_error=True,
         )
         # retrieve_context returns one already-joined string, not a list of
         # chunk objects - wrap as a single-element list so every downstream
@@ -501,7 +502,23 @@ def scout_agent(state: PipelineState) -> PipelineState:
             )
     except Exception as e:
         state["context_chunks"] = []
-        state["errors"].append(f"Scout agent: {e}")
+        # Distinguish "the embedding model itself failed to load" (almost
+        # always a network/connectivity problem reaching huggingface.co, or
+        # a missing local cache) from any other failure - these need
+        # completely different fixes, and were previously both reported as
+        # a generic "no ChromaDB content found" with the real cause only
+        # ever printed to a backend terminal nobody was watching.
+        err_text = str(e)
+        if "huggingface.co" in err_text or "connect" in err_text.lower() or "HFValidationError" in type(e).__name__:
+            state["errors"].append(
+                f"Scout agent: the embedding model could not be loaded ({err_text}). "
+                f"This is almost always a network/connectivity problem reaching huggingface.co "
+                f"to download the model on first use (e.g. no internet access, a corporate "
+                f"proxy/firewall, or offline mode) rather than a problem with your ingested "
+                f"data - the retrieval/filter logic itself never even ran."
+            )
+        else:
+            state["errors"].append(f"Scout agent: {e}")
     return state
 
 def generator_agent(state: PipelineState) -> PipelineState:

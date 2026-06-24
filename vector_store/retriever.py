@@ -4,7 +4,8 @@ def retrieve_context(
     query,
     subject=None,
     unit=None,
-    k=5
+    k=5,
+    raise_on_error=False
 ):
     """
     Retrieve relevant context from ChromaDB
@@ -24,6 +25,19 @@ def retrieve_context(
 
     k : int
         Number of chunks to retrieve
+
+    raise_on_error : bool
+        By default (False), any error during retrieval (including an
+        embedding-model failure, e.g. no network access to download it) is
+        swallowed and "" is returned, matching this function's original
+        behavior for app/main.py and app/streamlit_app.py. Set True to
+        instead re-raise the real exception - used by the generation
+        pipeline (generation/langgraph_pipeline.py's scout_agent) so an
+        embedding-model failure can be reported as exactly that, rather
+        than being silently misreported as "no matching documents found"
+        (which was actively misleading - the embedding model failing to
+        load and the collection genuinely having no matching content are
+        very different problems requiring very different fixes).
 
     Returns:
     ---------------------------------
@@ -99,6 +113,9 @@ def retrieve_context(
     except Exception as e:
 
         print(f"❌ Retrieval Error: {e}")
+
+        if raise_on_error:
+            raise
 
         return ""
 
