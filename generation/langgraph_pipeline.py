@@ -459,20 +459,46 @@ def scout_agent(state: PipelineState) -> PipelineState:
     try:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from vector_store.chroma_client import get_or_create_chroma
-        from vector_store.retriever import retrieve_chunks
+        from vector_store.chroma_client import create_vector_db
+        from vector_store.retriever import retrieve_context
 
         # Adaptive k: higher Bloom levels need more context
         k = 3 + state["bloom_level"]
 
-        collection = get_or_create_chroma(state["subject"])
-        chunks = retrieve_chunks(
-            collection,
+        # The ingestion pipeline persists each subject as its own Chroma
+        # collection at data/db/chroma/<subject> (subject = the literal raw
+        # data folder name, e.g. data/raw/BDT/..., NOT necessarily the same
+        # label shown in a UI dropdown - they must match exactly).
+        persist_dir = str(Path(__file__).parent.parent / "data" / "db" / "chroma" / state["subject"])
+        vectordb = create_vector_db(chunks=None, persist_directory=persist_dir)
+
+        # Ingested unit metadata is normalized to a bare "Unit N" by
+        # ingestion/metadata_extractor.py (extracted from the file path),
+        # not whatever full descriptive label the caller passed in (e.g.
+        # "Unit 1: Laws of Thermodynamics") - normalize identically here,
+        # or the exact-match Chroma filter would never hit even when the
+        # subject genuinely has ingested content for that unit.
+        unit_num_match = re.search(r'Unit[_ -]?(\d+)', state["unit"], re.IGNORECASE)
+        unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
+
+        context = retrieve_context(
+            vectordb,
             query=f"{state['unit']} {BLOOM_LABELS[state['bloom_level']][1]}",
-            unit=state["unit"],
-            k=k
+            subject=state["subject"],
+            unit=unit_filter,
+            k=k,
         )
-        state["context_chunks"] = [c.page_content if hasattr(c, "page_content") else str(c) for c in chunks]
+        # retrieve_context returns one already-joined string, not a list of
+        # chunk objects - wrap as a single-element list so every downstream
+        # use of context_chunks (which always re-joins them anyway) still
+        # works the same whether there's content or not.
+        state["context_chunks"] = [context] if context else []
+        if not context:
+            state["errors"].append(
+                f"Scout agent: no ChromaDB content found for subject={state['subject']!r}, "
+                f"unit filter={unit_filter!r} - check that this subject/unit was actually "
+                f"ingested (data/raw/{state['subject']}/...) and that the folder name matches exactly."
+            )
     except Exception as e:
         state["context_chunks"] = []
         state["errors"].append(f"Scout agent: {e}")
@@ -739,11 +765,53 @@ def answer_key_agent(state: PipelineState) -> PipelineState:
     """
     for q in state["final_questions"]:
         source_chunk = q.get("source_chunk", "")
+
         if not source_chunk:
-            q["answer_key"] = ""
+            # No RAG context was retrieved for this question's subject/unit
+            # (most commonly: that subject has no ingested ChromaDB content
+            # at all - check the Scout agent's diagnostic in state["errors"]).
+            # The question itself may still be well-formed, since the
+            # Generator agent can write a plausible question from the LLM's
+            # own training knowledge with no context at all - so rather than
+            # leaving the answer key blank (which is what previously
+            # happened, and is strictly worse for grading than *something*,
+            # even if ungrounded), attempt the same from general knowledge,
+            # and label it unmistakably as ungrounded so faculty know to
+            # verify it manually before trusting it the way a grounded key
+            # can be trusted.
+            if not OLLAMA_AVAILABLE:
+                q["answer_key"] = ""
+                q["answer_key_explanation"] = (
+                    "No source data was retrieved for this question's subject/unit, and no LLM "
+                    "is available to attempt a general-knowledge answer either - grading will "
+                    "fall back to a reduced reference."
+                )
+                continue
+
+            prompt = f"""You are an expert {q['subject']} professor. No source material was
+available for this question, so answer using your own general subject knowledge.
+
+QUESTION: {q['text']}
+
+Respond with ONLY a JSON object in exactly this format - no markdown code
+fences, no preamble, no text before or after the JSON:
+{{"answer_key": "<4-8 sentence model answer from general subject knowledge>"}}"""
+
+            raw = llm_call(prompt, temperature=0.2)
+            parsed = parse_llm_json(raw)
+            if not parsed:
+                retry_prompt = prompt + "\n\nIMPORTANT: Output raw JSON only. Do not use ```json fences."
+                raw = llm_call(retry_prompt, temperature=0.1)
+                parsed = parse_llm_json(raw)
+
+            answer_key = (parsed.get("answer_key") if parsed else None) or raw or ""
+            q["answer_key"] = answer_key.strip()
             q["answer_key_explanation"] = (
-                "No source data was available for this question, so no grounded "
-                "answer key could be written - grading will fall back to a reduced reference."
+                "UNGROUNDED: no source data was retrieved for this question's subject/unit "
+                "(no matching ChromaDB content), so this answer key was written from the LLM's "
+                "general subject knowledge instead of your ingested material. Verify it manually "
+                "before trusting it for grading, or ingest source content for this subject/unit "
+                "for a properly grounded answer key."
             )
             continue
 
@@ -845,12 +913,20 @@ def get_pipeline():
 
 def run_pipeline_with_diagnostics(subject: str, unit: str, bloom_level: int, question_type: str,
                                    co: str, count: int = 4, marks: Optional[int] = None
-                                   ) -> "tuple[List[dict], List[str]]":
+                                   ) -> "tuple[List[dict], List[str], List[str]]":
     """
-    Same generation as run_pipeline(), but also returns the list of
-    human-readable reasons (if any) for why fewer than `count` questions
-    came out the other end - e.g. the LLM under-producing, a validator
-    rejecting a question, or sha256 dedup against an existing question.
+    Same generation as run_pipeline(), but also returns:
+      - drop_reasons: why fewer than `count` questions came out the other
+        end (LLM under-producing, a validator rejecting a question, dedup).
+      - errors: agent-level diagnostics that don't necessarily drop a
+        question but matter for transparency - most importantly, Scout's
+        "no ChromaDB content found for subject=X" when retrieval comes back
+        empty, which is exactly why a question ends up with no grounded
+        answer key even though it still generated successfully (the LLM can
+        write a plausible question from its own training knowledge with no
+        retrieved context at all - silence here previously meant nobody
+        found out the answer key was never going to be grounded until they
+        noticed it missing in the Answer Scheme tab).
 
     `marks` is optional: when given, every returned question is tagged with
     this exact marks value instead of the fixed Bloom-level->marks table
@@ -881,7 +957,7 @@ def run_pipeline_with_diagnostics(subject: str, unit: str, bloom_level: int, que
         try:
             result = pipeline.invoke(initial_state)
             if result["final_questions"]:
-                return result["final_questions"], result.get("drop_reasons", [])
+                return result["final_questions"], result.get("drop_reasons", []), result.get("errors", [])
         except Exception:
             pass
 
@@ -895,13 +971,13 @@ def run_pipeline_with_diagnostics(subject: str, unit: str, bloom_level: int, que
         state = agent(state)
 
     if state["final_questions"]:
-        return state["final_questions"], state.get("drop_reasons", [])
+        return state["final_questions"], state.get("drop_reasons", []), state.get("errors", [])
 
     # Total fallback (no LLM/LangGraph at all): mock questions are always
     # fully synthetic placeholders, never short of `count`, so no drop
     # reasons apply here - but they're clearly unconnected to real source
     # data, which the caller can still flag via the `source` field.
-    return _mock_questions(subject, unit, bloom_level, question_type, co, count, marks=marks), []
+    return _mock_questions(subject, unit, bloom_level, question_type, co, count, marks=marks), [], state.get("errors", [])
 
 
 def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
@@ -913,7 +989,7 @@ def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
     Thin backward-compatible wrapper around run_pipeline_with_diagnostics()
     for callers that only need the questions, not the shortfall reasons.
     """
-    questions, _ = run_pipeline_with_diagnostics(
+    questions, _, _ = run_pipeline_with_diagnostics(
         subject=subject, unit=unit, bloom_level=bloom_level,
         question_type=question_type, co=co, count=count, marks=marks,
     )
@@ -982,7 +1058,7 @@ def _mock_questions(subject, unit, bloom_level, q_type, co, count, marks: Option
     return questions
 
 def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
-                            specs: List[dict]) -> "tuple[List[dict], dict[int, str]]":
+                            specs: List[dict]) -> "tuple[List[dict], dict[int, str], List[str]]":
     """
     Step 1+2 entry point: generates one question per item in `specs`, where
     each spec is {"bloom_level": int, "co": str, "marks": int} - i.e. the
@@ -999,7 +1075,7 @@ def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
     Each spec's own `marks` is instead applied as a fast post-hoc override
     after generation (no extra LLM call).
 
-    Returns (questions, drop_reasons):
+    Returns (questions, drop_reasons, errors):
       - questions: one dict per spec that successfully generated, in the
         original requested order (a spec's slot is omitted only if
         generation/dedup yielded fewer questions than requested for its
@@ -1007,6 +1083,10 @@ def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
       - drop_reasons: {spec_index: reason} for every omitted slot, so
         callers can tell the user exactly why each missing question is
         missing instead of a generic shortfall count.
+      - errors: agent-level diagnostics collected across every group (e.g.
+        "no ChromaDB content found for subject=X") - these questions still
+        generated, but came back ungrounded, which is worth surfacing even
+        though it isn't a drop.
     """
     from collections import defaultdict
 
@@ -1016,11 +1096,13 @@ def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
 
     results_by_index: dict = {}
     drop_reasons_by_index: dict = {}
+    all_errors: List[str] = []
     for (bloom_level, co), indices in groups.items():
-        generated, reasons = run_pipeline_with_diagnostics(
+        generated, reasons, errors = run_pipeline_with_diagnostics(
             subject=subject, unit=unit, bloom_level=bloom_level,
             question_type=question_type, co=co, count=len(indices),
         )
+        all_errors.extend(errors)
         for idx, q in zip(indices, generated):
             requested_marks = specs[idx].get("marks")
             if requested_marks and q.get("marks") != requested_marks:
@@ -1045,4 +1127,7 @@ def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
                 drop_reasons_by_index[idx] = reason_text
 
     questions = [results_by_index[i] for i in sorted(results_by_index)]
-    return questions, drop_reasons_by_index
+    # Dedup while preserving order - the same "no ChromaDB content" message
+    # can legitimately repeat once per (bloom_level, co) group.
+    deduped_errors = list(dict.fromkeys(all_errors))
+    return questions, drop_reasons_by_index, deduped_errors

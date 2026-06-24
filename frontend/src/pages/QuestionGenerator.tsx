@@ -57,6 +57,7 @@ export default function QuestionGenerator() {
   const [publishing, setPublishing] = useState(false)
   const [publishDone, setPublishDone] = useState(false)
   const [warning, setWarning] = useState<string | null>(null)
+  const [groundingNotice, setGroundingNotice] = useState<string | null>(null)
 
   const addSpecRow = () => setSpecRows(prev => [...prev, newRow(COs[prev.length % COs.length])])
   const removeSpecRow = (id: string) => setSpecRows(prev => prev.length > 1 ? prev.filter(r => r.id !== id) : prev)
@@ -80,6 +81,7 @@ export default function QuestionGenerator() {
     setLoading(true)
     setQuestions([])
     setWarning(null)
+    setGroundingNotice(null)
     setAgentStatuses(Object.fromEntries(PIPELINE_STEPS.map(s => [s, 'idle'])))
 
     // Lightweight visual progress through the agent chain while the single
@@ -110,6 +112,7 @@ export default function QuestionGenerator() {
       setQuestions(data.questions || [])
       setSelected(new Set((data.questions || []).map((q: any) => q.id)))
       if (data.warning) setWarning(data.warning)
+      if (data.groundingNotice) setGroundingNotice(data.groundingNotice)
     } catch {
       alert('Generation failed — is the backend running?')
     } finally {
@@ -337,6 +340,11 @@ export default function QuestionGenerator() {
         <div className="col-span-2">
           {warning && (
             <div className="card p-3 mb-3 bg-amber-50 border-amber-200 text-xs text-amber-700">{warning}</div>
+          )}
+          {groundingNotice && (
+            <div className="card p-3 mb-3 bg-indigo-50 border-indigo-200 text-xs text-indigo-700">
+              <span className="font-semibold">Grounding notice: </span>{groundingNotice}
+            </div>
           )}
           {questions.length === 0 && !loading && (
             <div className="card h-full flex items-center justify-center p-12">

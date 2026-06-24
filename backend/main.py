@@ -412,7 +412,7 @@ async def pipeline_generate(req: PipelineGenerateRequest):
 
     try:
         specs = [q.dict() for q in req.questions]
-        questions, drop_reasons = _db_run_pipeline_for_specs(
+        questions, drop_reasons, pipeline_errors = _db_run_pipeline_for_specs(
             subject=req.subject, unit=req.chapter,
             question_type=req.question_type, specs=specs,
         )
@@ -438,6 +438,14 @@ async def pipeline_generate(req: PipelineGenerateRequest):
                 f"Requested {len(req.questions)} question(s) but only {len(normalized)} "
                 f"were generated. {reason_text}"
             )
+        if pipeline_errors:
+            # These questions still generated successfully, but something
+            # went wrong upstream of them (most commonly: no ChromaDB
+            # content found for this subject/unit) - surfaced separately
+            # from `warning` since it isn't a shortfall, it's a grounding
+            # quality issue the faculty member should know about before
+            # trusting the answer key.
+            response["groundingNotice"] = " ".join(pipeline_errors)
         if normalized:
             _log_activity_safe(
                 action=f"Generated {len(normalized)} question(s)",
