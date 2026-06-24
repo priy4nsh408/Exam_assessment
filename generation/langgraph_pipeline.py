@@ -470,8 +470,8 @@ def scout_agent(state: PipelineState) -> PipelineState:
         unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
 
         # 1. Retrieve raw data context
-        print(f"🔎 Scout: subject={state['subject']!r}, unit_filter={unit_filter!r}, persist_dir={persist_dir}")
-        print(f"🔎 Scout: vectordb={'loaded' if vectordb is not None else 'None (using fallback)'}")
+        print(f"🔎 Scout: subject={state['subject']!r}, unit_filter={unit_filter!r}, persist_dir={persist_dir}", file=sys.stderr, flush=True)
+        print(f"🔎 Scout: vectordb={'loaded' if vectordb is not None else 'None (using fallback)'}", file=sys.stderr, flush=True)
 
         context = ""
         if vectordb is not None:
@@ -484,19 +484,19 @@ def scout_agent(state: PipelineState) -> PipelineState:
                 raise_on_error=False,
                 persist_directory=persist_dir,
             )
-            print(f"🔎 Scout: vector search returned {len(context)} chars")
+            print(f"🔎 Scout: vector search returned {len(context)} chars", file=sys.stderr, flush=True)
 
         if not context:
             context = _fallback_keyword_retrieve(
                 persist_dir, subject=state["subject"], unit=unit_filter, query=state["unit"], k=k
             )
-            print(f"🔎 Scout: fallback (with unit) returned {len(context)} chars")
+            print(f"🔎 Scout: fallback (with unit) returned {len(context)} chars", file=sys.stderr, flush=True)
 
         if not context and unit_filter:
             context = _fallback_keyword_retrieve(
                 persist_dir, subject=state["subject"], query=state["unit"], k=k
             )
-            print(f"🔎 Scout: fallback (no unit) returned {len(context)} chars")
+            print(f"🔎 Scout: fallback (no unit) returned {len(context)} chars", file=sys.stderr, flush=True)
 
         state["context_chunks"] = [context] if context else []
         if not context:
@@ -534,6 +534,7 @@ def scout_agent(state: PipelineState) -> PipelineState:
             print(f"⚠️ Question bank retrieval skipped: {e}")
 
     except Exception as e:
+        print(f"🔎 Scout: EXCEPTION caught: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         state["context_chunks"] = []
         state["pyq_context"] = ""
         state["existing_questions"] = []
