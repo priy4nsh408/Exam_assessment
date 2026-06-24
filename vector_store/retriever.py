@@ -88,7 +88,11 @@ def _fallback_keyword_retrieve(persist_directory, subject=None, unit=None, query
     """
     db_path = os.path.join(persist_directory, "chroma.sqlite3")
     if not os.path.exists(db_path):
-        return ""
+        parent_db = os.path.join(os.path.dirname(persist_directory), "chroma.sqlite3")
+        if os.path.exists(parent_db):
+            db_path = parent_db
+        else:
+            return ""
 
     conn = sqlite3.connect(db_path)
     try:
