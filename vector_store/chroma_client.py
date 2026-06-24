@@ -4,6 +4,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 import os
 
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "10")
+
 
 # =========================================================
 # CREATE / LOAD VECTOR DATABASE

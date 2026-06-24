@@ -1,5 +1,82 @@
 import os
 import sqlite3
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).parent.parent
+CHROMA_RAW_DIR = PROJECT_ROOT / "data" / "db" / "chroma"
+CHROMA_PYQ_DIR = PROJECT_ROOT / "data" / "db" / "chroma_pyq"
+
+
+def retrieve_pyq_context(subject, unit=None, query="", k=5):
+    """
+    Retrieve PYQ/question-bank context for a subject.
+    Tries vector similarity first, falls back to SQLite keyword retrieval.
+    If unit-filtered retrieval returns nothing, retries without unit filter.
+    """
+    persist_dir = str(CHROMA_PYQ_DIR / subject)
+    if not os.path.exists(persist_dir):
+        for d in CHROMA_PYQ_DIR.iterdir() if CHROMA_PYQ_DIR.exists() else []:
+            if d.name.lower() == subject.lower():
+                persist_dir = str(d)
+                break
+        else:
+            return ""
+
+    try:
+        from vector_store.chroma_client import create_vector_db
+        vectordb = create_vector_db(chunks=None, persist_directory=persist_dir)
+        if vectordb is not None:
+            result = retrieve_context(
+                vectordb, query=query, subject=subject, unit=unit,
+                k=k, persist_directory=persist_dir
+            )
+            if result:
+                return result
+            if unit:
+                return retrieve_context(
+                    vectordb, query=query, subject=subject,
+                    k=k, persist_directory=persist_dir
+                )
+            return ""
+    except Exception:
+        pass
+
+    result = _fallback_keyword_retrieve(persist_dir, subject=subject, unit=unit, query=query, k=k)
+    if not result and unit:
+        result = _fallback_keyword_retrieve(persist_dir, subject=subject, query=query, k=k)
+    return result
+
+
+def retrieve_question_bank(subject, unit=None, bloom_level=None, limit=10):
+    """
+    Retrieve previously generated questions from the SQLite question bank
+    to use as dedup reference and style examples.
+    """
+    db_path = PROJECT_ROOT / "data" / "questions.db"
+    if not db_path.exists():
+        return []
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        query = "SELECT text, type, bloom_level, co, unit, marks FROM questions WHERE subject = ?"
+        params = [subject]
+        if unit:
+            query += " AND unit LIKE ?"
+            params.append(f"%{unit}%")
+        if bloom_level:
+            query += " AND bloom_level = ?"
+            params.append(bloom_level)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
 
 
 def _fallback_keyword_retrieve(persist_directory, subject=None, unit=None, query="", k=5):

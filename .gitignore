@@ -3,4 +3,5 @@ __pycache__/
 *.pyo
 data/questions.db
 data/demo_grades_cache.json
+data/db/chroma_pyq/
 backend/__pycache__/
