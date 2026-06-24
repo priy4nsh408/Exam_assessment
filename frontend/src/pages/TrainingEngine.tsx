@@ -33,6 +33,7 @@ interface UploadResult {
   marks_per_q: number
   parse_warnings: string[]
   questions: ParsedQuestion[]
+  raw_ocr_text: string
   message: string
 }
 
@@ -179,6 +180,20 @@ export default function TrainingEngine() {
                   ))}
                 </div>
               </div>
+
+              {/* Show raw OCR when nothing was parsed so user can see what was read */}
+              {uploadResult.questions.length === 0 && uploadResult.raw_ocr_text && (
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold text-gray-700">Raw OCR text (what the system read from your PDF):</p>
+                  <pre className="text-[10px] text-gray-600 bg-gray-50 rounded p-3 whitespace-pre-wrap max-h-48 overflow-y-auto font-mono leading-relaxed border border-gray-200">
+                    {uploadResult.raw_ocr_text}
+                  </pre>
+                  <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">
+                    The text above was extracted from your PDF. If it looks correct but questions weren't detected,
+                    make sure questions are numbered like <b>1.</b> or <b>Q1.</b> or <b>Question 1</b> at the start of a line.
+                  </p>
+                </div>
+              )}
 
               {uploadResult.questions.length > 0 && (
                 <div className="space-y-1">

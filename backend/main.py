@@ -1644,13 +1644,14 @@ async def upload_training_reference(
         parsed_subject  = result["subject"]
         questions_list  = result["questions"]
         parse_warnings  = result["parse_warnings"]
-        # Use the most common mark value from parsed questions if available
+        raw_ocr_text    = result.get("raw_text", "")
         if questions_list:
             mark_vals = [q["max_marks"] for q in questions_list if q.get("max_marks")]
             if mark_vals:
                 marks_per_q = max(set(mark_vals), key=mark_vals.count)
     except Exception as e:
         parse_warnings.append(f"Parsing failed: {e}. File saved but no questions extracted.")
+        raw_ocr_text = ""
 
     final_subject = parsed_subject or subject or "Unknown"
 
@@ -1682,10 +1683,11 @@ async def upload_training_reference(
         "marks_per_q":      marks_per_q,
         "parse_warnings":   parse_warnings,
         "questions":        questions_list,
+        "raw_ocr_text":     raw_ocr_text[:3000],   # first 3000 chars so UI can show what was read
         "message": (
             f"Scheme parsed: {len(questions_list)} questions extracted from '{file.filename}'."
             if questions_list else
-            "File saved but no questions could be extracted. Check warnings."
+            "File saved but no questions could be extracted. See the OCR text below to understand what was read."
         ),
     }
 
