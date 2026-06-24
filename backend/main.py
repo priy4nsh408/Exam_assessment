@@ -11,13 +11,16 @@ import random
 import threading
 import time
 import shutil
+import sqlite3
+import zipfile
+import io
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 
 # ── Import LangGraph pipeline ─────────────────────────────────────────────────
@@ -89,6 +92,80 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── SQLite override persistence ───────────────────────────────────────────────
+_OVERRIDE_DB = Path(__file__).parent.parent / "data" / "overrides.db"
+
+def _get_override_conn():
+    _OVERRIDE_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_OVERRIDE_DB))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS grade_overrides (
+            id              TEXT PRIMARY KEY,
+            submission_id   TEXT NOT NULL,
+            original_score  REAL,
+            override_score  REAL NOT NULL,
+            max_score       REAL,
+            reason          TEXT,
+            faculty         TEXT DEFAULT 'faculty',
+            created_at      TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
+
+def _save_override(submission_id: str, original_score, override_score: float,
+                   max_score, reason: str, faculty: str = "faculty"):
+    conn = _get_override_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO grade_overrides
+        (id, submission_id, original_score, override_score, max_score, reason, faculty, created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (
+        str(uuid.uuid4()), submission_id, original_score, override_score,
+        max_score, reason, faculty, datetime.utcnow().isoformat() + "Z"
+    ))
+    conn.commit()
+    conn.close()
+
+def _get_overrides() -> List[dict]:
+    conn = _get_override_conn()
+    rows = conn.execute("SELECT * FROM grade_overrides ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def _get_override_for(submission_id: str) -> Optional[dict]:
+    conn = _get_override_conn()
+    row = conn.execute(
+        "SELECT * FROM grade_overrides WHERE submission_id=? ORDER BY created_at DESC LIMIT 1",
+        (submission_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+# ── Training reference store ──────────────────────────────────────────────────
+_TRAINING_DIR = Path(__file__).parent.parent / "data" / "training_refs"
+_TRAINING_DIR.mkdir(parents=True, exist_ok=True)
+
+_TRAINING_META_DB = Path(__file__).parent.parent / "data" / "training_meta.db"
+
+def _get_training_conn():
+    conn = sqlite3.connect(str(_TRAINING_META_DB))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS training_refs (
+            id          TEXT PRIMARY KEY,
+            subject     TEXT NOT NULL,
+            q_type      TEXT NOT NULL,
+            filename    TEXT NOT NULL,
+            description TEXT,
+            file_path   TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -851,6 +928,19 @@ async def override_grade(submission_id: str, body: OverrideRequest):
         existing = real if real else {"aiScore": None, "maxScore": None}
     else:
         existing = {"aiScore": None, "maxScore": None}
+
+    original_score = existing.get("aiScore")
+    max_score = existing.get("maxScore")
+
+    # Persist to SQLite so overrides survive restarts
+    _save_override(
+        submission_id=submission_id,
+        original_score=original_score,
+        override_score=body.score,
+        max_score=max_score,
+        reason=body.reason,
+    )
+
     result = {
         **existing,
         "submissionId": submission_id,
@@ -862,10 +952,16 @@ async def override_grade(submission_id: str, body: OverrideRequest):
     }
     GRADE_RESULTS[submission_id] = result
     _log_activity_safe(
-        action=f"Faculty override on {submission_id} (score: {body.score})",
+        action=f"Faculty override on {submission_id} → {body.score}/{max_score or '?'}",
         activity_type="override", subject=sub.get("questionId", ""), detail=body.reason,
     )
     return result
+
+
+@app.get("/api/submissions/overrides")
+async def get_all_overrides():
+    """Return all persisted faculty overrides (audit trail)."""
+    return {"overrides": _get_overrides()}
 
 
 @app.get("/api/analytics/co")
@@ -1323,6 +1419,7 @@ async def eval_answer_script(
             subject=subject,
             max_marks_per_q=max_marks_per_q,
             exam_questions=exam_questions,
+            student_name=file.filename or "",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1334,6 +1431,222 @@ async def eval_answer_script(
         subject=subject,
     )
     return report
+
+
+@app.post("/api/eval/script/batch")
+async def eval_answer_script_batch(
+    files: List[UploadFile] = File(...),
+    subject: str = Form("Mechanical Engineering"),
+    max_marks_per_q: int = Form(10),
+    exam_questions_json: str = Form(""),
+    student_names_json: str = Form(""),   # JSON array of names matching file order
+    student_usns_json: str = Form(""),    # JSON array of USNs matching file order
+):
+    """
+    Batch evaluation: upload multiple answer PDFs at once (or a ZIP).
+    Returns class-level summary + per-student reports.
+    """
+    import json as _json
+    from evaluation.script_pipeline import evaluate_multiple_scripts
+
+    upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    exam_questions = None
+    if exam_questions_json.strip():
+        try:
+            exam_questions = _json.loads(exam_questions_json)
+        except Exception:
+            pass
+
+    student_names = []
+    student_usns  = []
+    try:
+        student_names = _json.loads(student_names_json) if student_names_json.strip() else []
+        student_usns  = _json.loads(student_usns_json)  if student_usns_json.strip()  else []
+    except Exception:
+        pass
+
+    file_entries = []
+    for idx, uf in enumerate(files):
+        suffix   = Path(uf.filename or "upload.pdf").suffix or ".pdf"
+        save_path = str(upload_dir / f"batch_{uuid.uuid4().hex}{suffix}")
+        with open(save_path, "wb") as fp:
+            shutil.copyfileobj(uf.file, fp)
+
+        # If it's a ZIP, extract and add each contained file
+        if save_path.endswith(".zip"):
+            with zipfile.ZipFile(save_path, "r") as zf:
+                for zi, zname in enumerate(zf.namelist()):
+                    ext = Path(zname).suffix.lower()
+                    if ext not in {".pdf", ".png", ".jpg", ".jpeg"}:
+                        continue
+                    zdata = zf.read(zname)
+                    zpath = str(upload_dir / f"batch_{uuid.uuid4().hex}{ext}")
+                    with open(zpath, "wb") as zfp:
+                        zfp.write(zdata)
+                    file_entries.append({
+                        "file_path":    zpath,
+                        "student_name": Path(zname).stem,
+                        "student_usn":  "",
+                    })
+        else:
+            file_entries.append({
+                "file_path":    save_path,
+                "student_name": student_names[idx] if idx < len(student_names) else Path(uf.filename or "").stem,
+                "student_usn":  student_usns[idx]  if idx < len(student_usns)  else "",
+            })
+
+    if not file_entries:
+        raise HTTPException(status_code=400, detail="No valid files found in upload")
+
+    try:
+        batch_result = evaluate_multiple_scripts(
+            file_entries=file_entries,
+            subject=subject,
+            max_marks_per_q=max_marks_per_q,
+            exam_questions=exam_questions,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    _log_activity_safe(
+        action=f"Batch evaluation: {batch_result['total_students']} scripts, "
+               f"class avg {batch_result['class_avg']}%, "
+               f"{batch_result['pass_count']} pass / {batch_result['fail_count']} fail",
+        activity_type="grade",
+        subject=subject,
+    )
+    return batch_result
+
+
+@app.get("/api/eval/script/batch/csv")
+async def batch_results_csv(subject: str = ""):
+    """Placeholder — actual CSV is generated client-side from the batch JSON."""
+    return {"message": "Generate CSV from the batch report returned by POST /api/eval/script/batch"}
+
+
+@app.get("/api/health/deps")
+async def health_deps():
+    """Return availability of optional ML dependencies (OCR, etc.)."""
+    try:
+        from evaluation.ocr_engine import get_dependency_status
+        ocr_deps = get_dependency_status()
+    except Exception as e:
+        ocr_deps = {"ready": False, "error": str(e)}
+
+    return {
+        "ocr_pipeline": ocr_deps,
+        "theory_evaluator":   THEORY_EVAL_AVAILABLE,
+        "numerical_evaluator": NUMERICAL_EVAL_AVAILABLE,
+        "drawing_evaluator":  DRAWING_EVAL_AVAILABLE,
+        "install_instructions": {
+            "ocr": "pip install easyocr pdf2image Pillow && apt-get install -y poppler-utils",
+        }
+    }
+
+
+@app.post("/api/training/upload")
+async def upload_training_reference(
+    file: UploadFile = File(...),
+    subject: str = Form(...),
+    q_type: str = Form("theory"),   # theory | numerical | drawing
+    description: str = Form(""),
+):
+    """
+    Upload a reference answer PDF or image to improve evaluator accuracy.
+    The file is stored in data/training_refs/<subject>/ and its path is
+    registered in training_meta.db so the evaluators can use it for
+    keyword/rubric extraction.
+    """
+    subj_dir = _TRAINING_DIR / subject.replace(" ", "_")
+    subj_dir.mkdir(parents=True, exist_ok=True)
+
+    suffix = Path(file.filename or "ref.pdf").suffix or ".pdf"
+    ref_id  = uuid.uuid4().hex[:8]
+    save_path = str(subj_dir / f"{q_type}_{ref_id}{suffix}")
+    with open(save_path, "wb") as fp:
+        shutil.copyfileobj(file.file, fp)
+
+    conn = _get_training_conn()
+    conn.execute("""
+        INSERT INTO training_refs (id, subject, q_type, filename, description, file_path, created_at)
+        VALUES (?,?,?,?,?,?,?)
+    """, (ref_id, subject, q_type, file.filename or "", description, save_path,
+          datetime.utcnow().isoformat() + "Z"))
+    conn.commit()
+    conn.close()
+
+    _log_activity_safe(
+        action=f"Training reference uploaded: {file.filename} ({q_type}, {subject})",
+        activity_type="train", subject=subject,
+    )
+    return {
+        "id": ref_id,
+        "subject": subject,
+        "q_type": q_type,
+        "filename": file.filename,
+        "file_path": save_path,
+        "message": "Reference answer uploaded and registered for evaluator training.",
+    }
+
+
+@app.get("/api/training/references")
+async def list_training_references(subject: str = "", q_type: str = ""):
+    """List all uploaded training reference files."""
+    conn = _get_training_conn()
+    query = "SELECT * FROM training_refs WHERE 1=1"
+    params: list = []
+    if subject:
+        query += " AND subject=?"
+        params.append(subject)
+    if q_type:
+        query += " AND q_type=?"
+        params.append(q_type)
+    query += " ORDER BY created_at DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return {"references": [dict(r) for r in rows]}
+
+
+@app.delete("/api/training/references/{ref_id}")
+async def delete_training_reference(ref_id: str):
+    """Remove a training reference file and its metadata."""
+    conn = _get_training_conn()
+    row = conn.execute("SELECT * FROM training_refs WHERE id=?", (ref_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Reference not found")
+    row = dict(row)
+    try:
+        Path(row["file_path"]).unlink(missing_ok=True)
+    except Exception:
+        pass
+    conn.execute("DELETE FROM training_refs WHERE id=?", (ref_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": ref_id}
+
+
+@app.get("/api/students/export/csv")
+async def export_students_csv():
+    """Export student grades as CSV for university MIS / spreadsheet import."""
+    if not HAS_DEMO_DATA:
+        raise HTTPException(status_code=503, detail="No student data available")
+    students = _demo.DEMO_STUDENTS
+    lines = ["USN,Name,Section,Theory%,Numerical%,Drawing%,CO1,CO2,CO3,CO4,CO5,Avg%"]
+    for s in students:
+        lines.append(
+            f"{s.get('usn','')},{s.get('name','')},{s.get('section','')},"
+            f"{s.get('theory','')},{s.get('numerical','')},{s.get('drawing','')},"
+            f"{s.get('co1','')},{s.get('co2','')},{s.get('co3','')},{s.get('co4','')},{s.get('co5','')},"
+            f"{s.get('avg','')}"
+        )
+    content = "\n".join(lines)
+    return StreamingResponse(
+        io.BytesIO(content.encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=student_grades.csv"},
+    )
 
 
 if __name__ == "__main__":

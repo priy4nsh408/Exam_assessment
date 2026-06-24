@@ -1,32 +1,30 @@
 import { NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard, FileText, Brain, Calculator, PenTool,
-  BarChart3, Users, CheckSquare, BookOpen, Cpu, Database, Activity, ScrollText
+  LayoutDashboard, FileText, Brain,
+  BarChart3, Users, CheckSquare, BookOpen, Cpu, Database,
+  Activity, ScrollText, FlaskConical
 } from 'lucide-react'
 import clsx from 'clsx'
 
 const navItems = [
-  { label: 'Overview', icon: LayoutDashboard, path: '/' },
-  { label: 'Question Generator', icon: Brain, path: '/generate' },
-  { label: 'Question Bank', icon: BookOpen, path: '/questions' },
-  { label: 'Exam Papers', icon: FileText, path: '/exams' },
-  { label: 'Data Source', icon: Database, path: '/data-sources' },
+  { label: 'Overview',          icon: LayoutDashboard, path: '/' },
+  { label: 'Question Generator', icon: Brain,           path: '/generate' },
+  { label: 'Question Bank',      icon: BookOpen,        path: '/questions' },
+  { label: 'Exam Papers',        icon: FileText,        path: '/exams' },
+  { label: 'Data Source',        icon: Database,        path: '/data-sources' },
   { divider: true, label: 'Evaluation' },
-  { label: 'Answer Script', icon: ScrollText, path: '/eval/script' },
-  { label: 'Theory Grader', icon: Brain, path: '/eval/theory' },
-  { label: 'Numerical Grader', icon: Calculator, path: '/eval/numerical' },
-  { label: 'Drawing Evaluator', icon: PenTool, path: '/eval/drawing' },
-  { label: 'Validation (κ)', icon: Activity, path: '/eval/validate' },
+  { label: 'Evaluate Scripts',   icon: ScrollText,      path: '/eval/script' },
+  { label: 'Train Engine',       icon: FlaskConical,    path: '/eval/train' },
+  { label: 'Validation (κ)',     icon: Activity,        path: '/eval/validate' },
   { divider: true, label: 'Analytics' },
-  { label: 'CO/PO Analytics', icon: BarChart3, path: '/analytics' },
-  { label: 'Students', icon: Users, path: '/students' },
-  { label: 'Faculty Override', icon: CheckSquare, path: '/override' },
+  { label: 'CO/PO Analytics',   icon: BarChart3,       path: '/analytics' },
+  { label: 'Students',          icon: Users,           path: '/students' },
+  { label: 'Faculty Override',   icon: CheckSquare,     path: '/override' },
 ]
 
 export function Sidebar() {
   return (
     <aside className="fixed inset-y-0 left-0 w-60 bg-navy-900 flex flex-col z-50">
-      {/* Logo */}
       <div className="px-6 py-5 border-b border-navy-700">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center">
@@ -39,7 +37,6 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Navigation */}
       <nav className="flex-1 overflow-y-auto py-4 px-3">
         {navItems.map((item, idx) => {
           if (item.divider) {
@@ -73,7 +70,6 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Footer */}
       <div className="px-3 py-4 border-t border-navy-700">
         <div className="flex items-center gap-3 px-3 py-2">
           <div className="w-7 h-7 rounded-full bg-indigo-500 flex items-center justify-center">

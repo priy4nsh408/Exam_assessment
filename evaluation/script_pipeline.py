@@ -1,21 +1,24 @@
 """
 Answer-Script Pipeline
 ======================
-Orchestrates the full flow:
-  PDF/image upload → OCR → answer segmentation → question-type classification
-  → dispatch to theory / numerical / drawing evaluator → aggregate report
+PDF/image upload → OCR → answer segmentation → type classification
+→ theory / numerical / drawing evaluator → aggregate report
 
-Public entry point:
-  evaluate_answer_script(file_path, subject, max_marks_per_q, exam_questions)
+Public entry points:
+  evaluate_answer_script(file_path, ...)
+  evaluate_multiple_scripts(file_paths, ...)   ← batch
 """
 
 from __future__ import annotations
 import re
 from typing import List, Dict, Optional, Any
 
-from evaluation.ocr_engine import ocr_pdf, ocr_image_file
+from evaluation.ocr_engine import (
+    ocr_pdf, ocr_image_file, get_dependency_status
+)
 
-# ── lazy imports so the module loads even without ML deps ────────────────────
+
+# ── lazy evaluator imports ───────────────────────────────────────────────────
 def _theory():
     from evaluation.theory_evaluator import evaluate_theory
     return evaluate_theory
@@ -30,61 +33,51 @@ def _drawing():
 
 
 # ── Question-type classifier ─────────────────────────────────────────────────
-
 _NUMERICAL_SIGNALS = re.compile(
-    r"\b(calculat|comput|find|determin|evaluat|solv|what is the value|"
+    r"\b(calculat|comput|find|determin|evaluat|solv|value of|"
     r"how much|how many|express in|in units|mpa|kpa|kn|rpm|"
     r"stress|strain|force|moment|torque|velocity|pressure|"
     r"temperature|efficiency|power|energy|heat|work|"
-    r"area|volume|length|diameter|radius)\b",
-    re.I,
+    r"area|volume|length|diameter|radius|shear|bending|"
+    r"modulus|poisson|thermal|conductivity|viscosity)\b", re.I,
 )
 _DRAWING_SIGNALS = re.compile(
     r"\b(draw|sketch|illustrat|show (the|a)|diagram|label|mark|"
     r"cross.?section|isometric|orthograph|projection|free.?body|fbd|"
-    r"shear force|bending moment|t.?s diagram|p.?v diagram)\b",
-    re.I,
+    r"shear force|bending moment|t.?s diagram|p.?v diagram)\b", re.I,
 )
 _THEORY_SIGNALS = re.compile(
     r"\b(explain|describe|define|state|list|discuss|differentiat|compare|"
     r"what (is|are|do)|how does|why|advantages|disadvantages|"
-    r"principle|concept|law|theorem|classification|types of)\b",
-    re.I,
+    r"principle|concept|law|theorem|classification|types of)\b", re.I,
 )
 
 
 def classify_question_type(text: str) -> str:
-    """Return 'theory', 'numerical', or 'drawing' based on keyword signals."""
     scores = {
-        "drawing": len(_DRAWING_SIGNALS.findall(text)),
+        "drawing":   len(_DRAWING_SIGNALS.findall(text)),
         "numerical": len(_NUMERICAL_SIGNALS.findall(text)),
-        "theory": len(_THEORY_SIGNALS.findall(text)),
+        "theory":    len(_THEORY_SIGNALS.findall(text)),
     }
     return max(scores, key=scores.get)  # type: ignore[arg-type]
 
 
 # ── Answer segmentation ──────────────────────────────────────────────────────
-
 _ANSWER_BOUNDARY = re.compile(
     r"(?m)^[\s]*(?:"
-    r"(?:ans(?:wer)?\.?\s*)?[Qq](?:uestion)?\.?\s*(\d+)"   # Q1, Question 1, Ans Q1
-    r"|(\d+)[.)]\s"                                          # 1. or 1)
-    r"|(?:ans(?:wer)?\.?\s*(\d+))"                          # Answer 3
+    r"(?:ans(?:wer)?\.?\s*)?[Qq](?:uestion)?\.?\s*(\d+)"
+    r"|(\d+)[.)]\s"
+    r"|(?:ans(?:wer)?\.?\s*(\d+))"
     r")",
 )
 
 
 def segment_answers(pages: List[Dict]) -> List[Dict]:
-    """
-    Given per-page OCR results, detect answer boundaries and return a list of
-    answer segments: {q_number, text, image_paths, page_start}.
-
-    Falls back to one-segment-per-page when no explicit markers are found.
-    """
+    """Detect Q-boundaries across all pages; fall back to one segment per page."""
     full_text = ""
-    page_offsets: List[tuple[int, str]] = []  # (char_offset, image_path)
+    page_offsets: List[tuple] = []
     for p in pages:
-        page_offsets.append((len(full_text), p["image_path"]))
+        page_offsets.append((len(full_text), p["image_path"], p.get("confidence", 1.0)))
         full_text += p["text"] + "\n\n"
 
     matches = list(_ANSWER_BOUNDARY.finditer(full_text))
@@ -92,63 +85,60 @@ def segment_answers(pages: List[Dict]) -> List[Dict]:
     def _q_num(m: re.Match) -> int:
         return int(next(g for g in m.groups() if g is not None))
 
-    def _img_for_offset(offset: int) -> str:
-        img = page_offsets[0][1]
-        for char_off, path in page_offsets:
+    def _img_conf_for_offset(offset: int):
+        img, conf = page_offsets[0][1], page_offsets[0][2]
+        for char_off, path, c in page_offsets:
             if char_off <= offset:
-                img = path
-        return img
+                img, conf = path, c
+        return img, conf
 
     if not matches:
-        # No markers — treat each page as a separate answer
-        segments = []
-        for i, p in enumerate(pages, start=1):
-            segments.append({
+        return [
+            {
                 "q_number": i,
                 "text": p["text"],
                 "image_paths": [p["image_path"]],
                 "page_start": p["page"],
-            })
-        return segments
+                "ocr_confidence": p.get("confidence", 1.0),
+                "low_confidence": p.get("low_confidence", False),
+            }
+            for i, p in enumerate(pages, start=1)
+        ]
 
     segments: List[Dict] = []
     for idx, m in enumerate(matches):
         start = m.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(full_text)
-        img = _img_for_offset(m.start())
+        img, conf = _img_conf_for_offset(m.start())
         segments.append({
             "q_number": _q_num(m),
             "text": full_text[start:end].strip(),
             "image_paths": [img],
             "page_start": next(
-                (i + 1 for i, (off, _) in enumerate(page_offsets) if off <= m.start()),
-                1,
+                (i + 1 for i, (off, _, __) in enumerate(page_offsets) if off <= m.start()), 1
             ),
+            "ocr_confidence": conf,
+            "low_confidence": conf < 0.6,
         })
     return segments
 
 
-# ── Per-question evaluator dispatch ─────────────────────────────────────────
-
-def _evaluate_segment(
-    seg: Dict,
-    q_meta: Optional[Dict],
-    subject: str,
-    max_marks: int,
-) -> Dict:
-    """Route one answer segment to the right evaluator and return its result."""
-    q_text = (q_meta or {}).get("question", "") or f"Question {seg['q_number']}"
+# ── Per-segment evaluation ───────────────────────────────────────────────────
+def _evaluate_segment(seg: Dict, q_meta: Optional[Dict], subject: str, max_marks: int) -> Dict:
+    q_text    = (q_meta or {}).get("question", "") or f"Question {seg['q_number']}"
     ref_answer = (q_meta or {}).get("reference_answer", "")
-    q_type = (q_meta or {}).get("type") or classify_question_type(q_text + " " + seg["text"])
+    q_type    = (q_meta or {}).get("type") or classify_question_type(q_text + " " + seg["text"])
     student_text = seg["text"]
 
     result: Dict[str, Any] = {
-        "q_number": seg["q_number"],
-        "q_type": q_type,
-        "question": q_text,
-        "ocr_text": student_text,
-        "image_paths": seg.get("image_paths", []),
-        "page_start": seg.get("page_start", 1),
+        "q_number":       seg["q_number"],
+        "q_type":         q_type,
+        "question":       q_text,
+        "ocr_text":       student_text,
+        "ocr_confidence": round(seg.get("ocr_confidence", 1.0), 3),
+        "low_confidence": seg.get("low_confidence", False),
+        "image_paths":    seg.get("image_paths", []),
+        "page_start":     seg.get("page_start", 1),
     }
 
     try:
@@ -162,40 +152,41 @@ def _evaluate_segment(
                 expected_dimensions=None,
             )
             result.update({
-                "ai_score": ev["ai_score"],
-                "max_score": ev["max_score"],
+                "ai_score":   ev["ai_score"],
+                "max_score":  ev["max_score"],
                 "confidence": ev.get("confidence", 0.6),
-                "feedback": ev.get("feedback", ""),
+                "feedback":   ev.get("feedback", ""),
+                "detection_mode": ev.get("detection_mode", "heuristic"),
+                "is_stub":    ev.get("detection_mode", "heuristic") == "heuristic",
                 "detail": {
                     "detected_elements": ev.get("detected_elements", []),
-                    "violations": ev.get("violations", []),
-                    "rubric": ev.get("rubric", []),
+                    "violations":        ev.get("violations", []),
+                    "rubric":            ev.get("rubric", []),
                 },
             })
 
         elif q_type == "numerical":
-            rubric = (q_meta or {}).get("rubric_steps", [])
             ev = _numerical()(
                 question=q_text,
                 student_solution=student_text,
                 reference_answer=ref_answer,
-                rubric_steps=rubric,
+                rubric_steps=(q_meta or {}).get("rubric_steps", []),
                 expected_formula=(q_meta or {}).get("expected_formula", ""),
                 expected_final_answer=(q_meta or {}).get("expected_final_answer", ""),
                 subject=subject,
                 max_marks=max_marks,
             )
             result.update({
-                "ai_score": ev["ai_score"],
-                "max_score": ev["max_score"],
+                "ai_score":   ev["ai_score"],
+                "max_score":  ev["max_score"],
                 "confidence": ev.get("confidence", 0.7),
-                "feedback": ev.get("feedback", ""),
+                "feedback":   ev.get("feedback", ""),
                 "detail": {
-                    "steps": ev.get("steps", []),
-                    "error_summary": ev.get("error_summary", {}),
-                    "formula_mentioned": ev.get("formula_mentioned", False),
-                    "final_answer_correct": ev.get("final_answer_correct", False),
-                    "deductions": ev.get("deductions", []),
+                    "steps":               ev.get("steps", []),
+                    "error_summary":       ev.get("error_summary", {}),
+                    "formula_mentioned":   ev.get("formula_mentioned", False),
+                    "final_answer_correct":ev.get("final_answer_correct", False),
+                    "deductions":          ev.get("deductions", []),
                 },
             })
 
@@ -208,59 +199,46 @@ def _evaluate_segment(
                 max_marks=max_marks,
             )
             result.update({
-                "ai_score": ev["ai_score"],
-                "max_score": ev["max_score"],
+                "ai_score":   ev["ai_score"],
+                "max_score":  ev["max_score"],
                 "confidence": ev.get("confidence", 0.75),
-                "feedback": ev.get("feedback", ""),
+                "feedback":   ev.get("feedback", ""),
                 "detail": {
-                    "keyword_score": ev.get("keyword_score", 0),
-                    "semantic_score": ev.get("semantic_score", 0),
+                    "keyword_score":    ev.get("keyword_score", 0),
+                    "semantic_score":   ev.get("semantic_score", 0),
                     "matched_keywords": ev.get("keywords", {}).get("found", []),
                     "missing_keywords": ev.get("keywords", {}).get("missing", []),
-                    "explanation": ev.get("explanation", ""),
+                    "explanation":      ev.get("explanation", ""),
                 },
             })
 
     except Exception as exc:
         result.update({
-            "ai_score": 0,
-            "max_score": max_marks,
+            "ai_score":   0,
+            "max_score":  max_marks,
             "confidence": 0.0,
-            "feedback": f"Evaluation error: {exc}",
+            "feedback":   f"Evaluation error: {exc}",
             "detail": {},
         })
 
     return result
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
-
+# ── Single-script entry point ────────────────────────────────────────────────
 def evaluate_answer_script(
     file_path: str,
     subject: str = "Mechanical Engineering",
     max_marks_per_q: int = 10,
     exam_questions: Optional[List[Dict]] = None,
+    student_name: str = "",
+    student_usn: str = "",
 ) -> Dict:
     """
-    Main pipeline.
-
-    Parameters
-    ----------
-    file_path       : absolute path to uploaded PDF or image
-    subject         : subject name passed to evaluators
-    max_marks_per_q : marks per question (uniform; override via exam_questions)
-    exam_questions  : optional list of dicts with keys:
-                      q_number, question, type, reference_answer, max_marks,
-                      expected_formula, expected_final_answer, rubric_steps
-
-    Returns
-    -------
-    {
-      total_score, max_total, percentage, subject,
-      questions_evaluated, ocr_pages,
-      answers: [ per-question result dicts ]
-    }
+    Main pipeline for one answer script.
+    Returns full JSON report: total_score, percentage, per-question detail, etc.
     """
+    deps = get_dependency_status()
+
     is_pdf = file_path.lower().endswith(".pdf")
     if is_pdf:
         pages = ocr_pdf(file_path)
@@ -269,7 +247,6 @@ def evaluate_answer_script(
 
     segments = segment_answers(pages)
 
-    # Build a lookup {q_number -> question metadata} from optional exam_questions
     q_map: Dict[int, Dict] = {}
     if exam_questions:
         for q in exam_questions:
@@ -277,23 +254,86 @@ def evaluate_answer_script(
 
     answers = []
     total_score = 0.0
-    max_total = 0.0
+    max_total   = 0.0
     for seg in segments:
         q_meta = q_map.get(seg["q_number"])
-        marks = int((q_meta or {}).get("max_marks", max_marks_per_q))
-        res = _evaluate_segment(seg, q_meta, subject, marks)
+        marks  = int((q_meta or {}).get("max_marks", max_marks_per_q))
+        res    = _evaluate_segment(seg, q_meta, subject, marks)
         answers.append(res)
         total_score += res.get("ai_score", 0)
-        max_total += res.get("max_score", marks)
+        max_total   += res.get("max_score", marks)
 
     percentage = round((total_score / max_total * 100), 1) if max_total > 0 else 0.0
 
+    # Page-level OCR quality summary
+    avg_ocr_conf = (
+        sum(p.get("confidence", 1.0) for p in pages) / len(pages) if pages else 1.0
+    )
+    low_conf_pages = [p["page"] for p in pages if p.get("low_confidence")]
+
     return {
-        "total_score": round(total_score, 1),
-        "max_total": max_total,
-        "percentage": percentage,
-        "subject": subject,
-        "questions_evaluated": len(answers),
-        "ocr_pages": len(pages),
-        "answers": answers,
+        "student_name":          student_name,
+        "student_usn":           student_usn,
+        "total_score":           round(total_score, 1),
+        "max_total":             max_total,
+        "percentage":            percentage,
+        "subject":               subject,
+        "questions_evaluated":   len(answers),
+        "ocr_pages":             len(pages),
+        "avg_ocr_confidence":    round(avg_ocr_conf, 3),
+        "low_confidence_pages":  low_conf_pages,
+        "ocr_warning":           len(low_conf_pages) > 0,
+        "deps":                  deps,
+        "answers":               answers,
+    }
+
+
+# ── Batch entry point ────────────────────────────────────────────────────────
+def evaluate_multiple_scripts(
+    file_entries: List[Dict],  # [{file_path, student_name, student_usn}, ...]
+    subject: str = "Mechanical Engineering",
+    max_marks_per_q: int = 10,
+    exam_questions: Optional[List[Dict]] = None,
+) -> Dict:
+    """
+    Batch evaluation: process multiple answer scripts.
+    Returns {reports: [...], class_avg, pass_count, fail_count, ...}
+    """
+    reports = []
+    for entry in file_entries:
+        try:
+            r = evaluate_answer_script(
+                file_path=entry["file_path"],
+                subject=subject,
+                max_marks_per_q=max_marks_per_q,
+                exam_questions=exam_questions,
+                student_name=entry.get("student_name", ""),
+                student_usn=entry.get("student_usn", ""),
+            )
+            r["error"] = None
+        except Exception as exc:
+            r = {
+                "student_name": entry.get("student_name", ""),
+                "student_usn":  entry.get("student_usn", ""),
+                "file_path":    entry.get("file_path", ""),
+                "error":        str(exc),
+                "total_score":  0,
+                "max_total":    0,
+                "percentage":   0,
+                "answers":      [],
+            }
+        reports.append(r)
+
+    valid = [r for r in reports if not r.get("error")]
+    class_avg = round(sum(r["percentage"] for r in valid) / len(valid), 1) if valid else 0.0
+    pass_count = sum(1 for r in valid if r["percentage"] >= 40)
+    fail_count = len(valid) - pass_count
+
+    return {
+        "reports":    reports,
+        "total_students": len(reports),
+        "class_avg":  class_avg,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "subject":    subject,
     }
