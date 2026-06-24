@@ -453,8 +453,10 @@ def bloom_analyzer_agent(state: PipelineState) -> PipelineState:
 
 def scout_agent(state: PipelineState) -> PipelineState:
     """Retrieves relevant context from ChromaDB with adaptive k based on Bloom level."""
+    import sys
+    print("🔎 SCOUT AGENT CALLED", file=sys.stderr, flush=True)
+    print(f"🔎 SCOUT state keys: subject={state.get('subject')}, unit={state.get('unit')}", file=sys.stderr, flush=True)
     try:
-        import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from vector_store.chroma_client import create_vector_db
         from vector_store.retriever import retrieve_context, retrieve_pyq_context, retrieve_question_bank, _fallback_keyword_retrieve
@@ -1028,16 +1030,20 @@ def run_pipeline_with_diagnostics(subject: str, unit: str, bloom_level: int, que
         "drop_reasons": [],
     }
 
+    import sys as _sys
     pipeline = get_pipeline()
+    print(f"🔎 PIPELINE: pipeline={'yes' if pipeline else 'no'}, OLLAMA={OLLAMA_AVAILABLE}", file=_sys.stderr, flush=True)
     if pipeline and OLLAMA_AVAILABLE:
         try:
             result = pipeline.invoke(initial_state)
             if result["final_questions"]:
+                print(f"🔎 PIPELINE: LangGraph produced {len(result['final_questions'])} questions", file=_sys.stderr, flush=True)
                 return result["final_questions"], result.get("drop_reasons", []), result.get("errors", [])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"🔎 PIPELINE: LangGraph failed: {e}", file=_sys.stderr, flush=True)
 
     # Fallback: run agents manually without LangGraph
+    print("🔎 PIPELINE: running agents manually", file=_sys.stderr, flush=True)
     state = initial_state
     for agent in [bloom_analyzer_agent, scout_agent, generator_agent,
                   quality_validator_agent, difficulty_validator_agent,
