@@ -11,6 +11,7 @@ import DrawingEvaluator from './pages/DrawingEvaluator'
 import COPOAnalytics from './pages/COPOAnalytics'
 import Students from './pages/Students'
 import FacultyOverride from './pages/FacultyOverride'
+import ValidationMetrics from './pages/ValidationMetrics'
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="eval/theory" element={<TheoryEvaluator />} />
           <Route path="eval/numerical" element={<NumericalGrader />} />
           <Route path="eval/drawing" element={<DrawingEvaluator />} />
+          <Route path="eval/validate" element={<ValidationMetrics />} />
           <Route path="analytics" element={<COPOAnalytics />} />
           <Route path="students" element={<Students />} />
           <Route path="override" element={<FacultyOverride />} />

@@ -1151,6 +1151,129 @@ async def eval_numerical(body: NumericalEvalRequest):
     return result
 
 
+@app.get("/api/eval/validate/kappa")
+async def eval_validate_kappa():
+    """
+    Computes Cohen's Kappa between AI scores and simulated faculty scores on
+    the demo dataset (theory + numerical submissions). This demonstrates the
+    validation methodology described in the synopsis (target κ ≥ 0.75).
+
+    Faculty scores are derived from known answer quality tiers authored in
+    seed_demo_data.py - "good" answers get near-full marks, "poor" answers
+    get low marks, matching what a faculty member would assign. The AI scores
+    are computed live by the real evaluators against the seeded answer keys.
+
+    Score buckets for κ computation: 0-3 (Low), 4-6 (Mid), 7-10 (High).
+    Cohen's κ = (P_o - P_e) / (1 - P_e) where P_o = observed agreement,
+    P_e = expected agreement by chance.
+    """
+    if not HAS_DEMO_DATA:
+        raise HTTPException(status_code=503, detail="Demo data not available")
+
+    try:
+        grades = _demo._grade_all_demo_submissions()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not compute grades: {e}")
+
+    # Simulated faculty scores based on known answer quality tiers.
+    # These represent what a human examiner would award for each submission,
+    # serving as the "ground truth" for Kappa computation.
+    # Submission ID assignment (from demo_data._build_submissions, in order):
+    # ST-001 Arjun:   S-001 theory (good), S-002 numerical (good)
+    # ST-002 Priya:   S-003 theory (good), S-004 numerical (good)
+    # ST-003 Rohan:   S-005 theory (poor), S-006 numerical (wrong_final)
+    # ST-004 Kavitha: S-007 theory (good), S-008 numerical (no_formula)
+    # ST-005 Suresh:  S-009 theory (poor), S-010 numerical (good)
+    FACULTY_SCORES = {
+        # Theory submissions (out of 10): good → 8, poor → 2
+        "S-001": 8,   # Arjun - good theory
+        "S-003": 8,   # Priya - good theory
+        "S-005": 2,   # Rohan - poor theory
+        "S-007": 8,   # Kavitha - good theory
+        "S-009": 2,   # Suresh - poor theory
+        # Numerical submissions (out of 10): good → 10, no_formula → 7, wrong_final → 7
+        "S-002": 10,  # Arjun - good numerical
+        "S-004": 10,  # Priya - good numerical
+        "S-006": 7,   # Rohan - wrong_final (-1)
+        "S-008": 7,   # Kavitha - no_formula (-1)
+        "S-010": 10,  # Suresh - good numerical
+    }
+
+    # Map scores to 3-bucket ordinal scale
+    def bucket(score: float, max_score: float) -> int:
+        pct = (score / max_score * 10) if max_score else 0
+        if pct <= 3: return 0
+        if pct <= 6: return 1
+        return 2
+
+    BUCKET_LABELS = {0: "Low (0-3)", 1: "Mid (4-6)", 2: "High (7-10)"}
+
+    pairs = []
+    for sub_id, faculty_raw in FACULTY_SCORES.items():
+        g = grades.get(sub_id)
+        if not g:
+            continue
+        ai_bucket = bucket(g["ai_score"], g["max_score"])
+        fac_bucket = bucket(faculty_raw, 10)
+        pairs.append({
+            "submission_id": sub_id,
+            "type": g["type"],
+            "ai_score": g["ai_score"],
+            "max_score": g["max_score"],
+            "ai_bucket": BUCKET_LABELS[ai_bucket],
+            "faculty_score": faculty_raw,
+            "faculty_bucket": BUCKET_LABELS[fac_bucket],
+            "agreement": ai_bucket == fac_bucket,
+        })
+
+    if not pairs:
+        return {"kappa": None, "pairs": [], "interpretation": "No pairs computed"}
+
+    n = len(pairs)
+    n_agree = sum(1 for p in pairs if p["agreement"])
+    p_observed = n_agree / n
+
+    # Expected agreement by chance (marginal frequencies)
+    from collections import Counter
+    ai_counts = Counter(p["ai_bucket"] for p in pairs)
+    fac_counts = Counter(p["faculty_bucket"] for p in pairs)
+    p_expected = sum(
+        (ai_counts.get(b, 0) / n) * (fac_counts.get(b, 0) / n)
+        for b in set(ai_counts) | set(fac_counts)
+    )
+
+    kappa = round((p_observed - p_expected) / (1 - p_expected), 3) if p_expected < 1.0 else 1.0
+
+    if kappa >= 0.80:
+        interpretation = "Almost perfect agreement (κ ≥ 0.80)"
+    elif kappa >= 0.75:
+        interpretation = "Substantial agreement — meets project target (κ ≥ 0.75)"
+    elif kappa >= 0.60:
+        interpretation = "Moderate agreement (κ ≥ 0.60)"
+    elif kappa >= 0.40:
+        interpretation = "Fair agreement (κ ≥ 0.40)"
+    else:
+        interpretation = "Slight agreement (κ < 0.40)"
+
+    theory_pairs = [p for p in pairs if p["type"] == "theory"]
+    num_pairs = [p for p in pairs if p["type"] == "numerical"]
+
+    return {
+        "kappa": kappa,
+        "p_observed": round(p_observed, 3),
+        "p_expected": round(p_expected, 3),
+        "n_pairs": n,
+        "n_agreement": n_agree,
+        "interpretation": interpretation,
+        "target": "κ ≥ 0.75",
+        "target_met": kappa >= 0.75,
+        "theory_accuracy": round(sum(1 for p in theory_pairs if p["agreement"]) / len(theory_pairs), 3) if theory_pairs else None,
+        "numerical_accuracy": round(sum(1 for p in num_pairs if p["agreement"]) / len(num_pairs), 3) if num_pairs else None,
+        "pairs": pairs,
+        "note": "Faculty scores are derived from known answer quality tiers authored in seed_demo_data.py. Buckets: Low=0-3, Mid=4-6, High=7-10 (out of 10).",
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
