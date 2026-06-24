@@ -1,4 +1,4 @@
-# MechAssess — AI-Powered Question Generation & Evaluation System
+# MechAssess — AI-Powered Closed-Loop Assessment System
 
 **Team QE29 · RV College of Engineering · Interdisciplinary Project (Semester 6)**
 
@@ -15,13 +15,42 @@
 
 ## What This Is
 
-MechAssess is a closed-loop AI assessment platform for Mechanical Engineering education. It covers the complete assessment lifecycle:
+MechAssess is a closed-loop AI assessment platform for Mechanical Engineering education. It covers the complete assessment lifecycle — from AI-generated exam papers to automated answer-script grading with human-in-the-loop faculty override.
 
-1. **Question Generation** — 11-agent LangGraph RAG pipeline generates syllabus-aligned questions with Bloom level, CO/PO tags, SHA-256 deduplication, and SQLite persistence
-2. **Theory Evaluation** — Two-tier LLM scoring (concept + detail) with ME keyword banks and cosine similarity
-3. **Numerical Grading** — Step-level automated grading with 5-category error classification via chain-of-thought LLM
-4. **Drawing Evaluation** — OpenCV preprocessing + YOLOv8 detection + LLaVA VLM + IS/BIS compliance engine
-5. **Unified Dashboard** — React + TypeScript frontend with real-time SSE streaming, CO/PO analytics, and human-in-the-loop grade override
+### Core capabilities
+
+| Module | What it does |
+|---|---|
+| **Question Generation** | 11-agent LangGraph RAG pipeline generates syllabus-aligned questions tagged with Bloom level, CO/PO, difficulty, and marks. SHA-256 deduplication prevents repeats. |
+| **Answer Script Evaluation** | PDF/image upload → EasyOCR → auto-segment by question → classify (theory / numerical / drawing) → AI score → downloadable report |
+| **Theory Evaluator** | sentence-transformers cosine similarity + ME keyword bank (40 % keyword / 60 % semantic blend) |
+| **Numerical Grader** | Step-level LLM chain-of-thought with 5-category error classification; heuristic fallback works without Ollama |
+| **Drawing Evaluator** | OpenCV preprocessing → EasyOCR extracts text labels & dimensions → matches expected parts → deducts for missing; always flags for faculty visual review |
+| **Training Engine** | Upload reference PDFs per subject/question-type to improve AI grading vocabulary and rubric extraction |
+| **CO/PO Analytics** | Course Outcome and Program Outcome attainment charts per batch |
+| **Faculty Override** | SQLite-persisted grade overrides survive restarts; Cohen's Kappa tracks AI–faculty agreement (target κ ≥ 0.75) |
+| **Batch Evaluation** | Upload multiple scripts or a ZIP → class summary table + per-student drill-down + CSV export |
+
+---
+
+## Tech Stack
+
+### Backend
+- **FastAPI** — REST API server
+- **SQLite** — three databases: `questions.db`, `overrides.db`, `training_meta.db`
+- **LangGraph + LangChain** — 11-agent question generation pipeline
+- **ChromaDB** — vector store for RAG
+- **sentence-transformers** (`all-MiniLM-L6-v2`) — semantic similarity for theory grading
+- **EasyOCR** — deep-learning OCR for handwritten answer scripts and drawing labels
+- **OpenCV** (`opencv-python-headless`) — image preprocessing (adaptive threshold) before OCR
+- **pdf2image + poppler** — PDF → image conversion for OCR
+- **Ollama** (optional) — local LLM for numerical step grading; heuristic fallback used if unavailable
+
+### Frontend
+- **React 18 + TypeScript + Vite**
+- **Tailwind CSS**
+- **lucide-react** — icons
+- **react-router-dom** — client-side routing
 
 ---
 
@@ -29,210 +58,208 @@ MechAssess is a closed-loop AI assessment platform for Mechanical Engineering ed
 
 ```
 Exam_assessment/
-├── frontend/                    # React + TypeScript + Tailwind CSS dashboard
-│   └── src/
-│       ├── pages/               # 9 dashboard pages (all wired to real API)
-│       ├── components/          # Sidebar, Header, StatCard, BloomBadge
-│       ├── types/               # TypeScript entity types
-│       └── api/                 # Fetch client
 ├── backend/
-│   ├── main.py                  # FastAPI — 14 endpoints + SSE streaming
+│   ├── main.py              # FastAPI app — all REST endpoints
 │   └── requirements.txt
-├── generation/
-│   ├── langgraph_pipeline.py    # 11-agent LangGraph pipeline + SQLite + SHA-256
-│   └── generator.py             # Legacy single-agent Ollama generator
 ├── evaluation/
-│   ├── theory_evaluator.py      # Cosine similarity + keyword coverage + LLM grader
-│   ├── numerical_grader.py      # Step-level grader, 5-category error classifier
-│   └── drawing_evaluator.py     # OpenCV + YOLOv8 stub + LLaVA + IS/BIS engine
-├── ingestion/                   # PDF/DOCX/PPTX loader with metadata extraction
-├── chunking/                    # Text splitter (500-char chunks, 100-char overlap)
-├── vector_store/                # ChromaDB client + semantic retriever
-├── pyq_processing/              # Previous year question parser
-├── tagging/                     # Bloom's taxonomy + CO validation
-├── app/                         # Legacy Streamlit UI + CLI (still functional)
+│   ├── ocr_engine.py        # EasyOCR + pdf2image pipeline
+│   ├── script_pipeline.py   # PDF → OCR → segment → classify → evaluate → report
+│   ├── theory_evaluator.py  # sentence-transformers keyword+semantic grader
+│   ├── numerical_grader.py  # LLM step-level grader with heuristic fallback
+│   └── drawing_evaluator.py # OCR-based label/dimension checker
+├── generation/
+│   └── pipeline.py          # LangGraph 11-agent question generation
+├── frontend/
+│   └── src/
+│       ├── App.tsx
+│       ├── pages/
+│       │   ├── Dashboard.tsx
+│       │   ├── QuestionGenerator.tsx
+│       │   ├── QuestionBank.tsx
+│       │   ├── ExamPapers.tsx
+│       │   ├── DataSource.tsx
+│       │   ├── AnswerScriptEvaluator.tsx  # single hub for all eval
+│       │   ├── TrainingEngine.tsx
+│       │   ├── ValidationMetrics.tsx
+│       │   ├── COPOAnalytics.tsx
+│       │   ├── Students.tsx
+│       │   └── FacultyOverride.tsx
+│       └── components/
+│           └── layout/
+│               ├── Sidebar.tsx
+│               └── Header.tsx
 ├── data/
-│   ├── raw/                     # Subject PDFs (BDT, Structural Mechanics, Propulsion, Structures)
-│   ├── pyqs/                    # Previous year question papers
-│   ├── db/                      # Pre-built ChromaDB vector stores
-│   ├── questions.db             # SQLite question bank (auto-created)
-│   └── uploads/                 # Drawing image uploads (auto-created)
-└── requirements.txt             # Python dependencies
+│   ├── questions.db
+│   ├── overrides.db
+│   └── training_refs/       # uploaded reference PDFs
+└── ingestion/               # syllabus/PYQ ingestion scripts
 ```
 
 ---
 
-## Running the Project
+## Setup
 
-### React Dashboard (primary interface)
+### 1. System dependency — poppler (for PDF support)
+
+```bash
+# Ubuntu / Debian
+sudo apt-get install -y poppler-utils
+
+# macOS
+brew install poppler
+
+# Windows: download poppler from https://github.com/oschwartz10612/poppler-windows/releases
+# and add bin/ to PATH
+```
+
+### 2. Python environment
+
+```bash
+cd Exam_assessment
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+
+pip install -r backend/requirements.txt
+```
+
+Key Python packages installed:
+- `easyocr>=1.7.1` — OCR engine (downloads ~100 MB model on first run)
+- `pdf2image>=1.17.0` — requires poppler
+- `opencv-python-headless==4.10.0.84` — image preprocessing
+- `sentence-transformers==3.2.1` — theory semantic scoring
+- `fastapi==0.115.0` + `uvicorn[standard]==0.31.0`
+
+### 3. Frontend
 
 ```bash
 cd frontend
 npm install
+```
+
+### 4. (Optional) Ollama for numerical grading
+
+```bash
+# Install from https://ollama.ai
+ollama pull mistral
+```
+If Ollama is not running, the numerical grader falls back to a heuristic scoring method that still works.
+
+---
+
+## Running
+
+```bash
+# Terminal 1 — backend (from repo root)
+uvicorn backend.main:app --reload --port 8000
+
+# Terminal 2 — frontend
+cd frontend
 npm run dev
-# Opens at http://localhost:5173
 ```
 
-### FastAPI Backend
-
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
-# Runs at http://localhost:8000
-# Gracefully falls back to mock data if Ollama is not running
-```
-
-### Ollama Models (for full AI functionality)
-
-```bash
-ollama pull mistral          # Question generation
-ollama pull llava            # Drawing VLM interpretation
-ollama pull deepseek-r1      # Numerical step grading (optional)
-```
-
-### Environment
-
-Create a `.env` file in the root:
-```
-OLLAMA_MODEL=mistral
-```
-
-### Legacy Streamlit UI
-
-```bash
-pip install -r requirements.txt
-streamlit run app/streamlit_app.py
-```
+Open `http://localhost:5173`
 
 ---
 
-## Dashboard Pages
+## API Reference
 
-All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
-
-| Route | Page | API Used | Description |
-|---|---|---|---|
-| `/` | Dashboard | `/api/stats` | Stat cards, Bloom distribution, CO attainment bars, activity feed |
-| `/generate` | Question Generator | `/api/questions/generate/stream` (SSE) | Live agent pipeline status, configure and generate questions |
-| `/questions` | Question Bank | `/api/questions` | Search/filter all SQLite-backed questions |
-| `/eval/theory` | Theory Evaluator | `/api/eval/theory` | Real keyword analysis, concept+detail scores, faculty override |
-| `/eval/numerical` | Numerical Grader | `/api/eval/numerical` | Step-by-step breakdown with 5-category error classification |
-| `/eval/drawing` | Drawing Evaluator | `/api/eval/drawing` | OpenCV pipeline, IS/BIS violation list, LLaVA JSON output |
-| `/analytics` | CO/PO Analytics | `/api/analytics/co` | Bar chart, radar, trend lines, CO–PO correlation matrix |
-| `/students` | Students | `/api/students` | Per-student CO attainment with At-Risk flagging |
-| `/override` | Faculty Override | `/api/submissions` + `/api/submissions/{id}/override` | Flagged submission queue, override score + reason |
-
----
-
-## API Endpoints
-
-| Method | Endpoint | Description |
+| Method | Path | Description |
 |---|---|---|
-| GET | `/api/health` | System status — LangGraph, Ollama, evaluator availability |
-| GET | `/api/stats` | Dashboard statistics |
-| POST | `/api/questions/generate` | Generate questions via LangGraph pipeline |
-| GET | `/api/questions/generate/stream` | SSE — streams 9 agent events then final questions |
-| GET | `/api/questions` | List questions from SQLite (filters: subject, unit, bloom, type) |
-| DELETE | `/api/questions/{id}` | Remove a question from SQLite |
-| GET | `/api/students` | Student roster |
-| GET | `/api/submissions` | All submissions (filter: status=flagged) |
-| POST | `/api/submissions/{id}/grade` | AI-grade a submission |
-| POST | `/api/submissions/{id}/override` | Faculty override with score + reason |
-| GET | `/api/analytics/co` | CO attainment data with Bloom coverage breakdown |
-| GET | `/api/exams` | List exam papers |
-| POST | `/api/exams` | Create an exam paper |
-| POST | `/api/eval/theory` | Grade a theory answer (keyword + cosine + LLM) |
-| POST | `/api/eval/numerical` | Grade a numerical solution step-by-step |
-| POST | `/api/eval/drawing` | Evaluate an engineering drawing (file upload) |
+| `GET` | `/api/health` | Liveness check |
+| `GET` | `/api/health/deps` | OCR dependency status |
+| `POST` | `/api/questions/generate` | Generate questions via LangGraph |
+| `GET` | `/api/questions` | List all questions |
+| `POST` | `/api/eval/script` | Evaluate single answer script (PDF/image) |
+| `POST` | `/api/eval/script/batch` | Evaluate multiple scripts or ZIP |
+| `POST` | `/api/grades/override` | Submit faculty grade override (persisted to SQLite) |
+| `GET` | `/api/submissions/overrides` | List all grade overrides |
+| `GET` | `/api/eval/validate/kappa` | Cohen's Kappa report |
+| `POST` | `/api/training/upload` | Upload reference answer PDF |
+| `GET` | `/api/training/references` | List training references |
+| `DELETE` | `/api/training/references/{id}` | Delete a training reference |
+| `GET` | `/api/students` | Student list with CO summaries |
+| `GET` | `/api/students/export/csv` | Download student CSV |
+| `GET` | `/api/co-po/analytics` | CO/PO attainment data |
 
 ---
 
-## Implementation Status
+## Evaluation Architecture
 
-### Module 1 — Question Generation Engine
-- [x] ChromaDB vector store with sentence-transformers (all-MiniLM-L6-v2)
-- [x] Bloom-Adaptive RAG retrieval with adaptive-k based on cognitive level
-- [x] 11-agent LangGraph pipeline (BloomAnalyzer → Scout → Generator → QualityValidator → DifficultyValidator → CorrectnessValidator → PedagogyTagger → SyllabusGuardian → Archivist)
-- [x] SHA-256 deduplication — prevents duplicate questions across sessions
-- [x] SQLite persistence with full provenance metadata (`data/questions.db`)
-- [x] FastAPI SSE streaming — live agent status events to frontend
-- [x] Graceful fallback (LangGraph graph → manual agent loop → mock templates)
+```
+Answer Script (PDF / image)
+        │
+        ▼
+  EasyOCR Engine  ──────── per-page confidence score
+        │
+        ▼
+  Segment by Q-number  ─── regex: "Q1", "1.", "Answer 1", etc.
+        │
+        ▼
+  Classify Question Type
+   ├─ theory    → sentence-transformers (keyword + semantic)
+   ├─ numerical → LLM step-grader (Ollama) / heuristic fallback
+   └─ drawing   → EasyOCR label match + faculty review flag
+        │
+        ▼
+  Aggregate Report
+   total_score / max_total / percentage / per-question detail
+        │
+        ▼
+  Faculty Override  ──── persisted in overrides.db
+        │
+        ▼
+  Cohen's Kappa  ─────── κ ≥ 0.75 target
+```
 
-### Module 2 — Theory Answer Evaluation Engine
-- [x] Frontend UI: upload, results list, keyword found/missing analysis, score breakdown, override form
-- [x] Two-tier LLM scoring: concept score (0–5) + detail score (0–5) via Ollama
-- [x] ME keyword banks for Thermodynamics, SOM, Fluid Mechanics, Engineering Drawing
-- [x] Cosine similarity via sentence-transformers
-- [x] `/api/eval/theory` endpoint — fully functional
-- [ ] ME rubric dataset (150+ Q&A pairs with keyword annotations — **needs ME team**)
-- [ ] Cohen's Kappa validation run against faculty scores
+### Drawing evaluation note
 
-### Module 3 — Numerical Step-Level Grader
-- [x] Frontend UI: step-by-step breakdown, 5-category error badges, partial credit display
-- [x] LLM chain-of-thought step evaluator via Ollama
-- [x] 5-category error classifier: formula / substitution / unit / arithmetic / boundary condition
-- [x] Partial credit per step, heuristic fallback when LLM unavailable
-- [x] `/api/eval/numerical` endpoint — fully functional
-- [ ] ME numerical problem bank (100+ problems with step rubrics — **needs ME team**)
-- [ ] Step-level accuracy validation (target ≥ 90%)
-
-### Module 4 — Engineering Drawing Evaluator
-- [x] Frontend UI: element detection grid, IS clause violation list, LLaVA JSON panel, upload
-- [x] OpenCV preprocessing: CLAHE → Hough-line deskew → adaptive threshold → morphological denoise → 1024×768
-- [x] YOLOv8 heuristic stub (quadrant-based element detection until trained weights available)
-- [x] LLaVA VLM via Ollama for semantic JSON interpretation
-- [x] IS/BIS compliance engine: IS 696:1972 (projection angle, view count), IS 919:1993 (tolerance notation), SP:46:2003 (title block), IS 3073:1967 (surface finish)
-- [x] `/api/eval/drawing` endpoint with file upload — fully functional
-- [ ] Annotated drawing dataset (100+ drawings — **needs ME team**)
-- [ ] YOLOv8 fine-tuning on annotated dataset (use Google Colab T4 GPU)
-
-### Module 5 — Unified Dashboard
-- [x] React 18 + TypeScript + Vite + Tailwind CSS + Recharts frontend
-- [x] All 9 pages wired to real FastAPI backend with graceful fallbacks
-- [x] CO/PO analytics: bar chart, radar chart, trend line chart, CO–PO correlation matrix
-- [x] Faculty override panel with confidence-based flagging and API-backed submission
-- [x] Real-time SSE streaming for question generation with live agent status
-- [x] SQLite-backed question bank with search, filter, delete
+The drawing engine does **not** do shape detection. It:
+1. Runs adaptive-threshold preprocessing (OpenCV)
+2. Extracts all text labels and dimension annotations via EasyOCR
+3. Checks found text against expected parts/dimensions from the question rubric
+4. Deducts marks for missing labels (−1 each) and dimensions (−0.5 each)
+5. Always sets `requires_faculty_review: true` — a human must verify the actual line work
 
 ---
 
-## Tech Stack
+## Feature Status
 
-| Layer | Technology |
+### Working
+- [x] LangGraph 11-agent question generation with RAG
+- [x] Question Bank with filters, CO/PO tags, export
+- [x] Exam paper generation and management
+- [x] Answer script OCR pipeline (PDF + image)
+- [x] Auto-classification (theory / numerical / drawing)
+- [x] Theory evaluator (keyword + semantic similarity)
+- [x] Numerical grader with heuristic fallback
+- [x] Drawing evaluator (OCR label matching)
+- [x] Batch evaluation with class summary + CSV export
+- [x] Faculty grade override (SQLite persistent)
+- [x] Cohen's Kappa validation dashboard
+- [x] CO/PO analytics
+- [x] Student drill-down with at-risk flagging
+- [x] Training engine for reference answer upload
+- [x] OCR dependency guard (shows install instructions if missing)
+
+### Requires Faculty Action
+- [ ] Drawing line-work review — AI cannot verify actual shapes, only text labels
+- [ ] Low OCR confidence pages (< 60%) are flagged for manual re-check
+- [ ] Numerical problems with novel notation may need override
+
+### Known Limitations
+- EasyOCR accuracy on very light pencil or smudged handwriting is ~70-80%. Scan at ≥300 DPI for best results.
+- Numerical LLM grading requires Ollama running locally; heuristic fallback gives approximate scores.
+- First OCR run downloads ~100 MB model weights (one-time).
+
+---
+
+## Cohen's Kappa Target
+
+| κ range | Interpretation |
 |---|---|
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS, Recharts, Lucide React |
-| Backend | FastAPI, Uvicorn, Python 3.11+ |
-| Agent Pipeline | LangGraph, LangChain 0.3 |
-| LLM | Ollama — Mistral (generation), LLaVA (drawing VLM), DeepSeek-R1 (numerical) |
-| Vector DB | ChromaDB |
-| Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
-| Persistence | SQLite (`data/questions.db`) |
-| Document Loading | LangChain (PyPDF, Docx2txt, Unstructured) |
-| Computer Vision | OpenCV (preprocessing), YOLOv8/Ultralytics (detection — stub) |
-| Compliance | Custom IS/BIS rule engine (IS 696, SP:46, IS 919, IS 3073) |
-| Legacy UI | Streamlit |
+| < 0.40 | Poor agreement — retrain needed |
+| 0.40–0.60 | Moderate |
+| 0.60–0.75 | Substantial |
+| **≥ 0.75** | **Target — excellent agreement** |
 
----
-
-## What Still Needs Data (ME Team)
-
-| Item | Volume | Used By |
-|---|---|---|
-| Theory Q&A pairs with keyword rubrics | 150+ questions across Thermodynamics, SOM, Fluid Mechanics | Theory evaluator validation |
-| Numerical problems with step-level solution rubrics | 100+ problems with formula/expected value/units per step | Numerical grader validation |
-| Hand-drawn engineering drawing photographs | 100+ drawings annotated with LabelImg | YOLOv8 fine-tuning |
-| CO/PO Bloom-level mapping per subject per unit | Per faculty syllabus | Syllabus Guardian agent |
-
----
-
-## Data
-
-Subject materials under `data/raw/`:
-- **BDT** — Units 1–5
-- **Structural Mechanics** — Units 1–5
-- **Propulsion** — Units 1–5
-- **Structures** — Units 1–5
-
-Previous year questions under `data/pyqs/` with pre-built ChromaDB stores at `data/db/chroma/`.
-Generated questions auto-saved to `data/questions.db` (SQLite, created on first run).
+The `/eval/validate` page shows live κ per question type and triggers a warning if any category falls below threshold.
