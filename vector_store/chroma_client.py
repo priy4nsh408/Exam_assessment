@@ -1,10 +1,15 @@
 
+from pathlib import Path
+
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
 import os
 
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "10")
+
+PROJECT_ROOT = Path(__file__).parent.parent
+LOCAL_MODEL_PATH = PROJECT_ROOT / "models" / "all-MiniLM-L6-v2"
 
 
 # =========================================================
@@ -23,8 +28,9 @@ def create_vector_db(
     # EMBEDDING MODEL
     # =====================================================
     try:
+        model_name = str(LOCAL_MODEL_PATH) if LOCAL_MODEL_PATH.exists() else "sentence-transformers/all-MiniLM-L6-v2"
         embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name=model_name
         )
     except Exception as e:
         if chunks is not None:
