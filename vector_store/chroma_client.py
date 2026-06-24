@@ -20,9 +20,15 @@ def create_vector_db(
     # =====================================================
     # EMBEDDING MODEL
     # =====================================================
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    try:
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+    except Exception as e:
+        if chunks is not None:
+            raise
+        print(f"⚠️ Embedding model failed to load ({e}), returning None — caller should use fallback retrieval")
+        return None
 
     # =====================================================
     # COLLECTION NAME

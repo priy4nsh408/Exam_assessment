@@ -472,23 +472,24 @@ def scout_agent(state: PipelineState) -> PipelineState:
         persist_dir = str(Path(__file__).parent.parent / "data" / "db" / "chroma" / state["subject"])
         vectordb = create_vector_db(chunks=None, persist_directory=persist_dir)
 
-        # Ingested unit metadata is normalized to a bare "Unit N" by
-        # ingestion/metadata_extractor.py (extracted from the file path),
-        # not whatever full descriptive label the caller passed in (e.g.
-        # "Unit 1: Laws of Thermodynamics") - normalize identically here,
-        # or the exact-match Chroma filter would never hit even when the
-        # subject genuinely has ingested content for that unit.
         unit_num_match = re.search(r'Unit[_ -]?(\d+)', state["unit"], re.IGNORECASE)
         unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
 
-        context = retrieve_context(
-            vectordb,
-            query=f"{state['unit']} {BLOOM_LABELS[state['bloom_level']][1]}",
-            subject=state["subject"],
-            unit=unit_filter,
-            k=k,
-            raise_on_error=True,
-        )
+        if vectordb is None:
+            from vector_store.retriever import _fallback_keyword_retrieve
+            context = _fallback_keyword_retrieve(
+                persist_dir, subject=state["subject"], unit=unit_filter, query=state["unit"], k=k
+            )
+        else:
+            context = retrieve_context(
+                vectordb,
+                query=f"{state['unit']} {BLOOM_LABELS[state['bloom_level']][1]}",
+                subject=state["subject"],
+                unit=unit_filter,
+                k=k,
+                raise_on_error=True,
+                persist_directory=persist_dir,
+            )
         # retrieve_context returns one already-joined string, not a list of
         # chunk objects - wrap as a single-element list so every downstream
         # use of context_chunks (which always re-joins them anyway) still

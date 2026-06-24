@@ -1,3 +1,53 @@
+import os
+import sqlite3
+
+
+def _fallback_keyword_retrieve(persist_directory, subject=None, unit=None, query="", k=5):
+    """
+    Direct SQLite keyword retrieval from ChromaDB's backing store.
+    Used when the embedding model can't be loaded (e.g. no network
+    access to HuggingFace). Less precise than vector similarity but
+    returns real ingested content instead of nothing.
+    """
+    db_path = os.path.join(persist_directory, "chroma.sqlite3")
+    if not os.path.exists(db_path):
+        return ""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        id_conditions = []
+        params = []
+
+        if subject:
+            id_conditions.append(
+                "id IN (SELECT id FROM embedding_metadata WHERE key='subject' AND string_value=?)"
+            )
+            params.append(subject)
+        if unit:
+            id_conditions.append(
+                "id IN (SELECT id FROM embedding_metadata WHERE key='unit' AND string_value=?)"
+            )
+            params.append(unit)
+
+        where_clause = " AND ".join(id_conditions) if id_conditions else "1=1"
+
+        sql = f"""
+            SELECT string_value FROM embedding_metadata
+            WHERE key='chroma:document' AND {where_clause}
+            LIMIT ?
+        """
+        params.append(k)
+
+        rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            return ""
+
+        texts = [r[0] for r in rows if r[0]]
+        print(f"\n🔍 Fallback keyword retrieval: {len(texts)} chunks from SQLite")
+        return "\n\n".join(texts)
+    finally:
+        conn.close()
+
 
 def retrieve_context(
     vectordb,
@@ -5,43 +55,14 @@ def retrieve_context(
     subject=None,
     unit=None,
     k=5,
-    raise_on_error=False
+    raise_on_error=False,
+    persist_directory=None
 ):
     """
-    Retrieve relevant context from ChromaDB
+    Retrieve relevant context from ChromaDB.
 
-    Parameters:
-    ---------------------------------
-    vectordb : Chroma object
-
-    query : str
-        User query/topic
-
-    subject : str
-        Optional subject filter
-
-    unit : str
-        Optional unit filter
-
-    k : int
-        Number of chunks to retrieve
-
-    raise_on_error : bool
-        By default (False), any error during retrieval (including an
-        embedding-model failure, e.g. no network access to download it) is
-        swallowed and "" is returned, matching this function's original
-        behavior for app/main.py and app/streamlit_app.py. Set True to
-        instead re-raise the real exception - used by the generation
-        pipeline (generation/langgraph_pipeline.py's scout_agent) so an
-        embedding-model failure can be reported as exactly that, rather
-        than being silently misreported as "no matching documents found"
-        (which was actively misleading - the embedding model failing to
-        load and the collection genuinely having no matching content are
-        very different problems requiring very different fixes).
-
-    Returns:
-    ---------------------------------
-    context : str
+    Falls back to direct SQLite keyword retrieval when the embedding
+    model can't be loaded (e.g. HuggingFace is unreachable).
     """
 
     try:
@@ -63,7 +84,6 @@ def retrieve_context(
         else:
             filters = {}
 
-        # Debug filter format
         if filters:
             print(f"🔧 Chroma where filter: {filters}")
 
@@ -76,33 +96,18 @@ def retrieve_context(
                 k=k,
                 filter=filters
             )
-
         else:
-
             docs = vectordb.similarity_search(
                 query,
                 k=k
             )
 
-        # =================================================
-        # NO RESULTS
-        # =================================================
         if not docs:
-
             print("⚠️ No matching documents found")
-
             return ""
 
-        # =================================================
-        # DEBUG INFO
-        # =================================================
-        print(
-            f"\n🔍 Retrieved {len(docs)} chunks"
-        )
+        print(f"\n🔍 Retrieved {len(docs)} chunks")
 
-        # =================================================
-        # COMBINE CONTEXT
-        # =================================================
         context = "\n\n".join([
             doc.page_content
             for doc in docs
@@ -113,6 +118,15 @@ def retrieve_context(
     except Exception as e:
 
         print(f"❌ Retrieval Error: {e}")
+
+        # Attempt fallback SQLite retrieval before giving up
+        if persist_directory:
+            print("⚡ Attempting fallback keyword retrieval from SQLite...")
+            fallback = _fallback_keyword_retrieve(
+                persist_directory, subject=subject, unit=unit, query=query, k=k
+            )
+            if fallback:
+                return fallback
 
         if raise_on_error:
             raise
