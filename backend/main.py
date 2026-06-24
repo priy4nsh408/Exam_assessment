@@ -48,6 +48,10 @@ try:
         get_all_questions as _db_get_questions,
         get_question_by_id as _db_get_question_by_id,
         delete_question as _db_delete_question,
+        create_answer_scheme as _db_create_answer_scheme,
+        get_answer_schemes as _db_get_answer_schemes,
+        get_answer_scheme_by_id as _db_get_answer_scheme_by_id,
+        get_answer_scheme_by_question_id as _db_get_answer_scheme_by_question_id,
         LANGGRAPH_AVAILABLE,
         OLLAMA_AVAILABLE,
     )
@@ -83,8 +87,33 @@ class OverrideRequest(BaseModel):
     reason: str
 
 class TheoryEvalRequest(BaseModel):
-    question_id: str
+    """
+    Flexible: pass `answer_id` (preferred - resolves to its answer scheme's
+    question + reference answer) OR `question_id` (resolves to that
+    question's own answer_key/source_chunk) OR raw `question` text with an
+    optional `model_answer`/`reference_answer` for a fully manual/ungrounded
+    grading call.
+    """
     student_answer: str
+    answer_id: Optional[str] = None
+    question_id: Optional[str] = None
+    question: Optional[str] = None
+    subject: Optional[str] = ""
+    model_answer: Optional[str] = ""
+    reference_answer: Optional[str] = ""
+    max_marks: Optional[int] = 10
+
+class NumericalEvalRequest(BaseModel):
+    """Same flexible resolution as TheoryEvalRequest, for numerical grading."""
+    student_solution: str
+    answer_id: Optional[str] = None
+    question_id: Optional[str] = None
+    question: Optional[str] = None
+    subject: Optional[str] = ""
+    reference_answer: Optional[str] = ""
+    expected_formula: Optional[str] = ""
+    expected_final_answer: Optional[str] = ""
+    max_marks: Optional[int] = 10
 
 class QuestionSpecRequest(BaseModel):
     bloom_level: int
@@ -107,8 +136,9 @@ class PipelineAssessRequest(BaseModel):
     """Step 3: grade a student's answer against a real generated question.
     Works for theory and numerical question types (drawing needs an image
     file, so it stays on the dedicated /api/eval/drawing endpoint)."""
-    question_id: str
     student_answer: str
+    question_id: Optional[str] = None
+    answer_id: Optional[str] = None
 
 class ExamCreateRequest(BaseModel):
     title: str
@@ -196,6 +226,75 @@ SSE_AGENTS = [
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
+def _normalize_answer_scheme(s: dict) -> dict:
+    return {
+        "id": s.get("id"),
+        "questionId": s.get("question_id"),
+        "questionText": s.get("question_text"),
+        "questionNumber": s.get("question_number"),
+        "subject": s.get("subject"),
+        "type": s.get("type"),
+        "marks": s.get("marks"),
+        "answerKey": s.get("answer_key"),
+        "explanation": s.get("explanation"),
+        "createdAt": s.get("created_at"),
+    }
+
+def _resolve_grading_reference(
+    answer_id: Optional[str] = None,
+    question_id: Optional[str] = None,
+    question_fallback: str = "",
+    subject_fallback: str = "",
+    reference_fallback: str = "",
+    max_marks_fallback: int = 10,
+) -> dict:
+    """
+    Single resolution path used by every grading endpoint: prefer an
+    answer_id (the answer scheme itself), then a question_id (derive its
+    reference from answer_key/source_chunk), then fall back to whatever the
+    caller passed directly (manual/ungrounded grading).
+    Returns {question_text, subject, reference_answer, max_marks, question_id,
+             answer_id, grounded} where `grounded` is False only in the manual fallback case.
+    """
+    if answer_id and HAS_PIPELINE:
+        scheme = _db_get_answer_scheme_by_id(answer_id)
+        if scheme:
+            question = _db_get_question_by_id(scheme["question_id"]) if HAS_PIPELINE else None
+            return {
+                "question_text": scheme.get("question_text") or (question or {}).get("text", ""),
+                "subject": scheme.get("subject") or (question or {}).get("subject", ""),
+                "reference_answer": scheme.get("answer_key") or "",
+                "max_marks": scheme.get("marks") or max_marks_fallback,
+                "question_id": scheme.get("question_id"),
+                "answer_id": scheme.get("id"),
+                "grounded": True,
+            }
+
+    if question_id and HAS_PIPELINE:
+        question = _db_get_question_by_id(question_id)
+        if question:
+            scheme = _db_get_answer_scheme_by_question_id(question_id)
+            return {
+                "question_text": question.get("text", ""),
+                "subject": question.get("subject", ""),
+                "reference_answer": question.get("answer_key") or question.get("source_chunk") or "",
+                "max_marks": question.get("marks") or max_marks_fallback,
+                "question_id": question.get("id"),
+                "answer_id": scheme.get("id") if scheme else None,
+                "grounded": True,
+            }
+
+    # Manual fallback - whatever the caller supplied directly, ungrounded.
+    return {
+        "question_text": question_fallback,
+        "subject": subject_fallback,
+        "reference_answer": reference_fallback,
+        "max_marks": max_marks_fallback,
+        "question_id": question_id,
+        "answer_id": answer_id,
+        "grounded": False,
+    }
+
 def _normalize_question(q: dict) -> dict:
     """Convert DB snake_case keys to camelCase for frontend."""
     return {
@@ -281,7 +380,12 @@ async def pipeline_generate(req: PipelineGenerateRequest):
             subject=req.subject, unit=req.chapter,
             question_type=req.question_type, specs=specs,
         )
-        normalized = [_normalize_question(q) for q in questions]
+        normalized = []
+        for i, q in enumerate(questions, start=1):
+            scheme = _db_create_answer_scheme(q, question_number=i)
+            nq = _normalize_question(q)
+            nq["answerId"] = scheme["id"]
+            normalized.append(nq)
         source = "langgraph_pipeline" if (LANGGRAPH_AVAILABLE and OLLAMA_AVAILABLE) else "pipeline_mock_fallback"
         shortfall = len(req.questions) - len(normalized)
         response = {"questions": normalized, "source": source, "requested": len(req.questions)}
@@ -301,12 +405,21 @@ async def pipeline_assess(req: PipelineAssessRequest):
     Step 3: grade a student's answer against a real generated question,
     using that question's raw-data-derived answer key as the reference.
     Returns the score plus an explicit explanation of where marks were
-    awarded and why any marks were deducted.
+    awarded and why any marks were deducted. Accepts either `answer_id`
+    (preferred) or `question_id`.
     """
     if not HAS_PIPELINE:
         raise HTTPException(status_code=503, detail="Pipeline not available")
+    if not req.answer_id and not req.question_id:
+        raise HTTPException(status_code=400, detail="Provide answer_id or question_id")
 
-    question = _db_get_question_by_id(req.question_id)
+    question = None
+    if req.question_id:
+        question = _db_get_question_by_id(req.question_id)
+    elif req.answer_id:
+        scheme = _db_get_answer_scheme_by_id(req.answer_id)
+        if scheme:
+            question = _db_get_question_by_id(scheme["question_id"])
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
@@ -330,11 +443,11 @@ async def pipeline_assess(req: PipelineAssessRequest):
     else:
         raise HTTPException(
             status_code=400,
-            detail="Drawing questions require an image upload - use POST /api/eval/drawing with question_id instead.",
+            detail="Drawing questions require an image upload - use POST /api/eval/drawing with answer_id/question_id instead.",
         )
 
     return {
-        "questionId": req.question_id,
+        "questionId": question["id"],
         "questionText": question["text"],
         "answerKey": question.get("answer_key"),
         "answerKeyExplanation": question.get("answer_key_explanation"),
@@ -344,6 +457,27 @@ async def pipeline_assess(req: PipelineAssessRequest):
         "feedback": result.get("feedback"),
         "details": result,
     }
+
+
+@app.get("/api/answer-schemes")
+async def list_answer_schemes(question_id: Optional[str] = None, subject: Optional[str] = None):
+    if not HAS_PIPELINE:
+        return {"answerSchemes": [], "total": 0}
+    schemes = _db_get_answer_schemes(question_id=question_id, subject=subject)
+    normalized = [_normalize_answer_scheme(s) for s in schemes]
+    return {"answerSchemes": normalized, "total": len(normalized)}
+
+
+@app.get("/api/answer-schemes/{answer_id}")
+async def get_answer_scheme(answer_id: str):
+    if not HAS_PIPELINE:
+        raise HTTPException(status_code=503, detail="Pipeline not available")
+    scheme = _db_get_answer_scheme_by_id(answer_id)
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Answer scheme not found")
+    return _normalize_answer_scheme(scheme)
+
+
 
 
 @app.post("/api/questions/generate")
@@ -360,7 +494,12 @@ async def generate_questions(req: QuestionGenerateRequest):
             co=req.co,
             count=req.count,
         )
-        normalized = [_normalize_question(q) for q in questions]
+        normalized = []
+        for i, q in enumerate(questions, start=1):
+            scheme = _db_create_answer_scheme(q, question_number=i)
+            nq = _normalize_question(q)
+            nq["answerId"] = scheme["id"]
+            normalized.append(nq)
         source = "langgraph_pipeline" if (LANGGRAPH_AVAILABLE and OLLAMA_AVAILABLE) else "pipeline_mock_fallback"
         return {"questions": normalized, "source": source}
     except Exception as e:
@@ -424,7 +563,16 @@ async def stream_generate_questions(
 
         gen_thread.join(timeout=120)
 
-        normalized = [_normalize_question(q) for q in result_holder["questions"]]
+        normalized = []
+        for i, q in enumerate(result_holder["questions"], start=1):
+            try:
+                scheme = _db_create_answer_scheme(q, question_number=i)
+                answer_id = scheme["id"]
+            except Exception:
+                answer_id = None
+            nq = _normalize_question(q)
+            nq["answerId"] = answer_id
+            normalized.append(nq)
         yield f"data: {json.dumps({'done': True, 'questions': normalized, 'error': result_holder.get('error')})}\n\n"
 
     return StreamingResponse(
@@ -659,32 +807,32 @@ async def create_exam(body: ExamCreateRequest):
 
 @app.post("/api/eval/theory")
 async def eval_theory(body: TheoryEvalRequest):
-    if not (THEORY_EVAL_AVAILABLE and HAS_PIPELINE):
+    if not THEORY_EVAL_AVAILABLE:
         raise HTTPException(status_code=503, detail="Theory evaluator not available")
 
-    question = _db_get_question_by_id(body.question_id)
-    if not question:
-        raise HTTPException(status_code=404, detail="Question not found")
-
-    reference_answer = question.get("answer_key") or question.get("source_chunk") or ""
+    ref = _resolve_grading_reference(
+        answer_id=body.answer_id, question_id=body.question_id,
+        question_fallback=body.question or "", subject_fallback=body.subject or "",
+        reference_fallback=body.reference_answer or body.model_answer or "",
+        max_marks_fallback=body.max_marks or 10,
+    )
     eval_result = evaluate_theory(
-        question=question["text"],
-        student_answer=body.student_answer,
-        reference_answer=reference_answer,
-        subject=question["subject"],
-        max_marks=question["marks"],
+        question=ref["question_text"], student_answer=body.student_answer,
+        reference_answer=ref["reference_answer"], subject=ref["subject"], max_marks=ref["max_marks"],
     )
     return {
-        "questionId": body.question_id,
+        "questionId": ref["question_id"],
+        "answerId": ref["answer_id"],
         "aiScore": eval_result["ai_score"],
         "maxScore": eval_result["max_score"],
         "confidence": eval_result["confidence"],
         "feedback": eval_result["feedback"],
+        "explanation": eval_result["explanation"],
         "keywordScore": eval_result["keyword_score"],
         "semanticScore": eval_result["semantic_score"],
         "matchedKeywords": eval_result["keywords"]["found"],
         "missingKeywords": eval_result["keywords"]["missing"],
-        "hadReferenceData": bool(reference_answer),
+        "hadReferenceData": ref["grounded"] and bool(ref["reference_answer"]),
     }
 
 
@@ -695,6 +843,7 @@ async def eval_drawing(
     student_usn: str = Form(""),
     assignment: str = Form(""),
     question_id: str = Form(""),
+    answer_id: str = Form(""),
     expected_parts: str = Form(""),       # comma-separated, optional override
     expected_dimensions: str = Form(""),  # comma-separated, optional override
 ):
@@ -706,12 +855,12 @@ async def eval_drawing(
         with open(image_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-    question_text = assignment
-    if question_id and HAS_PIPELINE:
-        question = _db_get_question_by_id(question_id)
-        if question:
-            question_text = question["text"]
-            max_marks = question["marks"]
+    ref = _resolve_grading_reference(
+        answer_id=answer_id, question_id=question_id,
+        question_fallback=assignment, max_marks_fallback=max_marks,
+    )
+    question_text = ref["question_text"] or assignment
+    max_marks = ref["max_marks"] or max_marks
 
     parts_override = [p.strip() for p in expected_parts.split(",") if p.strip()] or None
     dims_override = [d.strip() for d in expected_dimensions.split(",") if d.strip()] or None
@@ -730,41 +879,35 @@ async def eval_drawing(
             "violation_deductions": 0, "vlm_output": {},
             "preprocessing_applied": False,
             "feedback": "Drawing evaluator module not available.",
+            "explanation": "Drawing evaluator module not available.",
         }
+    result["questionId"] = ref["question_id"]
+    result["answerId"] = ref["answer_id"]
     return result
 
 
 @app.post("/api/eval/numerical")
-async def eval_numerical(
-    question_id: str = Form(""),
-    question_text: str = Form(""),
-    student_solution: str = Form(...),
-    max_marks: int = Form(10),
-    expected_formula: str = Form(""),
-    expected_final_answer: str = Form(""),
-):
+async def eval_numerical(body: NumericalEvalRequest):
     if not NUMERICAL_EVAL_AVAILABLE:
         raise HTTPException(status_code=503, detail="Numerical evaluator not available")
 
-    reference_answer = ""
-    subject = ""
-    if question_id and HAS_PIPELINE:
-        question = _db_get_question_by_id(question_id)
-        if question:
-            reference_answer = question.get("answer_key") or question.get("source_chunk") or ""
-            question_text = question_text or question["text"]
-            subject = question["subject"]
-            max_marks = question["marks"]
+    ref = _resolve_grading_reference(
+        answer_id=body.answer_id, question_id=body.question_id,
+        question_fallback=body.question or "", subject_fallback=body.subject or "",
+        reference_fallback=body.reference_answer or "", max_marks_fallback=body.max_marks or 10,
+    )
 
     result = grade_numerical(
-        question=question_text,
-        student_solution=student_solution,
-        reference_answer=reference_answer,
-        expected_formula=expected_formula,
-        expected_final_answer=expected_final_answer,
-        subject=subject,
-        max_marks=max_marks,
+        question=ref["question_text"],
+        student_solution=body.student_solution,
+        reference_answer=ref["reference_answer"],
+        expected_formula=body.expected_formula or "",
+        expected_final_answer=body.expected_final_answer or "",
+        subject=ref["subject"],
+        max_marks=ref["max_marks"],
     )
+    result["questionId"] = ref["question_id"]
+    result["answerId"] = ref["answer_id"]
     return result
 
 

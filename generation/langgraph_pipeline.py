@@ -59,6 +59,26 @@ def init_db():
     for col in ("generation_explanation", "answer_key_explanation"):
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE questions ADD COLUMN {col} TEXT")
+
+    # Answer schemes: the answer key for a question, addressable by its own
+    # id (separate from the question's id). One question currently has one
+    # active scheme, but giving it its own identity supports future
+    # versioning/re-grading without losing history, and lets graders be
+    # pointed at "answer_id" directly instead of always going via the question.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS answer_schemes (
+            id TEXT PRIMARY KEY,
+            question_id TEXT NOT NULL,
+            question_text TEXT,
+            question_number INTEGER,
+            subject TEXT,
+            type TEXT,
+            marks INTEGER,
+            answer_key TEXT,
+            explanation TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -118,6 +138,73 @@ def update_question_fields(qid: str, fields: dict):
         conn.commit()
     finally:
         conn.close()
+
+# ── Answer schemes ──────────────────────────────────────────────────────────────
+
+def create_answer_scheme(question: dict, question_number: Optional[int] = None) -> dict:
+    """
+    Creates an answer-scheme row for a question - its own id, separate from
+    the question's id, holding the marks, answer key, and explanation that
+    graders should reference. Returns the created scheme as a dict.
+    """
+    init_db()
+    import uuid
+    scheme = {
+        "id": f"AK-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
+        "question_id": question["id"],
+        "question_text": question.get("text"),
+        "question_number": question_number,
+        "subject": question.get("subject"),
+        "type": question.get("type"),
+        "marks": question.get("marks"),
+        "answer_key": question.get("answer_key"),
+        "explanation": question.get("answer_key_explanation"),
+        "created_at": datetime.now().isoformat(),
+    }
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("""
+            INSERT INTO answer_schemes
+            (id, question_id, question_text, question_number, subject, type, marks, answer_key, explanation, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            scheme["id"], scheme["question_id"], scheme["question_text"], scheme["question_number"],
+            scheme["subject"], scheme["type"], scheme["marks"], scheme["answer_key"],
+            scheme["explanation"], scheme["created_at"],
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+    return scheme
+
+def get_answer_schemes(question_id: Optional[str] = None, subject: Optional[str] = None) -> List[dict]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    query = "SELECT * FROM answer_schemes WHERE 1=1"
+    params = []
+    if question_id:
+        query += " AND question_id = ?"
+        params.append(question_id)
+    if subject:
+        query += " AND subject = ?"
+        params.append(subject)
+    query += " ORDER BY created_at DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_answer_scheme_by_id(answer_id: str) -> Optional[dict]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM answer_schemes WHERE id = ?", (answer_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_answer_scheme_by_question_id(question_id: str) -> Optional[dict]:
+    schemes = get_answer_schemes(question_id=question_id)
+    return schemes[0] if schemes else None
 
 def get_all_questions(subject=None, unit=None, bloom_level=None, q_type=None):
     conn = sqlite3.connect(DB_PATH)
