@@ -47,7 +47,6 @@ export default function TrainingEngine() {
 
   const [file, setFile] = useState<File | null>(null)
   const [description, setDescription] = useState('')
-  const [defaultMarks, setDefaultMarks] = useState(10)
 
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -68,7 +67,6 @@ export default function TrainingEngine() {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('description', description)
-    fd.append('default_marks', String(defaultMarks))
     try {
       const res = await fetch('/api/training/upload', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
@@ -140,23 +138,13 @@ export default function TrainingEngine() {
                 </div>}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs font-medium text-gray-600 mb-1 block">Default marks per question</label>
-              <input
-                type="number" min={1} max={100} className="input-field w-full text-sm"
-                value={defaultMarks} onChange={e => setDefaultMarks(Number(e.target.value))}
-              />
-              <p className="text-[10px] text-gray-400 mt-1">Used if the scheme doesn't specify marks explicitly</p>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-gray-600 mb-1 block">Description (optional)</label>
-              <input
-                type="text" className="input-field w-full text-sm"
-                placeholder="e.g. Thermodynamics Unit 2 — VTU Dec 2023"
-                value={description} onChange={e => setDescription(e.target.value)}
-              />
-            </div>
+          <div>
+            <label className="text-xs font-medium text-gray-600 mb-1 block">Description (optional)</label>
+            <input
+              type="text" className="input-field w-full text-sm"
+              placeholder="e.g. Thermodynamics Unit 2 — VTU Dec 2023"
+              value={description} onChange={e => setDescription(e.target.value)}
+            />
           </div>
 
           {error && (

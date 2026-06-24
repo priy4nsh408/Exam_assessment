@@ -1654,6 +1654,12 @@ async def eval_answer_script_batch(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    # Persist each report to eval_results.db
+    for r in batch_result.get("reports", []):
+        if not r.get("error"):
+            rid = _save_eval_result(r)
+            r["result_id"] = rid
+
     _log_activity_safe(
         action=f"Batch evaluation: {batch_result['total_students']} scripts, "
                f"class avg {batch_result['class_avg']}%, "

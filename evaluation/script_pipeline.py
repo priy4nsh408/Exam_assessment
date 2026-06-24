@@ -130,12 +130,17 @@ def _evaluate_segment(seg: Dict, q_meta: Optional[Dict], subject: str, max_marks
     q_type    = (q_meta or {}).get("type") or classify_question_type(q_text + " " + seg["text"])
     student_text = seg["text"]
 
+    ocr_conf = seg.get("ocr_confidence", 1.0)
+    # When OCR confidence is low the extracted text is unreliable; scale scores
+    # down so garbled text doesn't inflate marks. No penalty above 0.70.
+    ocr_penalty = min(1.0, ocr_conf / 0.70) if ocr_conf < 0.70 else 1.0
+
     result: Dict[str, Any] = {
         "q_number":       seg["q_number"],
         "q_type":         q_type,
         "question":       q_text,
         "ocr_text":       student_text,
-        "ocr_confidence": round(seg.get("ocr_confidence", 1.0), 3),
+        "ocr_confidence": round(ocr_conf, 3),
         "low_confidence": seg.get("low_confidence", False),
         "image_paths":    seg.get("image_paths", []),
         "page_start":     seg.get("page_start", 1),
@@ -151,10 +156,11 @@ def _evaluate_segment(seg: Dict, q_meta: Optional[Dict], subject: str, max_marks
                 expected_parts=None,
                 expected_dimensions=None,
             )
+            raw_score = round(ev["ai_score"] * ocr_penalty, 1)
             result.update({
-                "ai_score":              ev["ai_score"],
+                "ai_score":              raw_score,
                 "max_score":             ev["max_score"],
-                "confidence":            ev.get("confidence", 0.5),
+                "confidence":            round(ev.get("confidence", 0.5) * ocr_penalty, 2),
                 "feedback":              ev.get("feedback", ""),
                 "detection_mode":        ev.get("detection_mode", "ocr_text"),
                 "requires_faculty_review": ev.get("requires_faculty_review", True),
@@ -182,10 +188,11 @@ def _evaluate_segment(seg: Dict, q_meta: Optional[Dict], subject: str, max_marks
                 subject=subject,
                 max_marks=max_marks,
             )
+            raw_score = round(ev["ai_score"] * ocr_penalty, 1)
             result.update({
-                "ai_score":   ev["ai_score"],
+                "ai_score":   raw_score,
                 "max_score":  ev["max_score"],
-                "confidence": ev.get("confidence", 0.7),
+                "confidence": round(ev.get("confidence", 0.7) * ocr_penalty, 2),
                 "feedback":   ev.get("feedback", ""),
                 "detail": {
                     "steps":               ev.get("steps", []),
@@ -197,26 +204,39 @@ def _evaluate_segment(seg: Dict, q_meta: Optional[Dict], subject: str, max_marks
             })
 
         else:  # theory
-            ev = _theory()(
-                question=q_text,
-                student_answer=student_text,
-                reference_answer=ref_answer,
-                subject=subject,
-                max_marks=max_marks,
-            )
-            result.update({
-                "ai_score":   ev["ai_score"],
-                "max_score":  ev["max_score"],
-                "confidence": ev.get("confidence", 0.75),
-                "feedback":   ev.get("feedback", ""),
-                "detail": {
-                    "keyword_score":    ev.get("keyword_score", 0),
-                    "semantic_score":   ev.get("semantic_score", 0),
-                    "matched_keywords": ev.get("keywords", {}).get("found", []),
-                    "missing_keywords": ev.get("keywords", {}).get("missing", []),
-                    "explanation":      ev.get("explanation", ""),
-                },
-            })
+            # If no reference answer available, flag for faculty review
+            # and give a neutral low score rather than inflating via embeddings
+            if not ref_answer.strip():
+                result.update({
+                    "ai_score":   0,
+                    "max_score":  max_marks,
+                    "confidence": 0.0,
+                    "feedback":   "No reference answer available — requires faculty review.",
+                    "requires_faculty_review": True,
+                    "detail": {},
+                })
+            else:
+                ev = _theory()(
+                    question=q_text,
+                    student_answer=student_text,
+                    reference_answer=ref_answer,
+                    subject=subject,
+                    max_marks=max_marks,
+                )
+                raw_score = round(ev["ai_score"] * ocr_penalty, 1)
+                result.update({
+                    "ai_score":   raw_score,
+                    "max_score":  ev["max_score"],
+                    "confidence": round(ev.get("confidence", 0.75) * ocr_penalty, 2),
+                    "feedback":   ev.get("feedback", ""),
+                    "detail": {
+                        "keyword_score":    ev.get("keyword_score", 0),
+                        "semantic_score":   ev.get("semantic_score", 0),
+                        "matched_keywords": ev.get("keywords", {}).get("found", []),
+                        "missing_keywords": ev.get("keywords", {}).get("missing", []),
+                        "explanation":      ev.get("explanation", ""),
+                    },
+                })
 
     except Exception as exc:
         result.update({
