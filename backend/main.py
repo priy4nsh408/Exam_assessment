@@ -231,6 +231,14 @@ def _resolve_grading_reference(
     caller passed directly (manual/ungrounded grading).
     Returns {question_text, subject, reference_answer, max_marks, question_id,
              answer_id, grounded} where `grounded` is False only in the manual fallback case.
+
+    Raises HTTPException(404) if an answer_id or question_id was explicitly
+    provided but doesn't resolve to anything - this used to fall through
+    silently to the ungrounded/manual branch instead, producing a
+    confusing 0-score "ungrounded" result that looked like a legitimate
+    grading outcome rather than a "your ID was wrong" error. A typo'd or
+    copy-paste-mangled answer_id should fail loudly, not silently grade
+    against empty reference text.
     """
     if answer_id and HAS_PIPELINE:
         scheme = _db_get_answer_scheme_by_id(answer_id)
@@ -246,6 +254,12 @@ def _resolve_grading_reference(
                 "co": (question or {}).get("co"),
                 "grounded": True,
             }
+        raise HTTPException(
+            status_code=404,
+            detail=f"No answer scheme found for answer_id '{answer_id}'. Double-check it was "
+                   f"copied correctly (format: AK-YYYYMMDD-XXXXXX) - it must exactly match an "
+                   f"answer_id already in the question bank.",
+        )
 
     if question_id and HAS_PIPELINE:
         question = _db_get_question_by_id(question_id)
@@ -261,6 +275,11 @@ def _resolve_grading_reference(
                 "co": question.get("co"),
                 "grounded": True,
             }
+        raise HTTPException(
+            status_code=404,
+            detail=f"No question found for question_id '{question_id}'. Double-check it was "
+                   f"copied correctly - it must exactly match a question already in the bank.",
+        )
 
     # Manual fallback - whatever the caller supplied directly, ungrounded.
     # No real `co` exists in this case (no question record to draw it from).
