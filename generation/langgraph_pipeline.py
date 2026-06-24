@@ -270,12 +270,19 @@ class PipelineState(TypedDict):
     question_type: str
     co: str
     count: int
+    marks: Optional[int]
     context_chunks: List[str]
     raw_questions: List[str]
     validated_questions: List[str]
     tagged_questions: List[dict]
     final_questions: List[dict]
     errors: List[str]
+    # Human-readable reasons for why fewer than `count` questions came out
+    # the other end - one entry per question dropped by a filtering step
+    # (quality/difficulty/correctness validators or sha256 dedup). Lets
+    # callers report a precise cause instead of a generic "fewer than
+    # requested" message.
+    drop_reasons: List[str]
 
 # ── LLM call helper ───────────────────────────────────────────────────────────
 #
@@ -413,14 +420,25 @@ Output ONLY a numbered list of questions. No preamble, no explanations.
                 if len(q) > 20:
                     questions.append(q)
 
+    reasons = list(state.get("drop_reasons", []))
+    if len(questions) < state["count"]:
+        shortfall = state["count"] - len(questions)
+        reasons.append(
+            f"Generator (LLM) only returned {len(questions)}/{state['count']} usable question(s) "
+            f"in its response for this Bloom level/CO/subject combination - {shortfall} slot(s) "
+            f"could not be filled at this step."
+        )
     state["raw_questions"] = questions
+    state["drop_reasons"] = reasons
     return state
 
 def quality_validator_agent(state: PipelineState) -> PipelineState:
     """Checks question quality: length, clarity, specificity."""
     validated = []
+    reasons = list(state.get("drop_reasons", []))
     for q in state["raw_questions"]:
         if len(q) < 20:
+            reasons.append(f'QualityValidator dropped "{q[:60]}..." - too short (under 20 characters).')
             continue
         # Must end with ? or have directive verb
         has_question_form = "?" in q or any(
@@ -429,7 +447,18 @@ def quality_validator_agent(state: PipelineState) -> PipelineState:
         )
         if has_question_form:
             validated.append(q)
-    state["validated_questions"] = validated or state["raw_questions"]
+        else:
+            reasons.append(
+                f'QualityValidator dropped "{q[:60]}..." - doesn\'t read as a question '
+                f"(no \"?\" and doesn't start with a directive verb like Explain/Calculate/Derive)."
+            )
+    # If filtering would wipe out everything, keep the raw list instead (and
+    # drop the reasons we just logged for it, since nothing was actually lost).
+    if not validated and state["raw_questions"]:
+        validated = state["raw_questions"]
+        reasons = list(state.get("drop_reasons", []))
+    state["validated_questions"] = validated
+    state["drop_reasons"] = reasons
     return state
 
 def difficulty_validator_agent(state: PipelineState) -> PipelineState:
@@ -438,20 +467,42 @@ def difficulty_validator_agent(state: PipelineState) -> PipelineState:
     if bloom <= 2:
         return state  # any question fine for low levels
     filtered = []
+    reasons = list(state.get("drop_reasons", []))
     for q in state["validated_questions"]:
         word_count = len(q.split())
         # High Bloom levels should have substantive questions
         if bloom >= 4 and word_count < 10:
+            reasons.append(
+                f'DifficultyValidator dropped "{q[:60]}..." - only {word_count} words, '
+                f"too brief/trivial for Bloom L{bloom}."
+            )
             continue
         filtered.append(q)
-    state["validated_questions"] = filtered or state["validated_questions"]
+    if not filtered and state["validated_questions"]:
+        filtered = state["validated_questions"]
+        reasons = list(state.get("drop_reasons", []))
+    state["validated_questions"] = filtered
+    state["drop_reasons"] = reasons
     return state
 
 def correctness_validator_agent(state: PipelineState) -> PipelineState:
     """Checks that question text doesn't contain contradictions or obvious errors."""
     # Basic heuristic: remove questions with brackets indicating template gaps
-    filtered = [q for q in state["validated_questions"] if "[" not in q and "___" not in q]
-    state["validated_questions"] = filtered or state["validated_questions"]
+    filtered = []
+    reasons = list(state.get("drop_reasons", []))
+    for q in state["validated_questions"]:
+        if "[" in q or "___" in q:
+            reasons.append(
+                f'CorrectnessValidator dropped "{q[:60]}..." - still contains an unfilled '
+                f"template placeholder (\"[...]\" or \"___\")."
+            )
+            continue
+        filtered.append(q)
+    if not filtered and state["validated_questions"]:
+        filtered = state["validated_questions"]
+        reasons = list(state.get("drop_reasons", []))
+    state["validated_questions"] = filtered
+    state["drop_reasons"] = reasons
     return state
 
 def pedagogy_tagger_agent(state: PipelineState) -> PipelineState:
@@ -461,11 +512,22 @@ def pedagogy_tagger_agent(state: PipelineState) -> PipelineState:
     # stored per-question so grading can later reference exactly what was
     # used to write the question (no separate per-question retrieval needed).
     source_chunk = "\n\n".join(state["context_chunks"])[:3000]
+    # Marks: honor whatever the faculty member typed in the form if given;
+    # only fall back to the fixed Bloom->marks table when no explicit value
+    # was requested. Previously this ALWAYS used the table, silently
+    # overwriting the user's "Marks per Q" input (e.g. typing 10 for an L3
+    # question always produced 8 marks, since MARKS_BY_BLOOM[3] == 8).
+    marks = state.get("marks") or MARKS_BY_BLOOM[state["bloom_level"]]
     tagged = []
+    reasons = list(state.get("drop_reasons", []))
     import uuid
     for i, q_text in enumerate(state["validated_questions"]):
         sha = question_sha256(q_text)
         if is_duplicate(sha):
+            reasons.append(
+                f'PedagogyTagger dropped "{q_text[:60]}..." - an identical question '
+                f"already exists in the question bank (sha256 duplicate)."
+            )
             continue  # SHA-256 deduplication
         tagged.append({
             "id": f"Q-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
@@ -477,13 +539,14 @@ def pedagogy_tagger_agent(state: PipelineState) -> PipelineState:
             "bloom_label": bloom_label,
             "co": state["co"],
             "po": CO_PO_MAP.get(state["co"], "PO1"),
-            "marks": MARKS_BY_BLOOM[state["bloom_level"]],
+            "marks": marks,
             "difficulty": DIFFICULTY_BY_BLOOM[state["bloom_level"]],
             "source_chunk": source_chunk,
             "sha256": sha,
             "created_at": datetime.now().isoformat(),
         })
     state["tagged_questions"] = tagged
+    state["drop_reasons"] = reasons
     return state
 
 def syllabus_guardian_agent(state: PipelineState) -> PipelineState:
@@ -651,15 +714,20 @@ def get_pipeline():
         _pipeline = build_pipeline()
     return _pipeline
 
-def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
-                 co: str, count: int = 4) -> List[dict]:
+def run_pipeline_with_diagnostics(subject: str, unit: str, bloom_level: int, question_type: str,
+                                   co: str, count: int = 4, marks: Optional[int] = None
+                                   ) -> "tuple[List[dict], List[str]]":
     """
-    Main entry point. Returns list of generated question dicts.
-    Falls back to mock questions if LangGraph or Ollama unavailable.
+    Same generation as run_pipeline(), but also returns the list of
+    human-readable reasons (if any) for why fewer than `count` questions
+    came out the other end - e.g. the LLM under-producing, a validator
+    rejecting a question, or sha256 dedup against an existing question.
+
+    `marks` is optional: when given, every returned question is tagged with
+    this exact marks value instead of the fixed Bloom-level->marks table
+    (MARKS_BY_BLOOM), so the faculty member's "Marks per Q" input is
+    actually honored.
     """
-    # Ensure the DB/table exist before ANY agent runs - pedagogy_tagger_agent
-    # (and others) query the questions table for dedup purposes well before
-    # archivist_agent would otherwise have created it on a brand-new DB.
     init_db()
 
     initial_state: PipelineState = {
@@ -669,12 +737,14 @@ def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
         "question_type": question_type,
         "co": co,
         "count": count,
+        "marks": marks,
         "context_chunks": [],
         "raw_questions": [],
         "validated_questions": [],
         "tagged_questions": [],
         "final_questions": [],
         "errors": [],
+        "drop_reasons": [],
     }
 
     pipeline = get_pipeline()
@@ -682,7 +752,7 @@ def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
         try:
             result = pipeline.invoke(initial_state)
             if result["final_questions"]:
-                return result["final_questions"]
+                return result["final_questions"], result.get("drop_reasons", [])
         except Exception:
             pass
 
@@ -695,9 +765,32 @@ def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
                   answer_key_agent, archivist_agent]:
         state = agent(state)
 
-    return state["final_questions"] if state["final_questions"] else _mock_questions(subject, unit, bloom_level, question_type, co, count)
+    if state["final_questions"]:
+        return state["final_questions"], state.get("drop_reasons", [])
 
-def _mock_questions(subject, unit, bloom_level, q_type, co, count) -> List[dict]:
+    # Total fallback (no LLM/LangGraph at all): mock questions are always
+    # fully synthetic placeholders, never short of `count`, so no drop
+    # reasons apply here - but they're clearly unconnected to real source
+    # data, which the caller can still flag via the `source` field.
+    return _mock_questions(subject, unit, bloom_level, question_type, co, count, marks=marks), []
+
+
+def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
+                 co: str, count: int = 4, marks: Optional[int] = None) -> List[dict]:
+    """
+    Main entry point. Returns list of generated question dicts.
+    Falls back to mock questions if LangGraph or Ollama unavailable.
+
+    Thin backward-compatible wrapper around run_pipeline_with_diagnostics()
+    for callers that only need the questions, not the shortfall reasons.
+    """
+    questions, _ = run_pipeline_with_diagnostics(
+        subject=subject, unit=unit, bloom_level=bloom_level,
+        question_type=question_type, co=co, count=count, marks=marks,
+    )
+    return questions
+
+def _mock_questions(subject, unit, bloom_level, q_type, co, count, marks: Optional[int] = None) -> List[dict]:
     import uuid
     bloom_label = BLOOM_LABELS.get(bloom_level, BLOOM_LABELS[3])[0]
     templates = {
@@ -739,7 +832,7 @@ def _mock_questions(subject, unit, bloom_level, q_type, co, count) -> List[dict]
             "bloom_label": bloom_label,
             "co": co,
             "po": CO_PO_MAP.get(co, "PO1"),
-            "marks": MARKS_BY_BLOOM.get(bloom_level, 8),
+            "marks": marks or MARKS_BY_BLOOM.get(bloom_level, 8),
             "difficulty": DIFFICULTY_BY_BLOOM.get(bloom_level, "medium"),
             "answer_key": "",
             "source_chunk": "",
@@ -760,7 +853,7 @@ def _mock_questions(subject, unit, bloom_level, q_type, co, count) -> List[dict]
     return questions
 
 def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
-                            specs: List[dict]) -> List[dict]:
+                            specs: List[dict]) -> "tuple[List[dict], dict[int, str]]":
     """
     Step 1+2 entry point: generates one question per item in `specs`, where
     each spec is {"bloom_level": int, "co": str, "marks": int} - i.e. the
@@ -769,34 +862,47 @@ def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
 
     Internally groups specs that share the same (bloom_level, co) into a
     single underlying generation run (since that's what the agent pipeline
-    retrieves context and writes questions for), then applies each spec's
-    own `marks` value as an override - so marks stay per-question even
-    though generation is batched per (bloom_level, co) group.
+    retrieves context and writes questions for). Each spec's own `marks`
+    is passed straight into generation (pedagogy_tagger_agent honors it
+    directly) rather than overwritten afterward.
 
-    Returns one question dict per spec, in the original requested order
-    (a spec's slot is omitted only if generation/dedup yielded fewer
-    questions than requested for its group).
+    Returns (questions, drop_reasons):
+      - questions: one dict per spec that successfully generated, in the
+        original requested order (a spec's slot is omitted only if
+        generation/dedup yielded fewer questions than requested for its
+        group).
+      - drop_reasons: {spec_index: reason} for every omitted slot, so
+        callers can tell the user exactly why each missing question is
+        missing instead of a generic shortfall count.
     """
     from collections import defaultdict
 
-    groups = defaultdict(list)  # (bloom_level, co) -> [spec_index, ...]
+    groups = defaultdict(list)  # (bloom_level, co, marks) -> [spec_index, ...]
     for idx, spec in enumerate(specs):
-        groups[(spec["bloom_level"], spec["co"])].append(idx)
+        groups[(spec["bloom_level"], spec["co"], spec.get("marks"))].append(idx)
 
     results_by_index: dict = {}
-    for (bloom_level, co), indices in groups.items():
-        generated = run_pipeline(
+    drop_reasons_by_index: dict = {}
+    for (bloom_level, co, marks), indices in groups.items():
+        generated, reasons = run_pipeline_with_diagnostics(
             subject=subject, unit=unit, bloom_level=bloom_level,
-            question_type=question_type, co=co, count=len(indices),
+            question_type=question_type, co=co, count=len(indices), marks=marks,
         )
         for idx, q in zip(indices, generated):
-            requested_marks = specs[idx].get("marks")
-            if requested_marks and q.get("marks") != requested_marks:
-                q["marks"] = requested_marks
-                try:
-                    update_question_fields(q["id"], {"marks": requested_marks})
-                except Exception:
-                    pass
             results_by_index[idx] = q
+        # Any indices in this group beyond len(generated) didn't get a
+        # question - attribute the group's collected drop reasons to them
+        # (best-effort: we know WHY the group came up short, just not
+        # precisely which named slot a given drop corresponds to once
+        # several specs share one group).
+        missing_indices = indices[len(generated):]
+        if missing_indices:
+            reason_text = " ".join(reasons) if reasons else (
+                f"Generation for Bloom L{bloom_level}/{co} yielded fewer questions than "
+                f"requested, for an unspecified reason (no validator/dedup reason was logged)."
+            )
+            for idx in missing_indices:
+                drop_reasons_by_index[idx] = reason_text
 
-    return [results_by_index[i] for i in sorted(results_by_index)]
+    questions = [results_by_index[i] for i in sorted(results_by_index)]
+    return questions, drop_reasons_by_index

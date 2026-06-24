@@ -186,14 +186,24 @@ def evaluate_theory(
     # 1. Keyword coverage against the reference (raw-data-derived) answer
     kw = keyword_coverage(student_answer, reference_answer, top_n=top_n_keywords)
 
-    # 2. Semantic similarity against the same reference answer
+    # 2. Semantic similarity against the same reference answer.
+    # When sentence-transformers isn't installed at all, fall back to the
+    # same neutral 0.5 that cosine_similarity() itself returns in that case
+    # - previously this branch left `similarity` at its 0.0 initial value
+    # instead, which silently zeroed out the entire 60%-weighted semantic
+    # component of every score whenever embeddings were unavailable.
     similarity = 0.0
-    if reference_answer and student_answer and EMBEDDINGS_AVAILABLE:
-        model_emb = get_embedding_model()
-        if model_emb:
-            vec_ref = model_emb.encode(reference_answer)
-            vec_student = model_emb.encode(student_answer)
-            similarity = cosine_similarity(vec_ref, vec_student)
+    if reference_answer and student_answer:
+        if EMBEDDINGS_AVAILABLE:
+            model_emb = get_embedding_model()
+            if model_emb:
+                vec_ref = model_emb.encode(reference_answer)
+                vec_student = model_emb.encode(student_answer)
+                similarity = cosine_similarity(vec_ref, vec_student)
+            else:
+                similarity = 0.5
+        else:
+            similarity = 0.5
 
     # 3. Deterministic blended score (keyword count + semantic match)
     blended = keyword_weight * kw["coverage_ratio"] + semantic_weight * similarity

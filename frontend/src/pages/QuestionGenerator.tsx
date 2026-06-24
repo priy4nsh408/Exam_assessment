@@ -30,16 +30,22 @@ function newRow(co = 'CO1', bloomLevel = 3, marks = 10): SpecRow {
   return { id: `row-${rowCounter}`, co, bloomLevel, marks }
 }
 
+const PIPELINE_STEPS = [
+  'BloomAnalyzer', 'Scout', 'Generator', 'QualityValidator', 'DifficultyValidator',
+  'CorrectnessValidator', 'PedagogyTagger', 'SyllabusGuardian', 'ProvenanceExplainer',
+  'AnswerKey', 'Archivist',
+]
+
 export default function QuestionGenerator() {
   const [subject, setSubject] = useState(SUBJECTS[0])
   const [unit, setUnit] = useState(UNITS[SUBJECTS[0]][0])
   const [questionType, setQuestionType] = useState('theory')
   const [count, setCount] = useState(4)
 
-  // Multiple CO/Bloom-level support: a pool of {co, bloomLevel, marks} rows,
-  // expanded across `count` questions either sequentially (cycling through
-  // the pool in order) or randomly (one pool entry picked at random per slot).
-  const [multiMode, setMultiMode] = useState(false)
+  // One CO/Bloom/marks row pool, expanded across `count` questions either
+  // sequentially (cycling through the pool in order) or randomly (one pool
+  // entry picked at random per slot). A single row behaves exactly like the
+  // old "one CO/Bloom level" mode - no separate single/multi toggle needed.
   const [specRows, setSpecRows] = useState<SpecRow[]>([newRow()])
   const [assignment, setAssignment] = useState<'sequential' | 'random'>('sequential')
 
@@ -70,52 +76,26 @@ export default function QuestionGenerator() {
     return out
   }
 
-  const handleGenerateSimple = async () => {
-    // Single CO/Bloom level - keep the existing SSE agent-pipeline animation.
-    const row = specRows[0]
+  const handleGenerate = async () => {
     setLoading(true)
     setQuestions([])
     setWarning(null)
-    setAgentStatuses({
-      'BloomAnalyzer': 'idle', 'Scout': 'idle', 'Generator': 'idle',
-      'QualityValidator': 'idle', 'DifficultyValidator': 'idle',
-      'CorrectnessValidator': 'idle', 'PedagogyTagger': 'idle',
-      'SyllabusGuardian': 'idle', 'Archivist': 'idle',
-    })
+    setAgentStatuses(Object.fromEntries(PIPELINE_STEPS.map(s => [s, 'idle'])))
 
-    const params = new URLSearchParams({
-      subject, unit, bloom_level: String(row.bloomLevel),
-      question_type: questionType, co: row.co, count: String(count)
-    })
-
-    const eventSource = new EventSource(`/api/questions/generate/stream?${params}`)
-
-    eventSource.onmessage = (e) => {
-      const data = JSON.parse(e.data)
-      if (data.agent) {
-        setAgentStatuses(prev => ({ ...prev, [data.agent]: data.status }))
+    // Lightweight visual progress through the agent chain while the single
+    // batched /api/pipeline/generate request is in flight - this isn't an
+    // SSE stream of real per-agent events (mixed-spec batches run as one
+    // request), just a paced animation so the wait doesn't feel inert.
+    let stepIndex = 0
+    const stepInterval = setInterval(() => {
+      if (stepIndex < PIPELINE_STEPS.length) {
+        const name = PIPELINE_STEPS[stepIndex]
+        setAgentStatuses(prev => ({ ...prev, [name]: 'running' }))
+        setTimeout(() => setAgentStatuses(prev => ({ ...prev, [name]: 'done' })), 350)
+        stepIndex += 1
       }
-      if (data.done) {
-        setQuestions(data.questions || [])
-        setSelected(new Set((data.questions || []).map((q: any) => q.id)))
-        setLoading(false)
-        eventSource.close()
-      }
-    }
-    eventSource.onerror = () => {
-      setLoading(false)
-      eventSource.close()
-    }
-  }
+    }, 450)
 
-  const handleGenerateMulti = async () => {
-    // Multiple CO/Bloom levels (sequential or random across `count`
-    // questions) - no SSE animation here, this batches everything through
-    // the JSON pipeline endpoint in one request.
-    setLoading(true)
-    setQuestions([])
-    setWarning(null)
-    setAgentStatuses({})
     try {
       const res = await fetch('/api/pipeline/generate', {
         method: 'POST',
@@ -132,13 +112,11 @@ export default function QuestionGenerator() {
       if (data.warning) setWarning(data.warning)
     } catch {
       alert('Generation failed — is the backend running?')
+    } finally {
+      clearInterval(stepInterval)
+      setAgentStatuses(Object.fromEntries(PIPELINE_STEPS.map(s => [s, 'done'])))
+      setLoading(false)
     }
-    setLoading(false)
-  }
-
-  const handleGenerate = () => {
-    if (multiMode && specRows.length > 1) handleGenerateMulti()
-    else handleGenerateSimple()
   }
 
   const toggleExpand = (id: string) => {
@@ -257,37 +235,8 @@ export default function QuestionGenerator() {
                 </select>
               </div>
 
-              <div className="flex items-center justify-between pt-1">
-                <label className="label mb-0">CO / Bloom Levels</label>
-                <button
-                  type="button"
-                  onClick={() => setMultiMode(m => !m)}
-                  className={`text-xs font-medium px-2 py-1 rounded-md transition-colors ${multiMode ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600'}`}
-                >
-                  {multiMode ? 'Multiple levels: ON' : 'Use one CO/Bloom level'}
-                </button>
-              </div>
-
-              {!multiMode ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="label">Bloom Level</label>
-                    <select className="select" value={specRows[0].bloomLevel} onChange={e => updateSpecRow(specRows[0].id, { bloomLevel: +e.target.value })}>
-                      {BLOOM_LEVELS.map(b => <option key={b.level} value={b.level}>{b.label}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="label">CO Mapping</label>
-                    <select className="select" value={specRows[0].co} onChange={e => updateSpecRow(specRows[0].id, { co: e.target.value })}>
-                      {COs.map(c => <option key={c}>{c}</option>)}
-                    </select>
-                  </div>
-                  <div className="col-span-2">
-                    <label className="label">Marks per Q</label>
-                    <input type="number" className="input" value={specRows[0].marks} min={1} max={20} onChange={e => updateSpecRow(specRows[0].id, { marks: +e.target.value })} />
-                  </div>
-                </div>
-              ) : (
+              <div>
+                <label className="label">CO / Bloom Levels</label>
                 <div className="space-y-2">
                   {specRows.map((row, idx) => (
                     <div key={row.id} className="flex items-center gap-2 bg-gray-50 rounded-lg p-2">
@@ -299,7 +248,7 @@ export default function QuestionGenerator() {
                         {COs.map(c => <option key={c}>{c}</option>)}
                       </select>
                       <input type="number" className="input text-xs py-1.5 w-16" value={row.marks} min={1} max={20} onChange={e => updateSpecRow(row.id, { marks: +e.target.value })} />
-                      <button onClick={() => removeSpecRow(row.id)} className="text-gray-300 hover:text-red-500 shrink-0">
+                      <button onClick={() => removeSpecRow(row.id)} disabled={specRows.length <= 1} className="text-gray-300 hover:text-red-500 disabled:opacity-30 disabled:hover:text-gray-300 shrink-0">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
@@ -329,7 +278,7 @@ export default function QuestionGenerator() {
                     </div>
                   )}
                 </div>
-              )}
+              </div>
 
               <div>
                 <label className="label">Number of Questions</label>
@@ -343,7 +292,7 @@ export default function QuestionGenerator() {
                 {loading ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    {multiMode && specRows.length > 1 ? 'Generating...' : 'Generating via LangGraph...'}
+                    Generating via LangGraph...
                   </>
                 ) : (
                   <>
@@ -355,41 +304,33 @@ export default function QuestionGenerator() {
           </div>
 
           {/* Pipeline Status */}
-          {!multiMode || specRows.length <= 1 ? (
-            <div className="card p-5">
-              <h2 className="text-sm font-semibold text-gray-900 mb-3">Agent Pipeline</h2>
-              <div className="space-y-2">
-                {Object.entries(agentStatuses).map(([name, status]) => {
-                  const labels: Record<string, string> = {
-                    BloomAnalyzer: 'Bloom Analyzer', Scout: 'Scout (RAG)',
-                    Generator: 'Generator', QualityValidator: 'Quality Validator',
-                    DifficultyValidator: 'Difficulty Validator', CorrectnessValidator: 'Correctness Validator',
-                    PedagogyTagger: 'Pedagogy Tagger', SyllabusGuardian: 'Syllabus Guardian', Archivist: 'Archivist',
-                  }
-                  return (
-                  <div key={name} className="flex items-center justify-between">
-                    <span className="text-xs text-gray-600">{labels[name] || name}</span>
-                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                      status === 'done' ? 'bg-emerald-50 text-emerald-600' :
-                      status === 'running' ? 'bg-indigo-50 text-indigo-600 animate-pulse' :
-                      'bg-gray-100 text-gray-400'
-                    }`}>{status}</span>
-                  </div>
-                  )
-                })}
-                {Object.keys(agentStatuses).length === 0 && (
-                  <p className="text-xs text-gray-400">Pipeline idle — click Generate to start</p>
-                )}
-              </div>
+          <div className="card p-5">
+            <h2 className="text-sm font-semibold text-gray-900 mb-3">Agent Pipeline</h2>
+            <div className="space-y-2">
+              {Object.entries(agentStatuses).map(([name, status]) => {
+                const labels: Record<string, string> = {
+                  BloomAnalyzer: 'Bloom Analyzer', Scout: 'Scout (RAG)',
+                  Generator: 'Generator', QualityValidator: 'Quality Validator',
+                  DifficultyValidator: 'Difficulty Validator', CorrectnessValidator: 'Correctness Validator',
+                  PedagogyTagger: 'Pedagogy Tagger', SyllabusGuardian: 'Syllabus Guardian',
+                  ProvenanceExplainer: 'Provenance Explainer', AnswerKey: 'Answer Key', Archivist: 'Archivist',
+                }
+                return (
+                <div key={name} className="flex items-center justify-between">
+                  <span className="text-xs text-gray-600">{labels[name] || name}</span>
+                  <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
+                    status === 'done' ? 'bg-emerald-50 text-emerald-600' :
+                    status === 'running' ? 'bg-indigo-50 text-indigo-600 animate-pulse' :
+                    'bg-gray-100 text-gray-400'
+                  }`}>{status}</span>
+                </div>
+                )
+              })}
+              {Object.keys(agentStatuses).length === 0 && (
+                <p className="text-xs text-gray-400">Pipeline idle — click Generate to start</p>
+              )}
             </div>
-          ) : (
-            <div className="card p-5">
-              <p className="text-xs text-gray-400">
-                Multiple CO/Bloom levels run through the batch pipeline endpoint directly
-                (no live agent-by-agent animation for mixed-spec batches).
-              </p>
-            </div>
-          )}
+          </div>
         </div>
 
         {/* Results */}

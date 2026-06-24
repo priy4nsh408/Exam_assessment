@@ -61,6 +61,12 @@ except Exception as _import_err:
     LANGGRAPH_AVAILABLE = False
     OLLAMA_AVAILABLE = False
 
+try:
+    import demo_data as _demo
+    HAS_DEMO_DATA = True
+except Exception:
+    HAS_DEMO_DATA = False
+
 app = FastAPI(title="MechAssess API", version="2.0.0")
 
 app.add_middleware(
@@ -149,64 +155,17 @@ class ExamCreateRequest(BaseModel):
 
 # ── Mock data stores ──────────────────────────────────────────────────────────
 
-MOCK_STUDENTS = [
-    {"id": "ST-001", "usn": "1RV23ME001", "name": "Arjun Sharma", "section": "ME-A"},
-    {"id": "ST-002", "usn": "1RV23ME002", "name": "Priya Nair", "section": "ME-A"},
-    {"id": "ST-003", "usn": "1RV23ME003", "name": "Rohan Das", "section": "ME-A"},
-    {"id": "ST-004", "usn": "1RV23ME004", "name": "Kavitha Rao", "section": "ME-B"},
-    {"id": "ST-005", "usn": "1RV23ME005", "name": "Suresh M", "section": "ME-B"},
-    {"id": "ST-006", "usn": "1RV23ME006", "name": "Deepa Krishnan", "section": "ME-B"},
-    {"id": "ST-007", "usn": "1RV23ME007", "name": "Arun Bhat", "section": "ME-C"},
-    {"id": "ST-008", "usn": "1RV23ME008", "name": "Ravi Kumar", "section": "ME-C"},
-]
+# ── Demo data ─────────────────────────────────────────────────────────────────
+# The student roster / sample submissions / exam list below used to be
+# hand-typed fixtures with made-up scores (MOCK_STUDENTS, MOCK_SUBMISSIONS,
+# MOCK_EXAMS). They're now sourced from demo_data.py, which computes every
+# score by actually running evaluate_theory()/grade_numerical() against the
+# real seeded answer keys - so what's on screen is a genuine demonstration
+# of the grading engine, not invented percentages.
 
-MOCK_SUBMISSIONS = [
-    {
-        "id": "S-031", "studentId": "ST-001", "questionId": "Q-001",
-        "type": "theory",
-        "content": "The zeroth law states that if two systems are in thermal equilibrium with a third, they are in thermal equilibrium with each other.",
-        "submittedAt": "2026-05-10T09:15:00Z", "status": "graded",
-    },
-    {
-        "id": "S-032", "studentId": "ST-002", "questionId": "Q-002",
-        "type": "theory",
-        "content": "For isothermal process, T = constant. Work done W = nRT ln(V2/V1).",
-        "submittedAt": "2026-05-10T09:18:00Z", "status": "graded",
-    },
-    {
-        "id": "S-033", "studentId": "ST-003", "questionId": "Q-003",
-        "type": "numerical",
-        "content": "eta = 1 - T2/T1 = 1 - 400/800 = 0.5. Heat supplied = W/eta = 150/0.5 = 300 kW. Heat rejected = 300 - 150 = 150 kW.",
-        "submittedAt": "2026-05-10T09:20:00Z", "status": "pending",
-    },
-    {
-        "id": "S-034", "studentId": "ST-004", "questionId": "Q-003",
-        "type": "numerical",
-        "content": "eta = 1 - 300/900 = 0.667. Heat supplied = 150/0.667 = 224.8 kW.",
-        "submittedAt": "2026-05-10T09:25:00Z", "status": "pending",
-    },
-]
-
-MOCK_EXAMS = [
-    {
-        "id": "EX-001", "title": "Thermodynamics Mid-Semester Examination",
-        "subject": "Thermodynamics", "totalMarks": 50, "duration": 90,
-        "questions": ["Q-001", "Q-002", "Q-003", "Q-008"],
-        "createdAt": "2026-05-08T10:00:00Z", "status": "published",
-    },
-    {
-        "id": "EX-002", "title": "Fluid Mechanics Unit Test — Unit 2 & 3",
-        "subject": "Fluid Mechanics", "totalMarks": 30, "duration": 60,
-        "questions": ["Q-005", "Q-006"],
-        "createdAt": "2026-05-09T10:00:00Z", "status": "draft",
-    },
-    {
-        "id": "EX-003", "title": "Strength of Materials — Bending & Torsion",
-        "subject": "Strength of Materials", "totalMarks": 40, "duration": 90,
-        "questions": ["Q-004"],
-        "createdAt": "2026-05-10T10:00:00Z", "status": "draft",
-    },
-]
+MOCK_STUDENTS = _demo.DEMO_STUDENTS if HAS_DEMO_DATA else []
+MOCK_SUBMISSIONS = _demo.DEMO_SUBMISSIONS if HAS_DEMO_DATA else []
+MOCK_EXAMS = _demo.DEMO_EXAMS if HAS_DEMO_DATA else []
 
 GRADE_RESULTS = {}
 
@@ -348,15 +307,14 @@ async def get_stats():
         except Exception:
             total_questions = 0
 
+    demo_stats = _demo.get_demo_stats() if HAS_DEMO_DATA else {
+        "activeExams": 0, "submissionsPending": 0, "avgCOAttainment": None,
+        "totalStudents": 0, "gradedToday": 0,
+    }
+
     return {
         "totalQuestions": total_questions,
-        "activeExams": sum(1 for e in MOCK_EXAMS if e["status"] == "published"),
-        "submissionsPending": sum(1 for s in MOCK_SUBMISSIONS if s["status"] == "pending"),
-        "avgCOAttainment": 76.8,
-        "timeSavedHours": 186,
-        "questionsThisMonth": 48,
-        "totalStudents": len(MOCK_STUDENTS),
-        "gradedToday": 34,
+        **demo_stats,
     }
 
 
@@ -376,7 +334,7 @@ async def pipeline_generate(req: PipelineGenerateRequest):
 
     try:
         specs = [q.dict() for q in req.questions]
-        questions = _db_run_pipeline_for_specs(
+        questions, drop_reasons = _db_run_pipeline_for_specs(
             subject=req.subject, unit=req.chapter,
             question_type=req.question_type, specs=specs,
         )
@@ -390,9 +348,17 @@ async def pipeline_generate(req: PipelineGenerateRequest):
         shortfall = len(req.questions) - len(normalized)
         response = {"questions": normalized, "source": source, "requested": len(req.questions)}
         if shortfall > 0:
+            # One concrete reason per missing question, in spec order, instead
+            # of a vague generic shortfall note - e.g. "the LLM only returned
+            # 2/4 usable questions" or "a validator rejected it as too short"
+            # rather than a hand-wavy "may be due to dedup or sparse data".
+            unique_reasons = list(dict.fromkeys(drop_reasons.values()))
+            reason_text = " ".join(unique_reasons) if unique_reasons else (
+                "No specific reason was logged for the shortfall."
+            )
             response["warning"] = (
-                f"{shortfall} question(s) could not be generated for their requested "
-                f"Bloom level/CO combination (e.g. due to deduplication or sparse source data)."
+                f"Requested {len(req.questions)} question(s) but only {len(normalized)} "
+                f"were generated. {reason_text}"
             )
         return response
     except Exception as e:
@@ -493,6 +459,7 @@ async def generate_questions(req: QuestionGenerateRequest):
             question_type=req.question_type,
             co=req.co,
             count=req.count,
+            marks=req.marks,
         )
         normalized = []
         for i, q in enumerate(questions, start=1):
@@ -514,6 +481,7 @@ async def stream_generate_questions(
     question_type: str = "theory",
     co: str = "CO1",
     count: int = 4,
+    marks: Optional[int] = None,
 ):
     """
     SSE endpoint that streams agent progress events during question generation.
@@ -537,6 +505,7 @@ async def stream_generate_questions(
                     question_type=question_type,
                     co=co,
                     count=count,
+                    marks=marks,
                 )
                 result_holder["questions"] = qs
             except Exception as ex:
@@ -636,7 +605,13 @@ async def delete_question_route(question_id: str):
 
 @app.get("/api/students")
 async def get_students():
-    return {"students": MOCK_STUDENTS, "total": len(MOCK_STUDENTS)}
+    if HAS_DEMO_DATA:
+        students = _demo.get_demo_students_with_scores()
+    else:
+        students = [{**s, "theory": None, "numerical": None, "drawing": None,
+                     "co1": None, "co2": None, "co3": None, "co4": None, "co5": None,
+                     "avg": None} for s in MOCK_STUDENTS]
+    return {"students": students, "total": len(students)}
 
 
 @app.get("/api/submissions")
@@ -734,54 +709,9 @@ async def override_grade(submission_id: str, body: OverrideRequest):
 
 @app.get("/api/analytics/co")
 async def get_co_analytics():
-    co_data = [
-        {
-            "co": "CO1",
-            "description": "Apply laws of thermodynamics to analyze engineering systems",
-            "averageAttainment": 78.2,
-            "studentsAchieved": 48,
-            "totalStudents": 62,
-            "target": 70,
-            "bloomCoverage": {"L1": 12, "L2": 18, "L3": 20, "L4": 15, "L5": 8, "L6": 3},
-        },
-        {
-            "co": "CO2",
-            "description": "Analyze power cycles and refrigeration systems",
-            "averageAttainment": 65.1,
-            "studentsAchieved": 40,
-            "totalStudents": 62,
-            "target": 70,
-            "bloomCoverage": {"L1": 8, "L2": 14, "L3": 22, "L4": 18, "L5": 10, "L6": 4},
-        },
-        {
-            "co": "CO3",
-            "description": "Solve problems in strength of materials and structural analysis",
-            "averageAttainment": 82.4,
-            "studentsAchieved": 51,
-            "totalStudents": 62,
-            "target": 70,
-            "bloomCoverage": {"L1": 10, "L2": 15, "L3": 25, "L4": 20, "L5": 12, "L6": 5},
-        },
-        {
-            "co": "CO4",
-            "description": "Apply fluid mechanics principles to flow analysis",
-            "averageAttainment": 71.3,
-            "studentsAchieved": 44,
-            "totalStudents": 62,
-            "target": 70,
-            "bloomCoverage": {"L1": 9, "L2": 16, "L3": 21, "L4": 17, "L5": 9, "L6": 2},
-        },
-        {
-            "co": "CO5",
-            "description": "Interpret and produce engineering drawings per IS standards",
-            "averageAttainment": 88.0,
-            "studentsAchieved": 55,
-            "totalStudents": 62,
-            "target": 70,
-            "bloomCoverage": {"L1": 6, "L2": 12, "L3": 28, "L4": 14, "L5": 7, "L6": 3},
-        },
-    ]
-    return {"co_analytics": co_data, "overall_attainment": 77.0, "target": 70}
+    if HAS_DEMO_DATA:
+        return _demo.get_demo_co_analytics()
+    return {"co_analytics": [], "overall_attainment": None, "target": 70}
 
 
 @app.get("/api/exams")

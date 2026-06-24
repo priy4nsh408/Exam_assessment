@@ -1,35 +1,38 @@
 import { useState, useEffect } from 'react'
 import { Header } from '../components/layout/Header'
 
-const STUDENTS = [
-  { usn: '1RV23ME001', name: 'Arjun Sharma', section: 'ME-A', theory: 82, numerical: 75, drawing: 68, avg: 75, co1: 78, co2: 72, co3: 80, co4: 65, co5: 70 },
-  { usn: '1RV23ME002', name: 'Priya Nair', section: 'ME-A', theory: 91, numerical: 88, drawing: 79, avg: 86, co1: 90, co2: 85, co3: 88, co4: 82, co5: 79 },
-  { usn: '1RV23ME003', name: 'Rohan Das', section: 'ME-A', theory: 45, numerical: 52, drawing: 60, avg: 52, co1: 42, co2: 50, co3: 55, co4: 58, co5: 62 },
-  { usn: '1RV23ME004', name: 'Kavitha Rao', section: 'ME-B', theory: 72, numerical: 48, drawing: 75, avg: 65, co1: 70, co2: 45, co3: 72, co4: 68, co5: 78 },
-  { usn: '1RV23ME005', name: 'Suresh M', section: 'ME-B', theory: 65, numerical: 71, drawing: 82, avg: 73, co1: 65, co2: 70, co3: 75, co4: 72, co5: 84 },
-]
+type StudentRow = {
+  usn: string; name: string; section: string
+  theory: number | null; numerical: number | null; drawing: number | null
+  co1: number | null; co2: number | null; co3: number | null; co4: number | null; co5: number | null
+  avg: number | null
+}
 
-function ScoreCell({ value }: { value: number }) {
+function ScoreCell({ value }: { value: number | null }) {
+  if (value === null) return <span className="text-sm text-gray-300">—</span>
   const color = value >= 70 ? 'text-emerald-600' : value >= 50 ? 'text-amber-600' : 'text-red-600'
   return <span className={`text-sm font-semibold ${color}`}>{value}%</span>
 }
 
-function COCell({ value }: { value: number }) {
+function COCell({ value }: { value: number | null }) {
+  if (value === null) return <span className="inline-flex w-8 h-6 items-center justify-center rounded text-xs text-gray-300">—</span>
   const cls = value >= 70 ? 'bg-emerald-50 text-emerald-700' : value >= 50 ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600'
   return <div className={`inline-flex w-8 h-6 items-center justify-center rounded text-xs font-bold ${cls}`}>{value}</div>
 }
 
 export default function Students() {
-  const [students, setStudents] = useState(STUDENTS)
+  const [students, setStudents] = useState<StudentRow[]>([])
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     fetch('/api/students')
       .then(r => r.json())
       .then(data => {
         const arr = data.students || data
-        if (Array.isArray(arr) && arr.length > 0) setStudents(arr)
+        if (Array.isArray(arr)) setStudents(arr)
       })
       .catch(() => {})
+      .finally(() => setLoading(false))
   }, [])
 
   return (
@@ -53,8 +56,14 @@ export default function Students() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
+              {loading && (
+                <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-400">Loading student data…</td></tr>
+              )}
+              {!loading && students.length === 0 && (
+                <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-400">No student data yet.</td></tr>
+              )}
               {students.map(s => {
-                const atRisk = s.avg < 60
+                const atRisk = s.avg !== null && s.avg < 60
                 return (
                   <tr key={s.usn} className={`hover:bg-gray-50 transition-colors ${atRisk ? 'bg-red-50/30' : ''}`}>
                     <td className="px-4 py-3">
@@ -78,7 +87,11 @@ export default function Students() {
                     <td className="px-3 py-3 text-center"><COCell value={s.co4} /></td>
                     <td className="px-3 py-3 text-center"><COCell value={s.co5} /></td>
                     <td className="px-3 py-3 text-center">
-                      <span className={`text-sm font-bold ${s.avg >= 70 ? 'text-emerald-600' : s.avg >= 50 ? 'text-amber-600' : 'text-red-600'}`}>{s.avg}%</span>
+                      {s.avg === null ? (
+                        <span className="text-sm text-gray-300">—</span>
+                      ) : (
+                        <span className={`text-sm font-bold ${s.avg >= 70 ? 'text-emerald-600' : s.avg >= 50 ? 'text-amber-600' : 'text-red-600'}`}>{s.avg}%</span>
+                      )}
                     </td>
                   </tr>
                 )

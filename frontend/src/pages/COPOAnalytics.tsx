@@ -6,13 +6,13 @@ import {
   LineChart, Line, Legend, Cell
 } from 'recharts'
 
-const DEFAULT_CO_DATA = [
-  { co: 'CO1', description: 'Apply laws of thermodynamics', attainment: 78, target: 70, students: 48, total: 62 },
-  { co: 'CO2', description: 'Analyze power cycles', attainment: 65, target: 70, students: 40, total: 62 },
-  { co: 'CO3', description: 'Solve SOM problems', attainment: 82, target: 70, students: 51, total: 62 },
-  { co: 'CO4', description: 'Apply fluid mechanics principles', attainment: 71, target: 70, students: 44, total: 62 },
-  { co: 'CO5', description: 'Interpret engineering drawings', attainment: 88, target: 70, students: 55, total: 62 },
-]
+type CoRow = {
+  co: string; description: string
+  attainment: number | null; target: number
+  students: number | null; total: number | null
+}
+
+const EMPTY_CO_DATA: CoRow[] = []
 
 const trendData = [
   { week: 'W1', CO1: 60, CO2: 52, CO3: 65 },
@@ -38,7 +38,8 @@ const corr: Record<number, string> = {
 }
 
 export default function COPOAnalytics() {
-  const [coData, setCoData] = useState(DEFAULT_CO_DATA)
+  const [coData, setCoData] = useState<CoRow[]>(EMPTY_CO_DATA)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     fetch('/api/analytics/co')
@@ -49,37 +50,46 @@ export default function COPOAnalytics() {
           setCoData(arr.map((c: any) => ({
             co: c.co,
             description: c.description,
-            attainment: c.averageAttainment ?? c.attainment ?? 0,
+            attainment: c.averageAttainment ?? (typeof c.attainment === 'number' ? c.attainment : null),
             target: c.target ?? 70,
-            students: c.studentsAchieved ?? c.students ?? 0,
-            total: c.totalStudents ?? c.total ?? 62,
+            students: c.studentsAchieved ?? (typeof c.students === 'number' ? c.students : null),
+            total: c.totalStudents ?? (typeof c.total === 'number' ? c.total : null),
           })))
         }
       })
       .catch(() => {})
+      .finally(() => setLoading(false))
   }, [])
 
-  const radarData = coData.map(c => ({ co: c.co, value: c.attainment, fullMark: 100 }))
+  const computedCoData = coData.filter(c => c.attainment !== null)
+  const radarData = computedCoData.map(c => ({ co: c.co, value: c.attainment, fullMark: 100 }))
 
   return (
     <div>
       <Header title="CO/PO Analytics" subtitle="Course Outcome attainment analysis and Program Outcome mapping" />
       <div className="p-6 space-y-6">
+        {!loading && computedCoData.length === 0 && (
+          <div className="card p-4 bg-amber-50 border-amber-200 text-xs text-amber-700">
+            No CO attainment data available yet — this fills in once submissions have been graded.
+          </div>
+        )}
         {/* CO Summary Cards */}
         <div className="grid grid-cols-5 gap-3">
           {coData.map(co => (
             <div key={co.co} className="card p-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-bold text-gray-700">{co.co}</span>
-                <span className={`text-xs font-bold ${co.attainment >= co.target ? 'text-emerald-600' : 'text-red-500'}`}>
-                  {co.attainment}%
+                <span className={`text-xs font-bold ${co.attainment === null ? 'text-gray-400' : co.attainment >= co.target ? 'text-emerald-600' : 'text-red-500'}`}>
+                  {co.attainment === null ? '—' : `${co.attainment}%`}
                 </span>
               </div>
               <div className="h-1.5 bg-gray-100 rounded-full mb-2 overflow-hidden">
-                <div className={`h-full rounded-full ${co.attainment >= co.target ? 'bg-emerald-500' : 'bg-amber-400'}`} style={{ width: `${co.attainment}%` }} />
+                <div className={`h-full rounded-full ${co.attainment === null ? 'bg-gray-200' : co.attainment >= co.target ? 'bg-emerald-500' : 'bg-amber-400'}`} style={{ width: `${co.attainment ?? 0}%` }} />
               </div>
               <p className="text-[10px] text-gray-400 leading-tight">{co.description}</p>
-              <p className="text-[10px] text-gray-500 mt-1">{co.students}/{co.total} students achieved</p>
+              <p className="text-[10px] text-gray-500 mt-1">
+                {co.students === null || co.total === null ? 'No data yet' : `${co.students}/${co.total} students achieved`}
+              </p>
             </div>
           ))}
         </div>
@@ -90,15 +100,15 @@ export default function COPOAnalytics() {
             <h2 className="text-sm font-semibold text-gray-900 mb-1">CO Attainment vs Target</h2>
             <p className="text-xs text-gray-500 mb-4">Percentage of students meeting the 70% threshold per CO</p>
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={coData} barCategoryGap="30%">
+              <BarChart data={computedCoData} barCategoryGap="30%">
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <XAxis dataKey="co" tick={{ fontSize: 12 }} tickLine={false} axisLine={false} />
                 <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} domain={[0, 100]} unit="%" />
                 <Tooltip formatter={(v: number) => `${v}%`} contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Bar dataKey="attainment" name="Attainment" radius={[4, 4, 0, 0]}>
-                  {coData.map((entry, index) => (
-                    <Cell key={index} fill={entry.attainment >= entry.target ? '#10b981' : '#f59e0b'} />
+                  {computedCoData.map((entry, index) => (
+                    <Cell key={index} fill={(entry.attainment ?? 0) >= entry.target ? '#10b981' : '#f59e0b'} />
                   ))}
                 </Bar>
                 <Bar dataKey="target" name="Target (70%)" fill="#e2e8f0" radius={[4, 4, 0, 0]} />
