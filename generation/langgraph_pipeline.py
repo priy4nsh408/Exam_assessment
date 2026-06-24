@@ -479,9 +479,17 @@ def scout_agent(state: PipelineState) -> PipelineState:
                 subject=state["subject"],
                 unit=unit_filter,
                 k=k,
-                raise_on_error=True,
+                raise_on_error=False,
                 persist_directory=persist_dir,
             )
+            if not context:
+                context = _fallback_keyword_retrieve(
+                    persist_dir, subject=state["subject"], unit=unit_filter, query=state["unit"], k=k
+                )
+            if not context and unit_filter:
+                context = _fallback_keyword_retrieve(
+                    persist_dir, subject=state["subject"], query=state["unit"], k=k
+                )
 
         state["context_chunks"] = [context] if context else []
         if not context:
