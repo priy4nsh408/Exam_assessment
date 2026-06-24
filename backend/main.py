@@ -226,6 +226,7 @@ def _resolve_grading_reference(
                 "max_marks": scheme.get("marks") or max_marks_fallback,
                 "question_id": scheme.get("question_id"),
                 "answer_id": scheme.get("id"),
+                "co": (question or {}).get("co"),
                 "grounded": True,
             }
 
@@ -240,10 +241,12 @@ def _resolve_grading_reference(
                 "max_marks": question.get("marks") or max_marks_fallback,
                 "question_id": question.get("id"),
                 "answer_id": scheme.get("id") if scheme else None,
+                "co": question.get("co"),
                 "grounded": True,
             }
 
     # Manual fallback - whatever the caller supplied directly, ungrounded.
+    # No real `co` exists in this case (no question record to draw it from).
     return {
         "question_text": question_fallback,
         "subject": subject_fallback,
@@ -251,6 +254,7 @@ def _resolve_grading_reference(
         "max_marks": max_marks_fallback,
         "question_id": question_id,
         "answer_id": answer_id,
+        "co": None,
         "grounded": False,
     }
 
@@ -615,8 +619,12 @@ async def get_students():
 
 
 @app.get("/api/submissions")
-async def get_submissions():
-    return {"submissions": MOCK_SUBMISSIONS, "total": len(MOCK_SUBMISSIONS)}
+async def get_submissions(status: Optional[str] = None):
+    if HAS_DEMO_DATA:
+        submissions = _demo.get_demo_submissions_with_flags(status=status)
+    else:
+        submissions = MOCK_SUBMISSIONS
+    return {"submissions": submissions, "total": len(submissions)}
 
 
 @app.post("/api/submissions/{submission_id}/grade")
@@ -753,6 +761,7 @@ async def eval_theory(body: TheoryEvalRequest):
     return {
         "questionId": ref["question_id"],
         "answerId": ref["answer_id"],
+        "co": ref.get("co"),
         "aiScore": eval_result["ai_score"],
         "maxScore": eval_result["max_score"],
         "confidence": eval_result["confidence"],
@@ -813,6 +822,7 @@ async def eval_drawing(
         }
     result["questionId"] = ref["question_id"]
     result["answerId"] = ref["answer_id"]
+    result["co"] = ref.get("co")
     return result
 
 
@@ -838,6 +848,7 @@ async def eval_numerical(body: NumericalEvalRequest):
     )
     result["questionId"] = ref["question_id"]
     result["answerId"] = ref["answer_id"]
+    result["co"] = ref.get("co")
     return result
 
 

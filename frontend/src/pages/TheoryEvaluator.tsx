@@ -2,41 +2,13 @@ import { useState, useRef } from 'react'
 import { Upload, CheckCircle } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 
-const MOCK_RESULTS = [
-  {
-    student: '1RV23ME001', name: 'Arjun Sharma', question: 'Q-052',
-    answer: 'The first law of thermodynamics states that energy cannot be created or destroyed...',
-    aiScore: 7.5, maxScore: 10, confidence: 0.87,
-    keywordScore: 3.5, semanticScore: 4.0,
-    feedback: 'Core principle correctly stated. Missing derivation for open system steady-state SFEE. Nozzle application partially addressed — exit velocity expression derivation incomplete.',
-    explanation: 'Awarded 3.5/4.0 marks for keyword coverage (8/12 key terms matched). Awarded 4.0/6.0 marks for semantic similarity (78% similarity). Total: 7.5/10.',
-    keywords: { found: ['conservation of energy', 'enthalpy', 'work done', 'heat transfer'], missing: ['SFEE', 'isentropic', 'velocity head'] },
-    co: 'CO1', status: 'graded'
-  },
-  {
-    student: '1RV23ME002', name: 'Priya Nair', question: 'Q-052',
-    answer: 'First law: dU = delta Q - delta W. For open systems, we consider enthalpy and kinetic energy...',
-    aiScore: 9.0, maxScore: 10, confidence: 0.92,
-    keywordScore: 4.5, semanticScore: 4.5,
-    feedback: 'Excellent derivation of SFEE for open system. Nozzle application correctly applied with proper assumptions stated. Minor: did not mention steady-flow assumption explicitly.',
-    explanation: 'Awarded 4.5/4.0 marks for keyword coverage (11/12 key terms matched). Awarded 4.5/6.0 marks for semantic similarity (91% similarity). Total: 9.0/10.',
-    keywords: { found: ['SFEE', 'enthalpy', 'kinetic energy', 'steady state', 'isentropic'], missing: ['continuity equation'] },
-    co: 'CO1', status: 'graded'
-  },
-  {
-    student: '1RV23ME003', name: 'Rohan Das', question: 'Q-052',
-    answer: 'Energy is conserved. In thermodynamics, Q = W + dU is the first law.',
-    aiScore: 3.0, maxScore: 10, confidence: 0.78,
-    keywordScore: 1.0, semanticScore: 2.0,
-    feedback: 'Only basic statement provided. Open system analysis absent. No derivation of SFEE or application to nozzle. Significant gaps in understanding of flow work and enthalpy.',
-    explanation: 'Awarded 1.0/4.0 marks for keyword coverage (2/12 key terms matched). Awarded 2.0/6.0 marks for semantic similarity (38% similarity). Total: 3.0/10.',
-    keywords: { found: ['Q = W', 'energy'], missing: ['SFEE', 'enthalpy', 'open system', 'isentropic', 'nozzle', 'exit velocity'] },
-    co: 'CO1', status: 'graded'
-  },
-]
+// No mock results - this list only ever holds real graded submissions
+// from /api/eval/theory. Previously seeded with hand-written fake
+// students/scores/feedback (Q-052, etc.) that never went away even after
+// real grading happened, since new results were only ever prepended.
 
 export default function TheoryEvaluator() {
-  const [results, setResults] = useState<any[]>(MOCK_RESULTS)
+  const [results, setResults] = useState<any[]>([])
   const [selected, setSelected] = useState<any | null>(null)
   const [overrideScore, setOverrideScore] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
@@ -62,7 +34,7 @@ export default function TheoryEvaluator() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Grading failed')
       const newResult = {
-        student: `S-${Date.now()}`, name: 'Student', question: data.questionId || 'Custom',
+        student: 'Manual submission', question: data.questionId || 'Custom',
         answer: answerText,
         aiScore: data.aiScore ?? 0, maxScore: data.maxScore ?? 10,
         confidence: data.confidence ?? 0,
@@ -72,7 +44,8 @@ export default function TheoryEvaluator() {
         keywords: { found: data.matchedKeywords ?? [], missing: data.missingKeywords ?? [] },
         answerId: data.answerId,
         hadReferenceData: data.hadReferenceData,
-        co: 'CO1', status: 'graded'
+        co: data.co ?? null,
+        gradedAt: Date.now(),
       }
       setResults(prev => [newResult, ...prev])
       setSelected(newResult)
@@ -118,14 +91,17 @@ export default function TheoryEvaluator() {
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Results ({results.length})</h2>
             <div className="space-y-2">
+              {results.length === 0 && (
+                <p className="text-xs text-gray-400">No submissions graded yet — paste an answer and click Grade.</p>
+              )}
               {results.map(r => (
                 <button
-                  key={r.student}
+                  key={r.gradedAt}
                   onClick={() => setSelected(r)}
-                  className={`w-full text-left p-3 rounded-lg border transition-colors ${selected?.student === r.student ? 'border-indigo-200 bg-indigo-50' : 'border-gray-100 bg-gray-50 hover:bg-gray-100'}`}
+                  className={`w-full text-left p-3 rounded-lg border transition-colors ${selected?.gradedAt === r.gradedAt ? 'border-indigo-200 bg-indigo-50' : 'border-gray-100 bg-gray-50 hover:bg-gray-100'}`}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-semibold text-gray-700">{r.name}</span>
+                    <span className="text-xs font-semibold text-gray-700">{r.question}</span>
                     <span className={`text-xs font-bold ${r.aiScore / r.maxScore >= 0.7 ? 'text-emerald-600' : r.aiScore / r.maxScore >= 0.4 ? 'text-amber-600' : 'text-red-600'}`}>
                       {r.aiScore}/{r.maxScore}
                     </span>
@@ -133,7 +109,7 @@ export default function TheoryEvaluator() {
                   <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
                     <div className={`h-full rounded-full ${r.aiScore / r.maxScore >= 0.7 ? 'bg-emerald-500' : r.aiScore / r.maxScore >= 0.4 ? 'bg-amber-400' : 'bg-red-500'}`} style={{ width: `${(r.aiScore / r.maxScore) * 100}%` }} />
                   </div>
-                  <p className="text-[10px] text-gray-400 mt-1">Confidence: {(r.confidence * 100).toFixed(0)}% · {r.co}</p>
+                  <p className="text-[10px] text-gray-400 mt-1">Confidence: {(r.confidence * 100).toFixed(0)}%{r.co ? ` · ${r.co}` : ''}</p>
                 </button>
               ))}
             </div>
@@ -154,8 +130,8 @@ export default function TheoryEvaluator() {
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-4">
                   <div>
-                    <h2 className="text-sm font-semibold text-gray-900">{selected.name} · {selected.student}</h2>
-                    <p className="text-xs text-gray-500">Question {selected.question} · {selected.co}{selected.answerId ? ` · ${selected.answerId}` : ''}</p>
+                    <h2 className="text-sm font-semibold text-gray-900">Question {selected.question}{selected.answerId ? ` · ${selected.answerId}` : ''}</h2>
+                    <p className="text-xs text-gray-500">{selected.co ? `${selected.co} · ` : ''}{selected.hadReferenceData ? 'Grounded grading' : 'Manual / ungrounded grading'}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-2xl font-bold text-gray-900">{selected.aiScore}<span className="text-sm font-normal text-gray-400">/{selected.maxScore}</span></p>

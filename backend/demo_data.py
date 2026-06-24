@@ -288,3 +288,47 @@ def get_demo_grade_result(submission_id: str):
         "co": g["co"],
         "scorePct": g["score_pct"],
     }
+
+
+# Matches the threshold the Faculty Override UI itself states ("Flagged
+# when AI confidence is below 0.80") - kept as one named constant so the
+# UI copy and the actual filtering logic can't silently drift apart.
+LOW_CONFIDENCE_THRESHOLD = 0.80
+
+
+def get_demo_submissions_with_flags(status: str = None):
+    """
+    Returns demo submissions enriched with their real computed AI score/
+    confidence (from _grade_all_demo_submissions), plus a `flag` field
+    derived from that real confidence - "low_confidence" if below
+    LOW_CONFIDENCE_THRESHOLD, else None. There's no student-dispute
+    tracking implemented yet, so that flag type never appears here.
+
+    If `status` == "flagged", only returns submissions that actually have
+    a flag - this is what the Faculty Override panel calls via
+    /api/submissions?status=flagged, which previously this filter
+    parameter was silently ignored.
+    """
+    grades = _grade_all_demo_submissions()
+    by_student = {s["id"]: s for s in DEMO_STUDENTS}
+    out = []
+    for sub in DEMO_SUBMISSIONS:
+        g = grades.get(sub["id"])
+        student = by_student.get(sub["studentId"], {})
+        flag = "low_confidence" if (g and g["confidence"] < LOW_CONFIDENCE_THRESHOLD) else None
+        enriched = {
+            "id": sub["id"],
+            "student": student.get("name", sub["studentId"]),
+            "usn": student.get("usn", ""),
+            "question": sub["questionId"],
+            "type": sub["type"].capitalize(),
+            "aiScore": g["ai_score"] if g else None,
+            "maxScore": g["max_score"] if g else None,
+            "confidence": g["confidence"] if g else None,
+            "flag": flag,
+            "co": g["co"] if g else None,
+        }
+        if status == "flagged" and not flag:
+            continue
+        out.append(enriched)
+    return out

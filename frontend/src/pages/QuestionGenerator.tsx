@@ -242,7 +242,7 @@ export default function QuestionGenerator() {
                     <div key={row.id} className="flex items-center gap-2 bg-gray-50 rounded-lg p-2">
                       <span className="text-[10px] text-gray-400 w-4">{idx + 1}</span>
                       <select className="select text-xs py-1.5" value={row.bloomLevel} onChange={e => updateSpecRow(row.id, { bloomLevel: +e.target.value })}>
-                        {BLOOM_LEVELS.map(b => <option key={b.level} value={b.level}>L{b.level}</option>)}
+                        {BLOOM_LEVELS.map(b => <option key={b.level} value={b.level}>L{b.level} ({BLOOM_LABELS[b.level]})</option>)}
                       </select>
                       <select className="select text-xs py-1.5" value={row.co} onChange={e => updateSpecRow(row.id, { co: e.target.value })}>
                         {COs.map(c => <option key={c}>{c}</option>)}

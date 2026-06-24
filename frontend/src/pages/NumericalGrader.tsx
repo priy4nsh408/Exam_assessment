@@ -17,18 +17,10 @@ const ERROR_LABELS: Record<string, string> = {
   boundary_condition_error: 'Boundary Condition Error',
 }
 
-const MOCK = {
-  student: '1RV23ME004', name: 'Kavitha Rao', question: 'Q-053',
-  questionText: 'A Carnot engine operates between 900 K and 300 K producing 200 kW. Find efficiency, heat supplied, heat rejected.',
-  totalSteps: 4,
-  steps: [
-    { step: 1, description: 'Calculate thermal efficiency', expected: 'eta = 1 - T_L/T_H = 1 - 300/900 = 0.667 (66.7%)', student: 'eta = 1 - 300/900 = 0.667', correct: true, marks: 2, earned: 2, errorType: null, deduction: 0 },
-    { step: 2, description: 'Calculate heat supplied from source', expected: 'Q_H = W_net / eta = 200/0.667 = 299.9 kW approx 300 kW', student: 'Q_H = 200 x 0.667 = 133.4 kW', correct: false, marks: 3, earned: 0, errorType: 'formula_error', deduction: 3 },
-    { step: 3, description: 'Calculate heat rejected to sink', expected: 'Q_L = Q_H - W_net = 300 - 200 = 100 kW', student: 'Q_L = 133.4 - 200 = -66.6 kW', correct: false, marks: 3, earned: 1, errorType: 'arithmetic_error', deduction: 2 },
-    { step: 4, description: 'State final answers with correct units', expected: 'eta = 66.7%, Q_H = 300 kW, Q_L = 100 kW', student: 'eta = 66.7%, Q_H = 133.4 kW, Q_L = -66.6 kW', correct: false, marks: 2, earned: 1, errorType: 'substitution_error', deduction: 1 },
-  ],
-  aiScore: 4, maxScore: 10, confidence: 0.91,
-}
+// No mock fixture - displayData is null until a real grading result comes
+// back from /api/eval/numerical. Previously fell back to a hand-written
+// fake Kavitha Rao / Q-053 result that displayed even before any real
+// grading happened.
 
 export default function NumericalGrader() {
   const [showResult, setShowResult] = useState(false)
@@ -36,6 +28,7 @@ export default function NumericalGrader() {
   const [overrideScore, setOverrideScore] = useState('')
   const [numericalResult, setNumericalResult] = useState<any>(null)
   const [answerId, setAnswerId] = useState('')
+  const [usn, setUsn] = useState('')
   const [solutionText, setSolutionText] = useState('Step 1: η = 1 - 300/900 = 0.667\nStep 2: Q_H = 200 × 0.667 = 133.4 kW\nStep 3: Q_L = 133.4 - 200 = -66.6 kW')
 
   const handleGrade = async () => {
@@ -58,7 +51,8 @@ export default function NumericalGrader() {
       if (!res.ok) throw new Error(data.detail || 'Grading failed')
       // Normalize API response fields to match display expectations
       const normalized = {
-        student: '1RV23ME004', name: 'Student', question: data.questionId || 'Q-053',
+        student: usn.trim() || 'No USN entered',
+        question: data.questionId || '—',
         questionText: 'A Carnot engine operates between 900 K and 300 K producing 200 kW.',
         aiScore: data.ai_score ?? data.total_earned ?? 0,
         maxScore: data.max_score ?? data.total_marks ?? 10,
@@ -83,14 +77,14 @@ export default function NumericalGrader() {
         }))
       }
       setNumericalResult(normalized)
+      setShowResult(true)
     } catch (e: any) {
       alert(e.message || 'Grading failed — is the backend running?')
     }
     setGrading(false)
-    setShowResult(true)
   }
 
-  const displayData = numericalResult ?? MOCK
+  const displayData = numericalResult
 
   return (
     <div>
@@ -101,16 +95,16 @@ export default function NumericalGrader() {
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Submit Solution</h2>
             <div className="space-y-3">
               <div>
-                <label className="label">Student USN</label>
-                <input className="input" defaultValue="1RV23ME004" readOnly />
+                <label className="label">Student USN (optional, for display only)</label>
+                <input className="input" value={usn} onChange={e => setUsn(e.target.value)} placeholder="e.g. 1RV23ME004" />
               </div>
               <div>
                 <label className="label">Answer ID (optional — grades against a real answer scheme)</label>
                 <input className="input font-mono text-xs" value={answerId} onChange={e => setAnswerId(e.target.value)} placeholder="e.g. AK-20260624-A1B2C3" />
               </div>
               <div>
-                <label className="label">Question</label>
-                <select className="select"><option>Q-053 — Carnot Cycle (10 marks)</option></select>
+                <label className="label">Question (used only if Answer ID is empty)</label>
+                <input className="input text-xs" defaultValue="A Carnot engine operates between 900 K and 300 K producing 200 kW. Find efficiency, heat supplied, heat rejected." readOnly />
               </div>
               <div>
                 <label className="label">Student Solution (type or paste each step)</label>
@@ -128,7 +122,7 @@ export default function NumericalGrader() {
             </div>
           </div>
 
-          {showResult && (
+          {showResult && displayData && (
             <div className="card p-5">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">Error Summary</h2>
               <div className="space-y-2">
@@ -163,12 +157,12 @@ export default function NumericalGrader() {
               </div>
             </div>
           )}
-          {showResult && !grading && (
+          {showResult && !grading && displayData && (
             <div className="space-y-4">
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <h2 className="text-sm font-semibold text-gray-900">{displayData.name} · {displayData.student}{displayData.answerId ? ` · ${displayData.answerId}` : ''}</h2>
+                    <h2 className="text-sm font-semibold text-gray-900">{displayData.student}{displayData.answerId ? ` · ${displayData.answerId}` : ''}</h2>
                     <p className="text-xs text-gray-500">{displayData.questionText}</p>
                   </div>
                   <div className="text-right">
