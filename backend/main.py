@@ -52,6 +52,12 @@ try:
         get_answer_schemes as _db_get_answer_schemes,
         get_answer_scheme_by_id as _db_get_answer_scheme_by_id,
         get_answer_scheme_by_question_id as _db_get_answer_scheme_by_question_id,
+        log_activity as _db_log_activity,
+        get_recent_activity as _db_get_recent_activity,
+        save_exam as _db_save_exam,
+        get_exams as _db_get_exams,
+        get_exam_by_id as _db_get_exam_by_id,
+        CO_PO_MAP as _CO_PO_MAP,
         LANGGRAPH_AVAILABLE,
         OLLAMA_AVAILABLE,
     )
@@ -60,6 +66,7 @@ except Exception as _import_err:
     HAS_PIPELINE = False
     LANGGRAPH_AVAILABLE = False
     OLLAMA_AVAILABLE = False
+    _CO_PO_MAP = {}
 
 try:
     import demo_data as _demo
@@ -199,6 +206,16 @@ def _normalize_answer_scheme(s: dict) -> dict:
         "createdAt": s.get("created_at"),
     }
 
+def _log_activity_safe(action: str, activity_type: str, detail: str = "", subject: str = ""):
+    """Best-effort activity logging - never lets a logging failure break the
+    actual request it's attached to."""
+    if not HAS_PIPELINE:
+        return
+    try:
+        _db_log_activity(action, activity_type, detail=detail, subject=subject)
+    except Exception:
+        pass
+
 def _resolve_grading_reference(
     answer_id: Optional[str] = None,
     question_id: Optional[str] = None,
@@ -305,9 +322,26 @@ async def health():
 @app.get("/api/stats")
 async def get_stats():
     total_questions = 0
+    bloom_distribution = []
+    recent_questions = []
     if HAS_PIPELINE:
         try:
-            total_questions = len(_db_get_questions())
+            all_questions = _db_get_questions()
+            total_questions = len(all_questions)
+            # Real Bloom-level distribution across the actual question bank,
+            # replacing the hardcoded bloomDist=[12,18,24,20,14,8] the
+            # dashboard chart used to render unconditionally.
+            counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+            for q in all_questions:
+                lvl = q.get("bloom_level")
+                if lvl in counts:
+                    counts[lvl] += 1
+            bloom_labels = {1: "L1 Remember", 2: "L2 Understand", 3: "L3 Apply",
+                             4: "L4 Analyze", 5: "L5 Evaluate", 6: "L6 Create"}
+            bloom_distribution = [{"level": bloom_labels[l], "count": counts[l]} for l in range(1, 7)]
+            # Most recently generated questions, replacing the hardcoded
+            # Q-049/Q-050/Q-051 sample on the dashboard.
+            recent_questions = [_normalize_question(q) for q in all_questions[:3]]
         except Exception:
             total_questions = 0
 
@@ -318,8 +352,29 @@ async def get_stats():
 
     return {
         "totalQuestions": total_questions,
+        "bloomDistribution": bloom_distribution,
+        "recentQuestions": recent_questions,
         **demo_stats,
     }
+
+
+@app.get("/api/activity")
+async def get_activity(limit: int = 10):
+    """Real activity feed (question generation, grading, overrides, exam
+    publishes) for the dashboard's Recent Activity panel - replaces the
+    previously hardcoded 5-item list."""
+    if not HAS_PIPELINE:
+        return {"activity": []}
+    try:
+        rows = _db_get_recent_activity(limit=limit)
+        activity = [{
+            "action": r["action"], "subject": r.get("subject", ""),
+            "detail": r.get("detail", ""), "type": r["type"],
+            "createdAt": r["created_at"],
+        } for r in rows]
+        return {"activity": activity}
+    except Exception:
+        return {"activity": []}
 
 
 @app.post("/api/pipeline/generate")
@@ -363,6 +418,12 @@ async def pipeline_generate(req: PipelineGenerateRequest):
             response["warning"] = (
                 f"Requested {len(req.questions)} question(s) but only {len(normalized)} "
                 f"were generated. {reason_text}"
+            )
+        if normalized:
+            _log_activity_safe(
+                action=f"Generated {len(normalized)} question(s)",
+                activity_type="generate",
+                subject=req.subject, detail=req.chapter,
             )
         return response
     except Exception as e:
@@ -472,6 +533,12 @@ async def generate_questions(req: QuestionGenerateRequest):
             nq["answerId"] = scheme["id"]
             normalized.append(nq)
         source = "langgraph_pipeline" if (LANGGRAPH_AVAILABLE and OLLAMA_AVAILABLE) else "pipeline_mock_fallback"
+        if normalized:
+            _log_activity_safe(
+                action=f"Generated {len(normalized)} question(s)",
+                activity_type="generate",
+                subject=req.subject, detail=req.unit,
+            )
         return {"questions": normalized, "source": source}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")
@@ -546,6 +613,12 @@ async def stream_generate_questions(
             nq = _normalize_question(q)
             nq["answerId"] = answer_id
             normalized.append(nq)
+        if normalized:
+            _log_activity_safe(
+                action=f"Generated {len(normalized)} question(s)",
+                activity_type="generate",
+                subject=subject, detail=unit,
+            )
         yield f"data: {json.dumps({'done': True, 'questions': normalized, 'error': result_holder.get('error')})}\n\n"
 
     return StreamingResponse(
@@ -701,7 +774,13 @@ async def override_grade(submission_id: str, body: OverrideRequest):
     if not sub:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    existing = GRADE_RESULTS.get(submission_id, {"aiScore": 7.0, "maxScore": 10})
+    if submission_id in GRADE_RESULTS:
+        existing = GRADE_RESULTS[submission_id]
+    elif HAS_DEMO_DATA:
+        real = _demo.get_demo_grade_result(submission_id)
+        existing = real if real else {"aiScore": None, "maxScore": None}
+    else:
+        existing = {"aiScore": None, "maxScore": None}
     result = {
         **existing,
         "submissionId": submission_id,
@@ -712,6 +791,10 @@ async def override_grade(submission_id: str, body: OverrideRequest):
         "overriddenAt": datetime.utcnow().isoformat() + "Z",
     }
     GRADE_RESULTS[submission_id] = result
+    _log_activity_safe(
+        action=f"Faculty override on {submission_id} (score: {body.score})",
+        activity_type="override", subject=sub.get("questionId", ""), detail=body.reason,
+    )
     return result
 
 
@@ -722,24 +805,158 @@ async def get_co_analytics():
     return {"co_analytics": [], "overall_attainment": None, "target": 70}
 
 
+@app.get("/api/analytics/co-trend")
+async def get_co_trend():
+    """
+    Real CO coverage trend across published exams, ordered by publish date -
+    replaces the hardcoded 5-week trendData chart in COPOAnalytics.tsx.
+
+    For each exam (in publish order), computes what share of that exam's
+    total marks belongs to each CO, using the real questions actually
+    included in it. This is a genuine measure of how CO coverage shifts as
+    exams get published - NOT a measure of student performance over time,
+    since no per-exam submission/grading history exists yet (only the
+    fixed demo roster's submissions against two demo questions). If/when
+    real per-exam student results exist, this endpoint is where attainment-
+    over-time should be computed instead of coverage-over-time.
+    """
+    if not HAS_PIPELINE:
+        return {"trend": [], "cos": []}
+    try:
+        exams = _db_get_exams()
+    except Exception:
+        exams = []
+    if not exams:
+        return {"trend": [], "cos": []}
+
+    trend = []
+    cos_seen = set()
+    for i, exam in enumerate(exams, start=1):
+        marks_by_co: dict = {}
+        total_marks = 0
+        for qid in exam["question_ids"]:
+            q = _db_get_question_by_id(qid)
+            if not q:
+                continue
+            co = q.get("co", "CO1")
+            marks = q.get("marks", 0)
+            marks_by_co[co] = marks_by_co.get(co, 0) + marks
+            total_marks += marks
+            cos_seen.add(co)
+        point = {"exam": exam["id"], "label": f"Exam {i}", "title": exam["title"]}
+        for co, m in marks_by_co.items():
+            point[co] = round((m / total_marks) * 100, 1) if total_marks else 0
+        trend.append(point)
+
+    return {"trend": trend, "cos": sorted(cos_seen)}
+
+
+@app.get("/api/analytics/co-po-correlation")
+async def get_co_po_correlation():
+    """
+    Real CO-PO correlation derived from how many marks of PUBLISHED exam
+    questions exercise each CO (and therefore each CO's mapped PO, via the
+    fixed CO_PO_MAP curriculum mapping) - replaces the hardcoded poMatrix
+    grid in COPOAnalytics.tsx. Strength is bucketed 0-3 by share of total
+    published marks a given CO represents, matching the matrix's existing
+    "3 = Strong, 2 = Moderate, 1 = Weak, 0 = None" legend.
+    """
+    if not HAS_PIPELINE:
+        return {"matrix": [], "pos": [], "cos": []}
+    try:
+        exams = _db_get_exams()
+    except Exception:
+        exams = []
+
+    marks_by_co: dict = {}
+    total_marks = 0
+    for exam in exams:
+        for qid in exam["question_ids"]:
+            q = _db_get_question_by_id(qid)
+            if not q:
+                continue
+            co = q.get("co", "CO1")
+            marks = q.get("marks", 0)
+            marks_by_co[co] = marks_by_co.get(co, 0) + marks
+            total_marks += marks
+
+    all_cos = ["CO1", "CO2", "CO3", "CO4", "CO5"]
+    all_pos = sorted(set(_CO_PO_MAP.values())) or ["PO1", "PO2", "PO3", "PO4"]
+
+    def strength_for(co: str, po: str) -> int:
+        # Only the CO's own mapped PO (per CO_PO_MAP) gets a non-zero
+        # strength - this mirrors how the static matrix represented a fixed
+        # curriculum mapping, but now the VALUE reflects real coverage
+        # share instead of an invented number.
+        if _CO_PO_MAP.get(co) != po or total_marks == 0:
+            return 0
+        share = marks_by_co.get(co, 0) / total_marks
+        if share >= 0.30:
+            return 3
+        if share >= 0.15:
+            return 2
+        if share > 0:
+            return 1
+        return 0
+
+    matrix = [{"po": po, **{co: strength_for(co, po) for co in all_cos}} for po in all_pos]
+    return {"matrix": matrix, "pos": all_pos, "cos": all_cos, "hasData": total_marks > 0}
+
+
 @app.get("/api/exams")
 async def get_exams():
+    if HAS_PIPELINE:
+        try:
+            db_exams = _db_get_exams()
+            normalized = [{
+                "id": e["id"], "title": e["title"], "subject": e["subject"],
+                "totalMarks": e["total_marks"], "duration": e["duration"],
+                "questions": e["question_ids"], "createdAt": e["created_at"],
+                "status": e["status"],
+            } for e in db_exams]
+            # Demo exam (from demo_data.py) is shown alongside real published
+            # exams rather than replacing them - it's a fixed reference point
+            # for the seeded demo questions, not meant to disappear once a
+            # real exam is published.
+            all_exams = MOCK_EXAMS + normalized
+            return {"exams": all_exams, "total": len(all_exams)}
+        except Exception:
+            pass
     return {"exams": MOCK_EXAMS, "total": len(MOCK_EXAMS)}
 
 
 @app.post("/api/exams")
 async def create_exam(body: ExamCreateRequest):
+    exam_id = f"EX-{str(uuid.uuid4())[:6].upper()}"
+    created_at = datetime.utcnow().isoformat() + "Z"
     exam = {
-        "id": f"EX-{str(uuid.uuid4())[:6].upper()}",
+        "id": exam_id,
         "title": body.title,
         "subject": body.subject,
         "totalMarks": body.total_marks,
         "duration": body.duration,
         "questions": body.question_ids,
-        "createdAt": datetime.utcnow().isoformat() + "Z",
-        "status": "draft",
+        "createdAt": created_at,
+        # This endpoint IS the "Publish to Students" action on the frontend -
+        # there's no separate draft-then-publish step, so it's stored as
+        # published immediately rather than the permanently-stuck "draft"
+        # state this previously always wrote regardless of intent.
+        "status": "published",
     }
-    MOCK_EXAMS.append(exam)
+    if HAS_PIPELINE:
+        try:
+            _db_save_exam({
+                "id": exam_id, "title": body.title, "subject": body.subject,
+                "total_marks": body.total_marks, "duration": body.duration,
+                "question_ids": body.question_ids, "status": "published",
+                "created_at": created_at,
+            })
+        except Exception:
+            pass
+    _log_activity_safe(
+        action=f"Exam paper published ({len(body.question_ids)} questions)",
+        activity_type="publish", subject=body.subject, detail=body.title,
+    )
     return exam
 
 
@@ -757,6 +974,10 @@ async def eval_theory(body: TheoryEvalRequest):
     eval_result = evaluate_theory(
         question=ref["question_text"], student_answer=body.student_answer,
         reference_answer=ref["reference_answer"], subject=ref["subject"], max_marks=ref["max_marks"],
+    )
+    _log_activity_safe(
+        action=f"Graded 1 theory submission ({eval_result['ai_score']}/{eval_result['max_score']})",
+        activity_type="grade", subject=ref.get("subject", ""), detail=ref.get("question_id") or "",
     )
     return {
         "questionId": ref["question_id"],
@@ -823,6 +1044,10 @@ async def eval_drawing(
     result["questionId"] = ref["question_id"]
     result["answerId"] = ref["answer_id"]
     result["co"] = ref.get("co")
+    _log_activity_safe(
+        action=f"Evaluated 1 drawing ({result.get('ai_score')}/{result.get('max_score')})",
+        activity_type="grade", subject=ref.get("subject", ""), detail=ref.get("question_id") or "",
+    )
     return result
 
 
@@ -849,6 +1074,10 @@ async def eval_numerical(body: NumericalEvalRequest):
     result["questionId"] = ref["question_id"]
     result["answerId"] = ref["answer_id"]
     result["co"] = ref.get("co")
+    _log_activity_safe(
+        action=f"Graded 1 numerical submission ({result.get('ai_score')}/{result.get('max_score')})",
+        activity_type="grade", subject=ref.get("subject", ""), detail=ref.get("question_id") or "",
+    )
     return result
 
 

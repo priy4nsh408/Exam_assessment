@@ -14,22 +14,6 @@ type CoRow = {
 
 const EMPTY_CO_DATA: CoRow[] = []
 
-const trendData = [
-  { week: 'W1', CO1: 60, CO2: 52, CO3: 65 },
-  { week: 'W2', CO1: 65, CO2: 55, CO3: 70 },
-  { week: 'W3', CO1: 70, CO2: 58, CO3: 75 },
-  { week: 'W4', CO1: 75, CO2: 60, CO3: 78 },
-  { week: 'W5', CO1: 78, CO2: 65, CO3: 82 },
-]
-
-const poMatrix = [
-  { po: 'PO1', co1: 3, co2: 2, co3: 2, co4: 1, co5: 0 },
-  { po: 'PO2', co1: 2, co2: 3, co3: 3, co4: 2, co5: 1 },
-  { po: 'PO3', co1: 1, co2: 2, co3: 2, co4: 3, co5: 2 },
-  { po: 'PO4', co1: 2, co2: 2, co3: 1, co4: 2, co5: 3 },
-  { po: 'PO5', co1: 1, co2: 1, co3: 2, co4: 2, co5: 3 },
-]
-
 const corr: Record<number, string> = {
   3: 'bg-indigo-600 text-white',
   2: 'bg-indigo-200 text-indigo-800',
@@ -37,9 +21,16 @@ const corr: Record<number, string> = {
   0: 'bg-gray-50 text-gray-300'
 }
 
+const TREND_LINE_COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ec4899', '#0ea5e9']
+
 export default function COPOAnalytics() {
   const [coData, setCoData] = useState<CoRow[]>(EMPTY_CO_DATA)
   const [loading, setLoading] = useState(true)
+  const [trend, setTrend] = useState<any[]>([])
+  const [trendCos, setTrendCos] = useState<string[]>([])
+  const [matrix, setMatrix] = useState<any[]>([])
+  const [matrixCos, setMatrixCos] = useState<string[]>(['CO1', 'CO2', 'CO3', 'CO4', 'CO5'])
+  const [matrixHasData, setMatrixHasData] = useState(false)
 
   useEffect(() => {
     fetch('/api/analytics/co')
@@ -59,6 +50,16 @@ export default function COPOAnalytics() {
       })
       .catch(() => {})
       .finally(() => setLoading(false))
+
+    fetch('/api/analytics/co-trend')
+      .then(r => r.json())
+      .then(d => { setTrend(d.trend || []); setTrendCos(d.cos || []) })
+      .catch(() => {})
+
+    fetch('/api/analytics/co-po-correlation')
+      .then(r => r.json())
+      .then(d => { setMatrix(d.matrix || []); setMatrixCos(d.cos || matrixCos); setMatrixHasData(!!d.hasData) })
+      .catch(() => {})
   }, [])
 
   const computedCoData = coData.filter(c => c.attainment !== null)
@@ -133,43 +134,57 @@ export default function COPOAnalytics() {
         {/* Trend + PO Matrix */}
         <div className="grid grid-cols-2 gap-4">
           <div className="card p-5">
-            <h2 className="text-sm font-semibold text-gray-900 mb-1">CO Attainment Trend</h2>
-            <p className="text-xs text-gray-500 mb-4">Weekly progression over assessment period</p>
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={trendData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis dataKey="week" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} unit="%" domain={[40, 100]} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line type="monotone" dataKey="CO1" stroke="#6366f1" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="CO2" stroke="#f59e0b" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="CO3" stroke="#10b981" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            <h2 className="text-sm font-semibold text-gray-900 mb-1">CO Coverage by Published Exam</h2>
+            <p className="text-xs text-gray-500 mb-4">
+              Share of each exam's total marks per CO, in publish order — not a performance trend
+              (no per-exam student results exist yet, only coverage of what's been published).
+            </p>
+            {trend.length === 0 ? (
+              <div className="h-[200px] flex items-center justify-center">
+                <p className="text-xs text-gray-400">No exams published yet.</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={trend}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} unit="%" domain={[0, 100]} />
+                  <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  {trendCos.map((co, i) => (
+                    <Line key={co} type="monotone" dataKey={co} stroke={TREND_LINE_COLORS[i % TREND_LINE_COLORS.length]} strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </div>
 
           {/* CO-PO Matrix */}
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-1">CO-PO Correlation Matrix</h2>
-            <p className="text-xs text-gray-500 mb-4">3 = Strong · 2 = Moderate · 1 = Weak · 0 = None</p>
+            <p className="text-xs text-gray-500 mb-4">
+              3 = Strong (≥30% of published marks) · 2 = Moderate (≥15%) · 1 = Weak (&gt;0%) · 0 = None
+            </p>
+            {!matrixHasData ? (
+              <p className="text-xs text-gray-400 py-8 text-center">No exams published yet — this fills in once questions are published into an exam paper.</p>
+            ) : (
             <div className="overflow-auto">
               <table className="w-full text-xs">
                 <thead>
                   <tr>
                     <th className="text-left py-2 pr-4 text-gray-500 font-medium">PO \ CO</th>
-                    {['CO1','CO2','CO3','CO4','CO5'].map(co => (
+                    {matrixCos.map(co => (
                       <th key={co} className="py-2 px-2 text-center text-gray-600 font-medium">{co}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {poMatrix.map(row => (
+                  {matrix.map(row => (
                     <tr key={row.po}>
                       <td className="py-1.5 pr-4 font-medium text-gray-700">{row.po}</td>
-                      {[row.co1, row.co2, row.co3, row.co4, row.co5].map((v, i) => (
-                        <td key={i} className="py-1.5 px-2 text-center">
-                          <span className={`inline-flex w-6 h-6 items-center justify-center rounded font-bold text-[11px] ${corr[v] ?? corr[0]}`}>{v || '-'}</span>
+                      {matrixCos.map((co) => (
+                        <td key={co} className="py-1.5 px-2 text-center">
+                          <span className={`inline-flex w-6 h-6 items-center justify-center rounded font-bold text-[11px] ${corr[row[co]] ?? corr[0]}`}>{row[co] || '-'}</span>
                         </td>
                       ))}
                     </tr>
@@ -177,6 +192,7 @@ export default function COPOAnalytics() {
                 </tbody>
               </table>
             </div>
+            )}
           </div>
         </div>
       </div>

@@ -79,6 +79,39 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
+    # Real activity log, replacing the old hardcoded "Recent Activity" feed
+    # on the dashboard. One row per meaningful user action (question
+    # generation, grading, faculty override, exam publish) - read back
+    # chronologically by GET /api/activity.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            detail TEXT,
+            subject TEXT,
+            type TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # Exams/published question papers, persisted instead of the old
+    # in-memory-only MOCK_EXAMS list (which reset on every server restart).
+    # question_ids is stored as a JSON array string. Used to derive real
+    # CO attainment trend / CO-PO correlation data from what's actually
+    # been published, instead of static placeholder charts.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS exams (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            subject TEXT,
+            total_marks INTEGER,
+            duration INTEGER,
+            question_ids TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -242,6 +275,75 @@ def delete_question(qid: str):
     conn.execute("DELETE FROM questions WHERE id = ?", (qid,))
     conn.commit()
     conn.close()
+
+# ── Activity log ─────────────────────────────────────────────────────────────
+# Backs the dashboard's "Recent Activity" panel with real events instead of
+# a hardcoded list. Call log_activity() at the point an action actually
+# happens (generation, grading, override, exam publish) - this module is
+# the single place new action types should be added.
+
+def log_activity(action: str, activity_type: str, detail: str = "", subject: str = ""):
+    """
+    action: short human-readable description, e.g. "Generated 3 questions"
+    activity_type: one of "generate" | "grade" | "override" | "publish"
+      (matches the color-coding the dashboard UI already uses)
+    detail/subject: optional extra context shown under the action line
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO activity_log (action, detail, subject, type, created_at) VALUES (?, ?, ?, ?, ?)",
+        (action, detail, subject, activity_type, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+def get_recent_activity(limit: int = 10) -> List[dict]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM activity_log ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+# ── Exams (published question papers) ───────────────────────────────────────
+# Persisted instead of the old in-memory-only mock list, so exam history -
+# and therefore CO attainment trend / CO-PO correlation derived from it -
+# survives a server restart and reflects what's actually been published.
+
+def save_exam(exam: dict):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO exams (id, title, subject, total_marks, duration, question_ids, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (exam["id"], exam["title"], exam.get("subject", ""), exam.get("total_marks", 0),
+         exam.get("duration", 0), json.dumps(exam.get("question_ids", [])),
+         exam.get("status", "draft"), exam.get("created_at") or datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+def get_exams() -> List[dict]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM exams ORDER BY created_at ASC").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["question_ids"] = json.loads(d["question_ids"]) if d.get("question_ids") else []
+        out.append(d)
+    return out
+
+def get_exam_by_id(exam_id: str) -> Optional[dict]:
+    for e in get_exams():
+        if e["id"] == exam_id:
+            return e
+    return None
 
 # ── Bloom config ───────────────────────────────────────────────────────────────
 
