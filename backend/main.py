@@ -30,9 +30,23 @@ except ImportError:
     DRAWING_EVAL_AVAILABLE = False
 
 try:
+    from evaluation.theory_evaluator import evaluate_theory
+    THEORY_EVAL_AVAILABLE = True
+except ImportError:
+    THEORY_EVAL_AVAILABLE = False
+
+try:
+    from evaluation.numerical_grader import grade_numerical
+    NUMERICAL_EVAL_AVAILABLE = True
+except ImportError:
+    NUMERICAL_EVAL_AVAILABLE = False
+
+try:
     from generation.langgraph_pipeline import (
         run_pipeline,
+        run_pipeline_for_specs as _db_run_pipeline_for_specs,
         get_all_questions as _db_get_questions,
+        get_question_by_id as _db_get_question_by_id,
         delete_question as _db_delete_question,
         LANGGRAPH_AVAILABLE,
         OLLAMA_AVAILABLE,
@@ -67,6 +81,34 @@ class QuestionGenerateRequest(BaseModel):
 class OverrideRequest(BaseModel):
     score: float
     reason: str
+
+class TheoryEvalRequest(BaseModel):
+    question_id: str
+    student_answer: str
+
+class QuestionSpecRequest(BaseModel):
+    bloom_level: int
+    co: str
+    marks: int
+
+class PipelineGenerateRequest(BaseModel):
+    """
+    Step 1: faculty chooses subject + chapter (unit) + question_type once
+    for the batch, and Bloom level / CO / marks individually for EACH
+    question via `questions` (one spec per question - its length is the
+    number of questions to generate).
+    """
+    subject: str
+    chapter: str
+    question_type: str = "theory"
+    questions: List[QuestionSpecRequest]
+
+class PipelineAssessRequest(BaseModel):
+    """Step 3: grade a student's answer against a real generated question.
+    Works for theory and numerical question types (drawing needs an image
+    file, so it stays on the dedicated /api/eval/drawing endpoint)."""
+    question_id: str
+    student_answer: str
 
 class ExamCreateRequest(BaseModel):
     title: str
@@ -168,6 +210,10 @@ def _normalize_question(q: dict) -> dict:
         "po": q.get("po"),
         "marks": q.get("marks"),
         "difficulty": q.get("difficulty"),
+        "answerKey": q.get("answer_key"),
+        "sourceChunk": q.get("source_chunk"),
+        "generationExplanation": q.get("generation_explanation"),
+        "answerKeyExplanation": q.get("answer_key_explanation"),
         "createdAt": q.get("created_at", datetime.utcnow().isoformat() + "Z"),
     }
 
@@ -212,6 +258,91 @@ async def get_stats():
         "questionsThisMonth": 48,
         "totalStudents": len(MOCK_STUDENTS),
         "gradedToday": 34,
+    }
+
+
+@app.post("/api/pipeline/generate")
+async def pipeline_generate(req: PipelineGenerateRequest):
+    """
+    Full Step 1+2 pipeline: generates one question per entry in
+    `req.questions` (each with its own Bloom level/CO/marks), then for each
+    question writes a raw-data-grounded answer key plus two explanations:
+      - generationExplanation: why/where the question was generated from
+      - answerKeyExplanation: why the answer key is correct + its source
+    """
+    if not HAS_PIPELINE:
+        raise HTTPException(status_code=503, detail="Generation pipeline not available")
+    if not req.questions:
+        raise HTTPException(status_code=400, detail="At least one question spec is required")
+
+    try:
+        specs = [q.dict() for q in req.questions]
+        questions = _db_run_pipeline_for_specs(
+            subject=req.subject, unit=req.chapter,
+            question_type=req.question_type, specs=specs,
+        )
+        normalized = [_normalize_question(q) for q in questions]
+        source = "langgraph_pipeline" if (LANGGRAPH_AVAILABLE and OLLAMA_AVAILABLE) else "pipeline_mock_fallback"
+        shortfall = len(req.questions) - len(normalized)
+        response = {"questions": normalized, "source": source, "requested": len(req.questions)}
+        if shortfall > 0:
+            response["warning"] = (
+                f"{shortfall} question(s) could not be generated for their requested "
+                f"Bloom level/CO combination (e.g. due to deduplication or sparse source data)."
+            )
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")
+
+
+@app.post("/api/pipeline/assess")
+async def pipeline_assess(req: PipelineAssessRequest):
+    """
+    Step 3: grade a student's answer against a real generated question,
+    using that question's raw-data-derived answer key as the reference.
+    Returns the score plus an explicit explanation of where marks were
+    awarded and why any marks were deducted.
+    """
+    if not HAS_PIPELINE:
+        raise HTTPException(status_code=503, detail="Pipeline not available")
+
+    question = _db_get_question_by_id(req.question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    reference_answer = question.get("answer_key") or question.get("source_chunk") or ""
+    q_type = question.get("type", "theory")
+
+    if q_type == "numerical":
+        if not NUMERICAL_EVAL_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Numerical evaluator not available")
+        result = grade_numerical(
+            question=question["text"], student_solution=req.student_answer,
+            reference_answer=reference_answer, subject=question["subject"], max_marks=question["marks"],
+        )
+    elif q_type == "theory":
+        if not THEORY_EVAL_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Theory evaluator not available")
+        result = evaluate_theory(
+            question=question["text"], student_answer=req.student_answer,
+            reference_answer=reference_answer, subject=question["subject"], max_marks=question["marks"],
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Drawing questions require an image upload - use POST /api/eval/drawing with question_id instead.",
+        )
+
+    return {
+        "questionId": req.question_id,
+        "questionText": question["text"],
+        "answerKey": question.get("answer_key"),
+        "answerKeyExplanation": question.get("answer_key_explanation"),
+        "aiScore": result["ai_score"],
+        "maxScore": result["max_score"],
+        "explanation": result.get("explanation", result.get("feedback")),
+        "feedback": result.get("feedback"),
+        "details": result,
     }
 
 
@@ -361,23 +492,64 @@ async def grade_submission(submission_id: str):
     if not sub:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    ai_score = round(random.uniform(4.0, 9.5), 1)
-    confidence = round(random.uniform(0.68, 0.97), 2)
-    result = {
-        "submissionId": submission_id,
-        "aiScore": ai_score,
-        "maxScore": 10,
-        "confidence": confidence,
-        "feedback": (
-            "Answer demonstrates good conceptual understanding. "
-            "Some key derivations require elaboration. "
-            "Terminology usage is appropriate for the subject domain."
-        ),
-        "co": "CO1",
-        "po": "PO1",
-        "isOverridden": False,
-        "gradedAt": datetime.utcnow().isoformat() + "Z",
-    }
+    sub_type = sub.get("type")
+    question = _db_get_question_by_id(sub["questionId"]) if HAS_PIPELINE else None
+    reference_answer = (question.get("answer_key") or question.get("source_chunk") or "") if question else ""
+    question_text = question["text"] if question else sub["questionId"]
+    subject = question["subject"] if question else ""
+    max_marks = question["marks"] if question else 10
+    co, po = (question["co"], question["po"]) if question else ("CO1", "PO1")
+
+    if sub_type == "theory" and THEORY_EVAL_AVAILABLE:
+        eval_result = evaluate_theory(
+            question=question_text, student_answer=sub["content"],
+            reference_answer=reference_answer, subject=subject, max_marks=max_marks,
+        )
+        result = {
+            "submissionId": submission_id,
+            "aiScore": eval_result["ai_score"], "maxScore": eval_result["max_score"],
+            "confidence": eval_result["confidence"], "feedback": eval_result["feedback"],
+            "keywordScore": eval_result["keyword_score"], "semanticScore": eval_result["semantic_score"],
+            "matchedKeywords": eval_result["keywords"]["found"], "missingKeywords": eval_result["keywords"]["missing"],
+            "co": co, "po": po, "isOverridden": False,
+            "gradedAt": datetime.utcnow().isoformat() + "Z",
+        }
+
+    elif sub_type == "numerical" and NUMERICAL_EVAL_AVAILABLE:
+        eval_result = grade_numerical(
+            question=question_text, student_solution=sub["content"],
+            reference_answer=reference_answer, subject=subject, max_marks=max_marks,
+        )
+        result = {
+            "submissionId": submission_id,
+            "aiScore": eval_result["ai_score"], "maxScore": eval_result["max_score"],
+            "confidence": eval_result.get("confidence", 0.6), "feedback": eval_result["feedback"],
+            "baseScore": eval_result["base_score"], "deductions": eval_result["deductions"],
+            "formulaMentioned": eval_result["formula_mentioned"],
+            "finalAnswerCorrect": eval_result["final_answer_correct"],
+            "steps": eval_result.get("steps", []),
+            "co": co, "po": po, "isOverridden": False,
+            "gradedAt": datetime.utcnow().isoformat() + "Z",
+        }
+
+    else:
+        # Drawing submissions carry an image file, not text content, so they're
+        # graded through the dedicated multipart /api/eval/drawing endpoint instead.
+        result = {
+            "submissionId": submission_id,
+            "aiScore": None, "maxScore": max_marks, "confidence": 0.0,
+            "feedback": "This submission type is graded via its dedicated evaluator endpoint "
+                        "(/api/eval/drawing for diagrams).",
+            "co": co, "po": po, "isOverridden": False,
+            "gradedAt": datetime.utcnow().isoformat() + "Z",
+        }
+
+    if not question and sub_type in ("theory", "numerical"):
+        result["feedback"] += (
+            " (No matching generated question with source data was found "
+            "for this submission, so grading used a reduced reference.)"
+        )
+
     GRADE_RESULTS[submission_id] = result
     return result
 
@@ -475,12 +647,46 @@ async def create_exam(body: ExamCreateRequest):
     return exam
 
 
+@app.post("/api/eval/theory")
+async def eval_theory(body: TheoryEvalRequest):
+    if not (THEORY_EVAL_AVAILABLE and HAS_PIPELINE):
+        raise HTTPException(status_code=503, detail="Theory evaluator not available")
+
+    question = _db_get_question_by_id(body.question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    reference_answer = question.get("answer_key") or question.get("source_chunk") or ""
+    eval_result = evaluate_theory(
+        question=question["text"],
+        student_answer=body.student_answer,
+        reference_answer=reference_answer,
+        subject=question["subject"],
+        max_marks=question["marks"],
+    )
+    return {
+        "questionId": body.question_id,
+        "aiScore": eval_result["ai_score"],
+        "maxScore": eval_result["max_score"],
+        "confidence": eval_result["confidence"],
+        "feedback": eval_result["feedback"],
+        "keywordScore": eval_result["keyword_score"],
+        "semanticScore": eval_result["semantic_score"],
+        "matchedKeywords": eval_result["keywords"]["found"],
+        "missingKeywords": eval_result["keywords"]["missing"],
+        "hadReferenceData": bool(reference_answer),
+    }
+
+
 @app.post("/api/eval/drawing")
 async def eval_drawing(
     file: UploadFile = File(None),
     max_marks: int = Form(20),
     student_usn: str = Form(""),
     assignment: str = Form(""),
+    question_id: str = Form(""),
+    expected_parts: str = Form(""),       # comma-separated, optional override
+    expected_dimensions: str = Form(""),  # comma-separated, optional override
 ):
     image_path = None
     if file and file.filename:
@@ -490,8 +696,23 @@ async def eval_drawing(
         with open(image_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
+    question_text = assignment
+    if question_id and HAS_PIPELINE:
+        question = _db_get_question_by_id(question_id)
+        if question:
+            question_text = question["text"]
+            max_marks = question["marks"]
+
+    parts_override = [p.strip() for p in expected_parts.split(",") if p.strip()] or None
+    dims_override = [d.strip() for d in expected_dimensions.split(",") if d.strip()] or None
+
     if DRAWING_EVAL_AVAILABLE:
-        result = evaluate_drawing(image_path, max_marks)
+        result = evaluate_drawing(
+            image_path, max_marks,
+            question=question_text,
+            expected_parts=parts_override,
+            expected_dimensions=dims_override,
+        )
     else:
         result = {
             "ai_score": 14.0, "max_score": max_marks, "confidence": 0.6,
@@ -500,6 +721,40 @@ async def eval_drawing(
             "preprocessing_applied": False,
             "feedback": "Drawing evaluator module not available.",
         }
+    return result
+
+
+@app.post("/api/eval/numerical")
+async def eval_numerical(
+    question_id: str = Form(""),
+    question_text: str = Form(""),
+    student_solution: str = Form(...),
+    max_marks: int = Form(10),
+    expected_formula: str = Form(""),
+    expected_final_answer: str = Form(""),
+):
+    if not NUMERICAL_EVAL_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Numerical evaluator not available")
+
+    reference_answer = ""
+    subject = ""
+    if question_id and HAS_PIPELINE:
+        question = _db_get_question_by_id(question_id)
+        if question:
+            reference_answer = question.get("answer_key") or question.get("source_chunk") or ""
+            question_text = question_text or question["text"]
+            subject = question["subject"]
+            max_marks = question["marks"]
+
+    result = grade_numerical(
+        question=question_text,
+        student_solution=student_solution,
+        reference_answer=reference_answer,
+        expected_formula=expected_formula,
+        expected_final_answer=expected_final_answer,
+        subject=subject,
+        max_marks=max_marks,
+    )
     return result
 
 

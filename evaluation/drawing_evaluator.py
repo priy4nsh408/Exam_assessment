@@ -4,6 +4,15 @@ Preprocessing: OpenCV (grayscale → CLAHE → adaptive threshold → morphologi
 Detection: YOLOv8 (stubbed until training data available) or heuristic
 VLM: LLaVA via Ollama for semantic interpretation
 Compliance: IS 696:1972, SP:46:2003, IS 919:1993, IS 3073 rule engine
+
+Marking rubric (as specified):
+  - Missing dimension marking  -> -0.5 mark each
+  - Missing diagram part/block (e.g. a labeled component of a block
+    diagram) -> -1 mark each
+  - Dimension present but wrong value, when the question specifies the
+    expected dimension -> -1 mark each
+  Everything else is full credit (max_marks minus the above deductions,
+  plus existing IS/BIS compliance deductions).
 """
 
 import os
@@ -11,7 +20,7 @@ import json
 import base64
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 try:
     import cv2
@@ -25,6 +34,29 @@ try:
     OLLAMA_AVAILABLE = True
 except ImportError:
     OLLAMA_AVAILABLE = False
+
+def extract_json_block(text: str) -> Optional[str]:
+    """
+    Robustly pulls a JSON object out of an LLM/VLM response - strips
+    markdown code fences and brace-matches from the first '{' to its true
+    closing '}', which is much more reliable than a naive greedy regex when
+    a small local model adds preamble/fences around the JSON.
+    """
+    if not text:
+        return None
+    cleaned = re.sub(r'```(?:json)?', '', text).strip()
+    start = cleaned.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(cleaned)):
+        if cleaned[i] == '{':
+            depth += 1
+        elif cleaned[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return cleaned[start:i + 1]
+    return None
 
 # ── IS/BIS Compliance Rules ────────────────────────────────────────────────────
 
@@ -210,6 +242,7 @@ def vlm_interpret(image_path: str) -> dict:
   "projection_angle": "first_angle" or "third_angle" or "unknown",
   "views_detected": ["front", "top", "side"] (list only views you can see),
   "dimensions": ["list of dimension values you can read, e.g. 45mm, 30mm"],
+  "labeled_parts": ["list of every labeled component/part name visible in the drawing, e.g. piston, crankshaft, valve"],
   "tolerances": ["list of tolerance notations you see"],
   "GDT_symbols": ["list of GD&T symbols: flatness, perpendicularity, etc."],
   "surface_finish": ["surface finish values you see, e.g. Ra 3.2"],
@@ -229,12 +262,13 @@ Return ONLY valid JSON. No explanation."""
                 "role": "user",
                 "content": prompt,
                 "images": [img_b64]
-            }]
+            }],
+            options={"temperature": 0.2},
         )
         text = resp["message"]["content"].strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+        parsed_text = extract_json_block(text)
+        if parsed_text:
+            return json.loads(parsed_text)
     except Exception:
         pass
 
@@ -246,6 +280,7 @@ def _fallback_vlm_output() -> dict:
         "projection_angle": "unknown",
         "views_detected": ["front", "top"],
         "dimensions": [],
+        "labeled_parts": [],
         "tolerances": [],
         "GDT_symbols": [],
         "surface_finish": [],
@@ -322,6 +357,123 @@ def check_compliance(vlm_output: dict, detected_elements: list) -> list:
 
     return violations
 
+# ── Rubric: expected parts & dimensions (from the question text) ──────────────
+
+_DIM_PATTERN = re.compile(r'-?\d+(?:\.\d+)?\s*(?:mm|cm|m|in|inch|kg|N|kN|MPa|GPa|°|deg|rpm)\b', re.IGNORECASE)
+
+def extract_expected_dimensions(question: str) -> List[str]:
+    """Pulls dimension values (number + unit) mentioned in the question
+    itself - these are the dimensions the student is expected to draw/label."""
+    if not question:
+        return []
+    return [m.group().strip() for m in _DIM_PATTERN.finditer(question)]
+
+def extract_expected_parts(question: str) -> List[str]:
+    """
+    Heuristic extraction of the components the question asks the student
+    to draw/label, e.g. 'Draw a block diagram showing the boiler, turbine,
+    condenser and pump' -> ['boiler', 'turbine', 'condenser', 'pump'].
+    Looks for a list following cue words like showing/label/comprising/with.
+    Falls back to an empty list (no part-level deduction applied) if no
+    such list is found - callers can also pass an explicit list.
+    """
+    if not question:
+        return []
+    m = re.search(
+        r'(?:showing|label(?:l?ing)?|comprising|consisting of|indicating|with)\s+(?:the\s+)?([^.?!]+)',
+        question, re.IGNORECASE,
+    )
+    if not m:
+        return []
+    chunk = m.group(1)
+    chunk = re.sub(r'\band\b', ',', chunk, flags=re.IGNORECASE)
+
+    parts = []
+    for raw in chunk.split(","):
+        candidate = re.sub(r'^\s*(the|a|an)\s+', '', raw.strip(" ."), flags=re.IGNORECASE)
+        if not candidate:
+            continue
+        if re.search(r'\d', candidate):
+            # A dimension/measurement clause starts here (e.g. "marked as 50mm") -
+            # everything from this point on belongs to the dimension clause, not the part list.
+            break
+        if len(candidate.split()) <= 4:
+            parts.append(candidate)
+    return parts
+
+def _parse_dim(token: str):
+    m = re.match(r'(-?\d+(?:\.\d+)?)\s*([a-zA-Z°]*)', token.strip())
+    if not m:
+        return None
+    return float(m.group(1)), m.group(2).lower()
+
+def score_against_rubric(vlm_output: dict, expected_parts: List[str],
+                          expected_dimensions: List[str], max_marks: float) -> dict:
+    """
+    Applies the deduction rubric:
+      - each expected dimension not detected at all       -> -0.5
+      - each expected dimension detected but wrong value  -> -1
+      - each expected part/component not detected          -> -1
+    Starts from max_marks (full credit) and subtracts.
+    """
+    detected_dims = vlm_output.get("dimensions", []) or []
+    detected_parts = vlm_output.get("labeled_parts", []) or []
+
+    # Match dimensions: pair each expected dimension to the closest unmatched
+    # detected one (same/compatible unit); absent -> missing, mismatched value -> wrong.
+    detected_parsed = [(_parse_dim(d), d) for d in detected_dims]
+    used = set()
+    missing_dims, wrong_dims, matched_dims = [], [], []
+
+    for exp_str in expected_dimensions:
+        exp = _parse_dim(exp_str)
+        if not exp:
+            continue
+        candidate_idx = None
+        for idx, (det, _raw) in enumerate(detected_parsed):
+            if idx in used or det is None:
+                continue
+            if det[1] == exp[1] or not det[1] or not exp[1]:
+                candidate_idx = idx
+                break
+        if candidate_idx is None:
+            missing_dims.append(exp_str)
+            continue
+        used.add(candidate_idx)
+        det_val, _ = detected_parsed[candidate_idx][0]
+        exp_val, _ = exp
+        tol = max(0.01 * abs(exp_val), 0.5)
+        if abs(det_val - exp_val) <= tol:
+            matched_dims.append(exp_str)
+        else:
+            wrong_dims.append({"expected": exp_str, "found": detected_parsed[candidate_idx][1]})
+
+    # Match parts (substring/case-insensitive match against detected labels)
+    detected_parts_lower = [p.lower() for p in detected_parts]
+    missing_parts, matched_parts = [], []
+    for part in expected_parts:
+        if any(part.lower() in dp or dp in part.lower() for dp in detected_parts_lower):
+            matched_parts.append(part)
+        else:
+            missing_parts.append(part)
+
+    dim_missing_deduction = 0.5 * len(missing_dims)
+    dim_wrong_deduction = 1.0 * len(wrong_dims)
+    part_missing_deduction = 1.0 * len(missing_parts)
+    total_deduction = dim_missing_deduction + dim_wrong_deduction + part_missing_deduction
+
+    return {
+        "matched_parts": matched_parts,
+        "missing_parts": missing_parts,
+        "matched_dimensions": matched_dims,
+        "missing_dimensions": missing_dims,
+        "wrong_dimensions": wrong_dims,
+        "dim_missing_deduction": round(dim_missing_deduction, 1),
+        "dim_wrong_deduction": round(dim_wrong_deduction, 1),
+        "part_missing_deduction": round(part_missing_deduction, 1),
+        "total_rubric_deduction": round(total_deduction, 1),
+    }
+
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 def score_elements(detected_elements: list) -> list:
@@ -349,9 +501,25 @@ def score_elements(detected_elements: list) -> list:
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
-def evaluate_drawing(image_path: Optional[str] = None, max_marks: int = 20) -> dict:
+def evaluate_drawing(
+    image_path: Optional[str] = None,
+    max_marks: int = 20,
+    question: str = "",
+    expected_parts: Optional[List[str]] = None,
+    expected_dimensions: Optional[List[str]] = None,
+) -> dict:
     """
     Full drawing evaluation pipeline.
+
+    `expected_parts` / `expected_dimensions` define the rubric: if not
+    passed explicitly (e.g. from a faculty rubric), they're heuristically
+    extracted from `question` text. Scoring starts from max_marks (full
+    credit) and applies:
+      -0.5 per expected dimension not found on the drawing
+      -1   per expected dimension found with the wrong value
+      -1   per expected part/component not found on the drawing
+    plus any existing IS/BIS compliance deductions.
+
     Returns complete evaluation result dict.
     """
     # Step 1: Preprocess
@@ -359,47 +527,96 @@ def evaluate_drawing(image_path: Optional[str] = None, max_marks: int = 20) -> d
     if image_path and Path(image_path).exists():
         preprocessed = preprocess_image(image_path)
 
-    # Step 2: YOLOv8 detection
+    # Step 2: YOLOv8 detection (diagnostic only - view/element presence)
     detected = detect_elements(image_path or "")
 
-    # Step 3: VLM interpretation
+    # Step 3: VLM interpretation (this is where dimensions/parts come from)
     vlm_output = vlm_interpret(image_path or "") if image_path else _fallback_vlm_output()
 
     # Step 4: IS/BIS compliance
     violations = check_compliance(vlm_output, detected)
-
-    # Step 5: Score elements
-    scored_elements = score_elements(detected)
-
-    # Calculate total
-    element_total = sum(e["earned"] for e in scored_elements)
-    element_max = sum(e["max"] for e in scored_elements)
     violation_deductions = sum(v["deduction"] for v in violations)
 
-    raw_score = max(0, (element_total / max(element_max, 1)) * max_marks - violation_deductions)
-    ai_score = round(min(raw_score, max_marks), 1)
+    # Step 5: Rubric scoring (markings/dimensions/parts) - this is the
+    # primary score driver per the marking rubric above.
+    exp_parts = expected_parts if expected_parts is not None else extract_expected_parts(question)
+    exp_dims = expected_dimensions if expected_dimensions is not None else extract_expected_dimensions(question)
+    rubric = score_against_rubric(vlm_output, exp_parts, exp_dims, max_marks)
 
-    total_deductions = violation_deductions
+    # Step 6: Diagnostic element scoring (front/top/side/title block) - kept
+    # for visibility but does not double-count against the rubric deductions.
+    scored_elements = score_elements(detected)
+
+    total_deductions = round(rubric["total_rubric_deduction"] + violation_deductions, 1)
+    ai_score = max(0.0, round(max_marks - total_deductions, 1))
+    ai_score = min(ai_score, max_marks)
+
     confidence = 0.75 if image_path else 0.5
 
     return {
         "ai_score": ai_score,
         "max_score": max_marks,
         "confidence": confidence,
+        "rubric": rubric,
+        "expected_parts": exp_parts,
+        "expected_dimensions": exp_dims,
         "detected_elements": scored_elements,
         "violations": violations,
-        "violation_deductions": total_deductions,
+        "violation_deductions": violation_deductions,
+        "total_deductions": total_deductions,
         "vlm_output": vlm_output,
         "preprocessing_applied": preprocessed is not None,
-        "feedback": _generate_feedback(violations, scored_elements),
+        "feedback": _generate_feedback(violations, scored_elements, rubric),
+        "explanation": _generate_explanation(rubric, violations, violation_deductions, max_marks, ai_score),
     }
 
-def _generate_feedback(violations: list, elements: list) -> str:
+def _generate_explanation(rubric: dict, violations: list, violation_deductions: float,
+                           max_marks: float, ai_score: float) -> str:
+    lines = [f"Started from full marks ({max_marks})."]
+    if rubric["matched_parts"]:
+        lines.append(f"Part(s) correctly drawn/labeled: {', '.join(rubric['matched_parts'])} (no deduction).")
+    if rubric["missing_parts"]:
+        lines.append(
+            f"Deducted {rubric['part_missing_deduction']} mark(s): missing part(s) "
+            f"{', '.join(rubric['missing_parts'])} (-1 each)."
+        )
+    if rubric["matched_dimensions"]:
+        lines.append(f"Dimension(s) correctly marked: {', '.join(rubric['matched_dimensions'])} (no deduction).")
+    if rubric["missing_dimensions"]:
+        lines.append(
+            f"Deducted {rubric['dim_missing_deduction']} mark(s): missing dimension marking(s) "
+            f"{', '.join(rubric['missing_dimensions'])} (-0.5 each)."
+        )
+    if rubric["wrong_dimensions"]:
+        wrong_desc = ", ".join(f"expected {w['expected']}, found {w['found']}" for w in rubric["wrong_dimensions"])
+        lines.append(f"Deducted {rubric['dim_wrong_deduction']} mark(s): incorrect dimension value(s) - {wrong_desc} (-1 each).")
+    if violations:
+        lines.append(f"Deducted {violation_deductions} mark(s) for IS/BIS compliance violations.")
+    if not (rubric["missing_parts"] or rubric["missing_dimensions"] or rubric["wrong_dimensions"] or violations):
+        lines.append("No deductions: all expected parts and dimensions were present and correct.")
+    lines.append(f"Total: {ai_score}/{max_marks}.")
+    return " ".join(lines)
+
+def _generate_feedback(violations: list, elements: list, rubric: Optional[dict] = None) -> str:
     major = [v for v in violations if v["severity"] == "major"]
     minor = [v for v in violations if v["severity"] == "minor"]
     not_detected = [e for e in elements if e["status"] == "not_detected"]
 
     parts = []
+    if rubric:
+        if rubric["missing_parts"]:
+            parts.append(
+                f"Missing part(s): {', '.join(rubric['missing_parts'])} "
+                f"(-{rubric['part_missing_deduction']})."
+            )
+        if rubric["missing_dimensions"]:
+            parts.append(
+                f"Missing dimension(s): {', '.join(rubric['missing_dimensions'])} "
+                f"(-{rubric['dim_missing_deduction']})."
+            )
+        if rubric["wrong_dimensions"]:
+            wrong_desc = ", ".join(f"expected {w['expected']}, found {w['found']}" for w in rubric["wrong_dimensions"])
+            parts.append(f"Incorrect dimension(s): {wrong_desc} (-{rubric['dim_wrong_deduction']}).")
     if major:
         parts.append(f"{len(major)} major IS violation(s): {major[0]['issue']}.")
     if minor:
@@ -407,5 +624,5 @@ def _generate_feedback(violations: list, elements: list) -> str:
     if not_detected:
         parts.append(f"Missing elements: {', '.join(e['element'] for e in not_detected)}.")
     if not parts:
-        parts.append("Drawing meets IS/BIS standards. All required elements detected.")
+        parts.append("All expected parts and dimensions detected. Drawing meets IS/BIS standards.")
     return " ".join(parts)

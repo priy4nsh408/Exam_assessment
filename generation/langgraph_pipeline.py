@@ -48,12 +48,25 @@ def init_db():
             difficulty TEXT NOT NULL,
             answer_key TEXT,
             source_chunk TEXT,
+            generation_explanation TEXT,
+            answer_key_explanation TEXT,
             sha256 TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
         )
     """)
+    # Migration for DBs created before these two columns existed.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(questions)").fetchall()}
+    for col in ("generation_explanation", "answer_key_explanation"):
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE questions ADD COLUMN {col} TEXT")
     conn.commit()
     conn.close()
+
+QUESTION_COLUMNS = [
+    "id", "text", "type", "subject", "unit", "bloom_level", "bloom_label",
+    "co", "po", "marks", "difficulty", "answer_key", "source_chunk",
+    "generation_explanation", "answer_key_explanation", "sha256", "created_at",
+]
 
 def question_sha256(text: str) -> str:
     return hashlib.sha256(text.strip().lower().encode()).hexdigest()
@@ -70,20 +83,39 @@ def save_question(q: dict):
         conn.execute("""
             INSERT OR IGNORE INTO questions
             (id, text, type, subject, unit, bloom_level, bloom_label, co, po,
-             marks, difficulty, answer_key, source_chunk, sha256, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             marks, difficulty, answer_key, source_chunk,
+             generation_explanation, answer_key_explanation, sha256, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             q["id"], q["text"], q["type"], q["subject"], q["unit"],
             q["bloom_level"], q["bloom_label"], q["co"], q["po"],
             q["marks"], q["difficulty"], q.get("answer_key"),
-            q.get("source_chunk"), q["sha256"], q["created_at"]
+            q.get("source_chunk"), q.get("generation_explanation"),
+            q.get("answer_key_explanation"), q["sha256"], q["created_at"]
         ))
+        conn.commit()
+    finally:
+        conn.close()
+
+def update_question_fields(qid: str, fields: dict):
+    """Updates arbitrary columns on an existing question row (e.g. faculty-
+    specified marks override, or explanations added after initial save)."""
+    if not fields:
+        return
+    allowed = {k: v for k, v in fields.items() if k in QUESTION_COLUMNS and k != "id"}
+    if not allowed:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        set_clause = ", ".join(f"{k} = ?" for k in allowed)
+        conn.execute(f"UPDATE questions SET {set_clause} WHERE id = ?", (*allowed.values(), qid))
         conn.commit()
     finally:
         conn.close()
 
 def get_all_questions(subject=None, unit=None, bloom_level=None, q_type=None):
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     query = "SELECT * FROM questions WHERE 1=1"
     params = []
     if subject:
@@ -101,9 +133,16 @@ def get_all_questions(subject=None, unit=None, bloom_level=None, q_type=None):
     query += " ORDER BY created_at DESC"
     rows = conn.execute(query, params).fetchall()
     conn.close()
-    cols = ["id","text","type","subject","unit","bloom_level","bloom_label",
-            "co","po","marks","difficulty","answer_key","source_chunk","sha256","created_at"]
-    return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+def get_question_by_id(qid: str) -> Optional[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
 
 def delete_question(qid: str):
     conn = sqlite3.connect(DB_PATH)
@@ -146,16 +185,58 @@ class PipelineState(TypedDict):
     errors: List[str]
 
 # ── LLM call helper ───────────────────────────────────────────────────────────
+#
+# Tuned for small/local models (e.g. Ollama mistral 7B): low temperature makes
+# JSON-structured and grading-adjacent output far more consistent than the
+# Ollama default (~0.8), which otherwise gives noticeably different answer
+# keys / explanations / scores on repeated runs of the same question.
 
-def llm_call(prompt: str, model: str = None) -> str:
+def llm_call(prompt: str, model: str = None, temperature: float = 0.2) -> str:
     if not OLLAMA_AVAILABLE:
         return ""
     model = model or os.getenv("OLLAMA_MODEL", "mistral")
     try:
-        resp = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}])
+        resp = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": temperature},
+        )
         return resp["message"]["content"]
     except Exception:
         return ""
+
+def extract_json_block(text: str) -> Optional[str]:
+    """
+    Robustly pulls a JSON object out of an LLM response. Small local models
+    (e.g. Mistral 7B) frequently wrap JSON in ```json ... ``` fences or add
+    a sentence of preamble/trailing commentary - a naive `\\{.*\\}` regex can
+    grab the wrong span when that happens. This strips fences and then
+    brace-matches from the first '{' to its true closing '}'.
+    """
+    if not text:
+        return None
+    cleaned = re.sub(r'```(?:json)?', '', text).strip()
+    start = cleaned.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(cleaned)):
+        if cleaned[i] == '{':
+            depth += 1
+        elif cleaned[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return cleaned[start:i + 1]
+    return None
+
+def parse_llm_json(text: str) -> Optional[dict]:
+    block = extract_json_block(text)
+    if not block:
+        return None
+    try:
+        return json.loads(block)
+    except Exception:
+        return None
 
 # ── Agents ─────────────────────────────────────────────────────────────────────
 
@@ -228,7 +309,7 @@ Output ONLY a numbered list of questions. No preamble, no explanations.
 2. [Question 2]
 ..."""
 
-    raw = llm_call(prompt)
+    raw = llm_call(prompt, temperature=0.7)
     questions = []
     if raw:
         for line in raw.strip().split("\n"):
@@ -283,6 +364,10 @@ def correctness_validator_agent(state: PipelineState) -> PipelineState:
 def pedagogy_tagger_agent(state: PipelineState) -> PipelineState:
     """Tags each question with CO/PO mapping, marks, difficulty, Bloom label."""
     bloom_label = BLOOM_LABELS[state["bloom_level"]][0]
+    # Raw-data context this whole batch of questions was generated from -
+    # stored per-question so grading can later reference exactly what was
+    # used to write the question (no separate per-question retrieval needed).
+    source_chunk = "\n\n".join(state["context_chunks"])[:3000]
     tagged = []
     import uuid
     for i, q_text in enumerate(state["validated_questions"]):
@@ -301,6 +386,7 @@ def pedagogy_tagger_agent(state: PipelineState) -> PipelineState:
             "po": CO_PO_MAP.get(state["co"], "PO1"),
             "marks": MARKS_BY_BLOOM[state["bloom_level"]],
             "difficulty": DIFFICULTY_BY_BLOOM[state["bloom_level"]],
+            "source_chunk": source_chunk,
             "sha256": sha,
             "created_at": datetime.now().isoformat(),
         })
@@ -324,6 +410,98 @@ def syllabus_guardian_agent(state: PipelineState) -> PipelineState:
         if len(overlap) >= 3:  # at least 3 content words appear in source
             approved.append(q)
     state["final_questions"] = approved or state["tagged_questions"]
+    return state
+
+def provenance_explainer_agent(state: PipelineState) -> PipelineState:
+    """
+    Step 1 'validation' requirement: explains, for each approved question,
+    WHY and WHERE it was generated from - which subject/chapter, which
+    Bloom level/CO it targets, and an excerpt of the actual source text it
+    is grounded in. Fully deterministic/templated (no LLM dependency), so
+    it's always available even without Ollama running.
+    """
+    bloom_label, bloom_verbs = BLOOM_LABELS[state["bloom_level"]]
+    for q in state["final_questions"]:
+        source_chunk = q.get("source_chunk", "") or ""
+        excerpt = source_chunk[:280].strip()
+        if len(source_chunk) > 280:
+            excerpt += "..."
+
+        if excerpt:
+            grounding = f'It was generated from the following passage in the raw data for "{q["unit"]}": "{excerpt}"'
+        else:
+            grounding = (
+                "No matching passage was retrieved from the raw data for this chapter, "
+                "so this question was produced from a generic template instead - treat it "
+                "as lower-confidence and review before use."
+            )
+
+        q["generation_explanation"] = (
+            f'This question was generated for {q["subject"]} → "{q["unit"]}", targeting '
+            f'Bloom\'s Level {q["bloom_level"]} ({bloom_label} - {bloom_verbs}) under {q["co"]}. '
+            f"{grounding}"
+        )
+    return state
+
+def answer_key_agent(state: PipelineState) -> PipelineState:
+    """
+    Writes a model/reference answer for each approved question, grounded
+    strictly in its source_chunk (the raw data retrieved for it), plus an
+    explanation of why that answer is correct and which part of the source
+    material it comes from (Step 2 requirement). This answer_key becomes
+    the reference text the grading system later compares student answers
+    against (keyword + semantic matching).
+    """
+    for q in state["final_questions"]:
+        source_chunk = q.get("source_chunk", "")
+        if not source_chunk:
+            q["answer_key"] = ""
+            q["answer_key_explanation"] = (
+                "No source data was available for this question, so no grounded "
+                "answer key could be written - grading will fall back to a reduced reference."
+            )
+            continue
+
+        if not OLLAMA_AVAILABLE:
+            # No LLM available - fall back to using the raw chunk itself as the
+            # reference text. Less polished, but keyword/semantic matching
+            # still works since it's still raw-data-derived.
+            q["answer_key"] = source_chunk
+            q["answer_key_explanation"] = (
+                "LLM unavailable, so the raw source passage itself is used directly as the "
+                "reference answer (no paraphrasing/explanation was generated)."
+            )
+            continue
+
+        prompt = f"""You are an expert {q['subject']} professor.
+Using ONLY the source material below, write a model answer for the exam
+question, AND explain why it is correct / which part of the source material
+it is grounded in.
+
+QUESTION: {q['text']}
+
+SOURCE MATERIAL:
+{source_chunk}
+
+Respond with ONLY a JSON object in exactly this format - no markdown code
+fences, no preamble, no text before or after the JSON:
+{{"answer_key": "<4-8 sentence model answer, using only facts from the source material>", "explanation": "<2-3 sentences: why this is the correct answer and which part of the source material it draws from>"}}"""
+
+        raw = llm_call(prompt, temperature=0.2)
+        parsed = parse_llm_json(raw)
+        if not parsed:
+            # Small models occasionally ignore formatting instructions on the
+            # first try - one retry with a blunter reminder is cheap and
+            # noticeably improves the success rate for 7B-class models.
+            retry_prompt = prompt + "\n\nIMPORTANT: Output raw JSON only. Do not use ```json fences."
+            raw = llm_call(retry_prompt, temperature=0.1)
+            parsed = parse_llm_json(raw)
+
+        answer_key = parsed.get("answer_key") if parsed else None
+        explanation = parsed.get("explanation") if parsed else None
+        q["answer_key"] = (answer_key or raw or source_chunk).strip()
+        q["answer_key_explanation"] = (explanation or
+            "Generated from the source material retrieved for this question's chapter.").strip()
     return state
 
 def archivist_agent(state: PipelineState) -> PipelineState:
@@ -351,6 +529,8 @@ def build_pipeline():
     graph.add_node("correctness_validator", correctness_validator_agent)
     graph.add_node("pedagogy_tagger", pedagogy_tagger_agent)
     graph.add_node("syllabus_guardian", syllabus_guardian_agent)
+    graph.add_node("provenance_explainer", provenance_explainer_agent)
+    graph.add_node("answer_key", answer_key_agent)
     graph.add_node("archivist", archivist_agent)
 
     graph.set_entry_point("bloom_analyzer")
@@ -361,7 +541,9 @@ def build_pipeline():
     graph.add_edge("difficulty_validator", "correctness_validator")
     graph.add_edge("correctness_validator", "pedagogy_tagger")
     graph.add_edge("pedagogy_tagger", "syllabus_guardian")
-    graph.add_edge("syllabus_guardian", "archivist")
+    graph.add_edge("syllabus_guardian", "provenance_explainer")
+    graph.add_edge("provenance_explainer", "answer_key")
+    graph.add_edge("answer_key", "archivist")
     graph.add_edge("archivist", END)
 
     return graph.compile()
@@ -411,7 +593,8 @@ def run_pipeline(subject: str, unit: str, bloom_level: int, question_type: str,
     for agent in [bloom_analyzer_agent, scout_agent, generator_agent,
                   quality_validator_agent, difficulty_validator_agent,
                   correctness_validator_agent, pedagogy_tagger_agent,
-                  syllabus_guardian_agent, archivist_agent]:
+                  syllabus_guardian_agent, provenance_explainer_agent,
+                  answer_key_agent, archivist_agent]:
         state = agent(state)
 
     return state["final_questions"] if state["final_questions"] else _mock_questions(subject, unit, bloom_level, question_type, co, count)
@@ -440,11 +623,17 @@ def _mock_questions(subject, unit, bloom_level, q_type, co, count) -> List[dict]
     texts = templates.get(q_type, templates["theory"])
     questions = []
     init_db()
-    for i in range(min(count, len(texts))):
-        sha = question_sha256(texts[i])
+    for i in range(count):
+        base_text = texts[i % len(texts)]
+        text = base_text if i < len(texts) else f"{base_text} (variant {i // len(texts) + 1})"
+        q_id = f"Q-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+        # Hash on id (always unique) rather than text alone - text is templated
+        # and will legitimately repeat across separate mock-fallback calls;
+        # we still want every returned question to actually persist to the DB.
+        sha = question_sha256(f"{text}-{q_id}")
         q = {
-            "id": f"Q-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
-            "text": texts[i],
+            "id": q_id,
+            "text": text,
             "type": q_type,
             "subject": subject,
             "unit": unit,
@@ -454,6 +643,16 @@ def _mock_questions(subject, unit, bloom_level, q_type, co, count) -> List[dict]
             "po": CO_PO_MAP.get(co, "PO1"),
             "marks": MARKS_BY_BLOOM.get(bloom_level, 8),
             "difficulty": DIFFICULTY_BY_BLOOM.get(bloom_level, "medium"),
+            "answer_key": "",
+            "source_chunk": "",
+            "generation_explanation": (
+                f"No raw data / LLM pipeline was available, so this question was produced "
+                f"from a generic {q_type} template for {subject} → \"{unit}\" rather than being "
+                f"grounded in retrieved source material. Treat as a placeholder for review."
+            ),
+            "answer_key_explanation": (
+                "No source data was available, so no grounded answer key could be generated."
+            ),
             "sha256": sha,
             "created_at": datetime.now().isoformat(),
         }
@@ -461,3 +660,45 @@ def _mock_questions(subject, unit, bloom_level, q_type, co, count) -> List[dict]
             save_question(q)
         questions.append(q)
     return questions
+
+def run_pipeline_for_specs(subject: str, unit: str, question_type: str,
+                            specs: List[dict]) -> List[dict]:
+    """
+    Step 1+2 entry point: generates one question per item in `specs`, where
+    each spec is {"bloom_level": int, "co": str, "marks": int} - i.e. the
+    faculty chooses Bloom level, CO, and marks individually per question,
+    plus the shared subject/chapter/question_type for the whole batch.
+
+    Internally groups specs that share the same (bloom_level, co) into a
+    single underlying generation run (since that's what the agent pipeline
+    retrieves context and writes questions for), then applies each spec's
+    own `marks` value as an override - so marks stay per-question even
+    though generation is batched per (bloom_level, co) group.
+
+    Returns one question dict per spec, in the original requested order
+    (a spec's slot is omitted only if generation/dedup yielded fewer
+    questions than requested for its group).
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(list)  # (bloom_level, co) -> [spec_index, ...]
+    for idx, spec in enumerate(specs):
+        groups[(spec["bloom_level"], spec["co"])].append(idx)
+
+    results_by_index: dict = {}
+    for (bloom_level, co), indices in groups.items():
+        generated = run_pipeline(
+            subject=subject, unit=unit, bloom_level=bloom_level,
+            question_type=question_type, co=co, count=len(indices),
+        )
+        for idx, q in zip(indices, generated):
+            requested_marks = specs[idx].get("marks")
+            if requested_marks and q.get("marks") != requested_marks:
+                q["marks"] = requested_marks
+                try:
+                    update_question_fields(q["id"], {"marks": requested_marks})
+                except Exception:
+                    pass
+            results_by_index[idx] = q
+
+    return [results_by_index[i] for i in sorted(results_by_index)]
