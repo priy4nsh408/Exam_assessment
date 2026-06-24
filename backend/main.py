@@ -17,7 +17,7 @@ from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 
 # ── Import LangGraph pipeline ─────────────────────────────────────────────────
@@ -73,6 +73,12 @@ try:
     HAS_DEMO_DATA = True
 except Exception:
     HAS_DEMO_DATA = False
+
+try:
+    import data_source as _data_source
+    HAS_DATA_SOURCE = True
+except Exception:
+    HAS_DATA_SOURCE = False
 
 app = FastAPI(title="MechAssess API", version="2.0.0")
 
@@ -705,6 +711,43 @@ async def delete_question_route(question_id: str):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     raise HTTPException(status_code=404, detail="Question not found")
+
+
+@app.get("/api/data-sources")
+async def list_data_sources():
+    """
+    One entry per subject folder actually found under data/raw/ - this is
+    the authoritative list of subjects that generation can possibly ground
+    against, independent of whatever a UI dropdown happens to offer. Each
+    entry reports whether that subject has matching ingested ChromaDB
+    content (`ingested`), so it's immediately visible which subjects will
+    produce grounded answer keys and which won't yet.
+    """
+    if not HAS_DATA_SOURCE:
+        return {"subjects": []}
+    return {"subjects": _data_source.list_subjects()}
+
+
+@app.get("/api/data-sources/{subject}/files")
+async def get_data_source_files(subject: str):
+    if not HAS_DATA_SOURCE:
+        raise HTTPException(status_code=503, detail="Data source browser not available")
+    detail = _data_source.list_files_for_subject(subject)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"No raw data folder found for subject '{subject}'")
+    return detail
+
+
+@app.get("/api/data-sources/{subject}/download")
+async def download_data_source_file(subject: str, path: str, source: str = "raw"):
+    if not HAS_DATA_SOURCE:
+        raise HTTPException(status_code=503, detail="Data source browser not available")
+    if source not in ("raw", "pyqs"):
+        raise HTTPException(status_code=400, detail="source must be 'raw' or 'pyqs'")
+    resolved = _data_source.resolve_file_path(subject, path, source=source)
+    if not resolved:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(resolved, filename=resolved.name)
 
 
 @app.get("/api/students")

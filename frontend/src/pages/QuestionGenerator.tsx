@@ -1,15 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Sparkles, Download, Send, CheckCircle, Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { BloomBadge } from '../components/ui/BloomBadge'
 
-const SUBJECTS = ['Thermodynamics', 'Strength of Materials', 'Fluid Mechanics', 'Engineering Drawing']
-const UNITS: Record<string, string[]> = {
-  'Thermodynamics': ['Unit 1: Laws of Thermodynamics', 'Unit 2: Power Cycles', 'Unit 3: Refrigeration', 'Unit 4: Psychrometrics'],
-  'Strength of Materials': ['Unit 1: Stress & Strain', 'Unit 2: Bending', 'Unit 3: Torsion', 'Unit 4: Columns'],
-  'Fluid Mechanics': ['Unit 1: Fluid Properties', 'Unit 2: Bernoulli', 'Unit 3: Pipe Flow', 'Unit 4: Boundary Layer'],
-  'Engineering Drawing': ['Unit 1: Orthographic', 'Unit 2: Sections', 'Unit 3: Isometric', 'Unit 4: GD&T'],
-}
+const FALLBACK_SUBJECTS = ['General']
+const FALLBACK_UNITS = ['Unit 1', 'Unit 2', 'Unit 3', 'Unit 4', 'Unit 5']
 const BLOOM_LEVELS = [
   { level: 1, label: 'L1 — Remember' },
   { level: 2, label: 'L2 — Understand' },
@@ -37,10 +32,42 @@ const PIPELINE_STEPS = [
 ]
 
 export default function QuestionGenerator() {
-  const [subject, setSubject] = useState(SUBJECTS[0])
-  const [unit, setUnit] = useState(UNITS[SUBJECTS[0]][0])
+  // Subjects/units are discovered live from data/raw/ (via /api/data-sources)
+  // rather than hardcoded - a hardcoded list previously offered subjects
+  // like "Thermodynamics" that had no matching ingested ChromaDB content at
+  // all, so every generated question silently came back ungrounded. Tying
+  // the dropdown directly to what's actually on disk means that can't
+  // silently drift apart again; the `ingested` flag is shown per subject so
+  // it's visible up front which choices will produce a grounded answer key.
+  const [dataSources, setDataSources] = useState<any[]>([])
+  const [subject, setSubject] = useState('')
+  const [unit, setUnit] = useState('')
   const [questionType, setQuestionType] = useState('theory')
   const [count, setCount] = useState(4)
+
+  useEffect(() => {
+    fetch('/api/data-sources')
+      .then(r => r.json())
+      .then(data => {
+        const subjects = data.subjects || []
+        setDataSources(subjects)
+        if (subjects.length > 0) {
+          setSubject(subjects[0].subject)
+          setUnit((subjects[0].units && subjects[0].units[0]) || FALLBACK_UNITS[0])
+        } else {
+          setSubject(FALLBACK_SUBJECTS[0])
+          setUnit(FALLBACK_UNITS[0])
+        }
+      })
+      .catch(() => {
+        setSubject(FALLBACK_SUBJECTS[0])
+        setUnit(FALLBACK_UNITS[0])
+      })
+  }, [])
+
+  const currentSubjectEntry = dataSources.find(s => s.subject === subject)
+  const unitsForSubject: string[] = currentSubjectEntry?.units?.length ? currentSubjectEntry.units : FALLBACK_UNITS
+  const subjectOptions = dataSources.length > 0 ? dataSources.map(s => s.subject) : FALLBACK_SUBJECTS
 
   // One CO/Bloom/marks row pool, expanded across `count` questions either
   // sequentially (cycling through the pool in order) or randomly (one pool
@@ -220,15 +247,35 @@ export default function QuestionGenerator() {
             <h2 className="text-sm font-semibold text-gray-900 mb-4">Generation Parameters</h2>
             <div className="space-y-4">
               <div>
-                <label className="label">Subject</label>
-                <select className="select" value={subject} onChange={e => { setSubject(e.target.value); setUnit(UNITS[e.target.value][0]) }}>
-                  {SUBJECTS.map(s => <option key={s}>{s}</option>)}
+                <label className="label flex items-center justify-between">
+                  <span>Subject</span>
+                  {currentSubjectEntry && (
+                    currentSubjectEntry.ingested
+                      ? <span className="text-[10px] font-medium text-emerald-600">Ingested · {currentSubjectEntry.chunkCount} chunks</span>
+                      : <span className="text-[10px] font-medium text-amber-600">Not ingested</span>
+                  )}
+                </label>
+                <select
+                  className="select"
+                  value={subject}
+                  onChange={e => {
+                    setSubject(e.target.value)
+                    const entry = dataSources.find(s => s.subject === e.target.value)
+                    setUnit((entry?.units && entry.units[0]) || FALLBACK_UNITS[0])
+                  }}
+                >
+                  {subjectOptions.map(s => <option key={s}>{s}</option>)}
                 </select>
+                {dataSources.length === 0 && (
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    No subjects discovered under data/raw/ yet - see the Data Source tab.
+                  </p>
+                )}
               </div>
               <div>
                 <label className="label">Unit / Topic</label>
                 <select className="select" value={unit} onChange={e => setUnit(e.target.value)}>
-                  {UNITS[subject].map(u => <option key={u}>{u}</option>)}
+                  {unitsForSubject.map(u => <option key={u}>{u}</option>)}
                 </select>
               </div>
               <div>
