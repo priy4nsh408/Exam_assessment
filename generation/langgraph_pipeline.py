@@ -379,16 +379,13 @@ class PipelineState(TypedDict):
     count: int
     marks: Optional[int]
     context_chunks: List[str]
+    pyq_context: str
+    existing_questions: List[dict]
     raw_questions: List[str]
     validated_questions: List[str]
     tagged_questions: List[dict]
     final_questions: List[dict]
     errors: List[str]
-    # Human-readable reasons for why fewer than `count` questions came out
-    # the other end - one entry per question dropped by a filtering step
-    # (quality/difficulty/correctness validators or sha256 dedup). Lets
-    # callers report a precise cause instead of a generic "fewer than
-    # requested" message.
     drop_reasons: List[str]
 
 # ── LLM call helper ───────────────────────────────────────────────────────────
@@ -456,69 +453,83 @@ def bloom_analyzer_agent(state: PipelineState) -> PipelineState:
 
 def scout_agent(state: PipelineState) -> PipelineState:
     """Retrieves relevant context from ChromaDB with adaptive k based on Bloom level."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from vector_store.retriever import retrieve_context, retrieve_pyq_context, retrieve_question_bank, _fallback_keyword_retrieve
+
+    k = 3 + state["bloom_level"]
+    persist_dir = str(Path(__file__).parent.parent / "data" / "db" / "chroma" / state["subject"])
+
+    unit_num_match = re.search(r'Unit[_ -]?(\d+)', state["unit"], re.IGNORECASE)
+    unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
+
+    print(f"🔎 Scout: subject={state['subject']!r}, unit={unit_filter!r}", file=sys.stderr, flush=True)
+
+    # 1. Try vector similarity search
+    context = ""
     try:
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))
         from vector_store.chroma_client import create_vector_db
-        from vector_store.retriever import retrieve_context
-
-        # Adaptive k: higher Bloom levels need more context
-        k = 3 + state["bloom_level"]
-
-        # The ingestion pipeline persists each subject as its own Chroma
-        # collection at data/db/chroma/<subject> (subject = the literal raw
-        # data folder name, e.g. data/raw/BDT/..., NOT necessarily the same
-        # label shown in a UI dropdown - they must match exactly).
-        persist_dir = str(Path(__file__).parent.parent / "data" / "db" / "chroma" / state["subject"])
         vectordb = create_vector_db(chunks=None, persist_directory=persist_dir)
-
-        # Ingested unit metadata is normalized to a bare "Unit N" by
-        # ingestion/metadata_extractor.py (extracted from the file path),
-        # not whatever full descriptive label the caller passed in (e.g.
-        # "Unit 1: Laws of Thermodynamics") - normalize identically here,
-        # or the exact-match Chroma filter would never hit even when the
-        # subject genuinely has ingested content for that unit.
-        unit_num_match = re.search(r'Unit[_ -]?(\d+)', state["unit"], re.IGNORECASE)
-        unit_filter = f"Unit {unit_num_match.group(1)}" if unit_num_match else state["unit"]
-
-        context = retrieve_context(
-            vectordb,
-            query=f"{state['unit']} {BLOOM_LABELS[state['bloom_level']][1]}",
-            subject=state["subject"],
-            unit=unit_filter,
-            k=k,
-            raise_on_error=True,
-        )
-        # retrieve_context returns one already-joined string, not a list of
-        # chunk objects - wrap as a single-element list so every downstream
-        # use of context_chunks (which always re-joins them anyway) still
-        # works the same whether there's content or not.
-        state["context_chunks"] = [context] if context else []
-        if not context:
-            state["errors"].append(
-                f"Scout agent: no ChromaDB content found for subject={state['subject']!r}, "
-                f"unit filter={unit_filter!r} - check that this subject/unit was actually "
-                f"ingested (data/raw/{state['subject']}/...) and that the folder name matches exactly."
+        if vectordb is not None:
+            context = retrieve_context(
+                vectordb,
+                query=f"{state['unit']} {BLOOM_LABELS[state['bloom_level']][1]}",
+                subject=state["subject"],
+                unit=unit_filter,
+                k=k,
+                raise_on_error=False,
+                persist_directory=persist_dir,
             )
+            print(f"🔎 Scout: vector search returned {len(context)} chars", file=sys.stderr, flush=True)
     except Exception as e:
-        state["context_chunks"] = []
-        # Distinguish "the embedding model itself failed to load" (almost
-        # always a network/connectivity problem reaching huggingface.co, or
-        # a missing local cache) from any other failure - these need
-        # completely different fixes, and were previously both reported as
-        # a generic "no ChromaDB content found" with the real cause only
-        # ever printed to a backend terminal nobody was watching.
-        err_text = str(e)
-        if "huggingface.co" in err_text or "connect" in err_text.lower() or "HFValidationError" in type(e).__name__:
-            state["errors"].append(
-                f"Scout agent: the embedding model could not be loaded ({err_text}). "
-                f"This is almost always a network/connectivity problem reaching huggingface.co "
-                f"to download the model on first use (e.g. no internet access, a corporate "
-                f"proxy/firewall, or offline mode) rather than a problem with your ingested "
-                f"data - the retrieval/filter logic itself never even ran."
-            )
-        else:
-            state["errors"].append(f"Scout agent: {e}")
+        print(f"🔎 Scout: vector search failed ({type(e).__name__}: {e}), trying SQLite fallback", file=sys.stderr, flush=True)
+
+    # 2. SQLite fallback with unit filter
+    if not context:
+        context = _fallback_keyword_retrieve(
+            persist_dir, subject=state["subject"], unit=unit_filter, query=state["unit"], k=k
+        )
+        print(f"🔎 Scout: SQLite fallback (with unit) returned {len(context)} chars", file=sys.stderr, flush=True)
+
+    # 3. SQLite fallback without unit filter
+    if not context and unit_filter:
+        context = _fallback_keyword_retrieve(
+            persist_dir, subject=state["subject"], query=state["unit"], k=k
+        )
+        print(f"🔎 Scout: SQLite fallback (no unit) returned {len(context)} chars", file=sys.stderr, flush=True)
+
+    print(f"🔎 Scout: FINAL context = {len(context)} chars", file=sys.stderr, flush=True)
+    state["context_chunks"] = [context] if context else []
+    if not context:
+        state["errors"].append(
+            f"Scout agent: no content found for subject={state['subject']!r}, "
+            f"unit={unit_filter!r}."
+        )
+
+    # 4. PYQ context
+    try:
+        pyq_ctx = retrieve_pyq_context(
+            state["subject"], unit=unit_filter,
+            query=f"{state['unit']} {state['question_type']} exam questions",
+            k=5
+        )
+        state["pyq_context"] = pyq_ctx
+    except Exception:
+        state["pyq_context"] = ""
+
+    # 5. Existing questions for dedup
+    try:
+        existing = retrieve_question_bank(
+            state["subject"], unit=unit_filter,
+            bloom_level=state["bloom_level"], limit=10
+        )
+        state["existing_questions"] = existing
+    except Exception:
+        state["existing_questions"] = []
+
+    # Ensure keys exist
+    state.setdefault("pyq_context", "")
+    state.setdefault("existing_questions", [])
     return state
 
 def generator_agent(state: PipelineState) -> PipelineState:
@@ -532,7 +543,26 @@ def generator_agent(state: PipelineState) -> PipelineState:
         "drawing": "engineering drawing questions requiring sketches or projections",
     }.get(state["question_type"], "theory questions")
 
-    prompt = f"""You are an expert Mechanical Engineering professor creating exam questions.
+    # Build PYQ reference section
+    pyq_section = ""
+    pyq_ctx = state.get("pyq_context", "")
+    if pyq_ctx:
+        pyq_section = f"""
+Previous year questions and question bank (for style/pattern reference — do NOT copy these, generate NEW questions inspired by their style and difficulty):
+{pyq_ctx[:1500]}
+"""
+
+    # Build existing questions section for dedup awareness
+    existing_section = ""
+    existing_qs = state.get("existing_questions", [])
+    if existing_qs:
+        eq_list = "\n".join(f"- {q['text']}" for q in existing_qs[:8])
+        existing_section = f"""
+Previously generated questions (do NOT repeat or closely paraphrase these):
+{eq_list}
+"""
+
+    prompt = f"""You are an expert professor creating exam questions for the subject "{state['subject']}".
 
 Subject: {state['subject']}
 Unit/Topic: {state['unit']}
@@ -542,14 +572,20 @@ Question Type: {type_instruction}
 Course Outcome: {state['co']}
 Number of questions: {state['count']}
 
-Reference material:
+Reference material from the course textbook/notes:
 {context}
+{pyq_section}{existing_section}
+IMPORTANT INSTRUCTIONS:
+- Generate questions ONLY about the topics covered in the reference material above.
+- Every question must be directly grounded in the reference material content.
+- Do NOT generate questions about topics not mentioned in the reference material.
+- If the subject is about Big Data/Hadoop/HDFS, questions must be about Big Data/Hadoop/HDFS — not mechanical engineering or any other field.
 
 Generate exactly {state['count']} {type_instruction} at Bloom's L{state['bloom_level']} ({bloom_label}) level.
 Each question must:
 - Use action verbs appropriate for L{state['bloom_level']}: {bloom_verbs}
 - Be directly tied to the reference material above
-- Be original (not copied from reference)
+- Be original (not copied verbatim from reference or PYQs)
 - Be specific and unambiguous
 - For numerical: include specific numerical values
 - For drawing: specify what exactly to draw
@@ -723,19 +759,17 @@ def pedagogy_tagger_agent(state: PipelineState) -> PipelineState:
 
 def syllabus_guardian_agent(state: PipelineState) -> PipelineState:
     """Verifies questions are within the declared unit scope (fuzzy match)."""
-    unit_keywords = state["unit"].lower().split()
-    # Allow all if context is sparse
-    if not state["context_chunks"]:
+    all_context = state["context_chunks"] + ([state["pyq_context"]] if state.get("pyq_context") else [])
+    if not all_context:
         state["final_questions"] = state["tagged_questions"]
         return state
 
-    # Simple scope check: at least one question keyword should match context words
-    context_words = set(" ".join(state["context_chunks"]).lower().split())
+    context_words = set(" ".join(all_context).lower().split())
     approved = []
     for q in state["tagged_questions"]:
         q_words = set(q["text"].lower().split())
         overlap = q_words & context_words
-        if len(overlap) >= 3:  # at least 3 content words appear in source
+        if len(overlap) >= 3:
             approved.append(q)
     state["final_questions"] = approved or state["tagged_questions"]
     return state
@@ -755,8 +789,12 @@ def provenance_explainer_agent(state: PipelineState) -> PipelineState:
         if len(source_chunk) > 280:
             excerpt += "..."
 
+        pyq_note = ""
+        if state.get("pyq_context"):
+            pyq_note = " PYQ/question-bank examples were also used as style and pattern reference."
+
         if excerpt:
-            grounding = f'It was generated from the following passage in the raw data for "{q["unit"]}": "{excerpt}"'
+            grounding = f'It was generated from the following passage in the raw data for "{q["unit"]}": "{excerpt}"{pyq_note}'
         else:
             grounding = (
                 "No matching passage was retrieved from the raw data for this chapter, so the LLM "
@@ -964,6 +1002,8 @@ def run_pipeline_with_diagnostics(subject: str, unit: str, bloom_level: int, que
         "count": count,
         "marks": marks,
         "context_chunks": [],
+        "pyq_context": "",
+        "existing_questions": [],
         "raw_questions": [],
         "validated_questions": [],
         "tagged_questions": [],
@@ -972,16 +1012,20 @@ def run_pipeline_with_diagnostics(subject: str, unit: str, bloom_level: int, que
         "drop_reasons": [],
     }
 
+    import sys as _sys
     pipeline = get_pipeline()
+    print(f"🔎 PIPELINE: pipeline={'yes' if pipeline else 'no'}, OLLAMA={OLLAMA_AVAILABLE}", file=_sys.stderr, flush=True)
     if pipeline and OLLAMA_AVAILABLE:
         try:
             result = pipeline.invoke(initial_state)
             if result["final_questions"]:
+                print(f"🔎 PIPELINE: LangGraph produced {len(result['final_questions'])} questions", file=_sys.stderr, flush=True)
                 return result["final_questions"], result.get("drop_reasons", []), result.get("errors", [])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"🔎 PIPELINE: LangGraph failed: {e}", file=_sys.stderr, flush=True)
 
     # Fallback: run agents manually without LangGraph
+    print("🔎 PIPELINE: running agents manually", file=_sys.stderr, flush=True)
     state = initial_state
     for agent in [bloom_analyzer_agent, scout_agent, generator_agent,
                   quality_validator_agent, difficulty_validator_agent,

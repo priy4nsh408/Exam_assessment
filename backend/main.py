@@ -750,6 +750,167 @@ async def download_data_source_file(subject: str, path: str, source: str = "raw"
     return FileResponse(resolved, filename=resolved.name)
 
 
+@app.post("/api/data-sources/upload")
+async def upload_and_ingest(
+    subject: str = Form(...),
+    files: List[UploadFile] = File(...),
+):
+    """
+    Upload PDF/DOCX files organized by unit and ingest into ChromaDB.
+
+    Each file's original path (from webkitRelativePath) encodes the unit:
+      SubjectFolder/Unit-1/file.pdf  →  unit = "Unit 1"
+      SubjectFolder/file.pdf         →  unit extracted from filename
+
+    After saving to data/raw/{subject}/, runs the ingestion pipeline
+    (load → enrich metadata → chunk → store in ChromaDB with SQLite fallback).
+    """
+    import shutil
+
+    DATA_DIR = Path(__file__).parent.parent / "data"
+    RAW_DIR = DATA_DIR / "raw"
+    CHROMA_DIR = DATA_DIR / "db" / "chroma"
+    ALLOWED = {".pdf", ".docx", ".doc", ".txt", ".pptx"}
+
+    subject_dir = RAW_DIR / subject
+    subject_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_files = []
+    for upload_file in files:
+        ext = Path(upload_file.filename).suffix.lower()
+        if ext not in ALLOWED:
+            continue
+
+        parts = Path(upload_file.filename).parts
+        if len(parts) >= 2:
+            unit_folder = parts[-2]
+        else:
+            unit_folder = None
+
+        if unit_folder:
+            dest_dir = subject_dir / unit_folder
+        else:
+            dest_dir = subject_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        dest_path = dest_dir / Path(upload_file.filename).name
+        with open(dest_path, "wb") as f:
+            shutil.copyfileobj(upload_file.file, f)
+        saved_files.append(str(dest_path.relative_to(RAW_DIR)))
+
+    if not saved_files:
+        raise HTTPException(status_code=400, detail="No valid files uploaded")
+
+    chunk_count = 0
+    ingest_error = None
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from ingestion.pipeline import load_documents
+        from ingestion.metadata_extractor import enrich_metadata
+        from chunking.chunker import chunk_docs
+
+        docs = load_documents(str(subject_dir))
+        if docs:
+            docs = enrich_metadata(docs)
+            for doc in docs:
+                doc.metadata["subject"] = subject
+            chunks = chunk_docs(docs)
+            chunk_count = len(chunks)
+
+            if chunks:
+                db_path = str(CHROMA_DIR / subject)
+                try:
+                    from vector_store.chroma_client import create_vector_db
+                    vectordb = create_vector_db(chunks, persist_directory=db_path)
+                    if vectordb is None:
+                        raise RuntimeError("Embedding model unavailable")
+                except Exception:
+                    _ingest_to_sqlite_fallback(chunks, db_path, subject)
+    except Exception as e:
+        ingest_error = str(e)
+
+    result = {
+        "subject": subject,
+        "filesUploaded": len(saved_files),
+        "files": saved_files,
+        "chunksIngested": chunk_count,
+    }
+    if ingest_error:
+        result["ingestWarning"] = f"Files saved but ingestion had an error: {ingest_error}"
+    return result
+
+
+def _ingest_to_sqlite_fallback(chunks, persist_dir: str, subject: str):
+    """Store chunks in SQLite mimicking ChromaDB's schema for fallback retrieval."""
+    import sqlite3 as _sqlite3
+    os.makedirs(persist_dir, exist_ok=True)
+    db_path = os.path.join(persist_dir, "chroma.sqlite3")
+    conn = _sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS embedding_metadata (
+            id INTEGER, key TEXT, string_value TEXT,
+            int_value INTEGER, float_value REAL, bool_value INTEGER
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_em_key ON embedding_metadata(key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_em_id ON embedding_metadata(id)")
+    existing = conn.execute("SELECT COALESCE(MAX(id), -1) FROM embedding_metadata").fetchone()[0]
+    next_id = existing + 1
+    for i, chunk in enumerate(chunks):
+        cid = next_id + i
+        meta = chunk.metadata
+        rows = [
+            (cid, "chroma:document", chunk.page_content, None, None, None),
+            (cid, "subject", meta.get("subject", subject), None, None, None),
+            (cid, "unit", meta.get("unit", "Unknown"), None, None, None),
+            (cid, "source_file", meta.get("source_file", ""), None, None, None),
+        ]
+        conn.executemany("INSERT INTO embedding_metadata VALUES (?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+
+
+@app.post("/api/data-sources/{subject}/reingest")
+async def reingest_subject(subject: str):
+    """Re-run ingestion for a subject that already has files in data/raw/."""
+    DATA_DIR = Path(__file__).parent.parent / "data"
+    RAW_DIR = DATA_DIR / "raw"
+    CHROMA_DIR = DATA_DIR / "db" / "chroma"
+
+    subject_dir = RAW_DIR / subject
+    if not subject_dir.exists():
+        raise HTTPException(status_code=404, detail=f"No raw data for '{subject}'")
+
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from ingestion.pipeline import load_documents
+        from ingestion.metadata_extractor import enrich_metadata
+        from chunking.chunker import chunk_docs
+
+        docs = load_documents(str(subject_dir))
+        if not docs:
+            raise HTTPException(status_code=400, detail="No usable documents found")
+
+        docs = enrich_metadata(docs)
+        for doc in docs:
+            doc.metadata["subject"] = subject
+        chunks = chunk_docs(docs)
+
+        db_path = str(CHROMA_DIR / subject)
+        try:
+            from vector_store.chroma_client import create_vector_db
+            vectordb = create_vector_db(chunks, persist_directory=db_path)
+            if vectordb is None:
+                raise RuntimeError("Embedding model unavailable")
+        except Exception:
+            _ingest_to_sqlite_fallback(chunks, db_path, subject)
+
+        return {"subject": subject, "chunksIngested": len(chunks)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/students")
 async def get_students():
     if HAS_DEMO_DATA:
