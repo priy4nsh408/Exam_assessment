@@ -33,6 +33,7 @@ export default function DrawingEvaluator() {
   const [drawingResult, setDrawingResult] = useState<any>(null)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [usnValue, setUsnValue] = useState('1RV23AS060')
+  const [answerId, setAnswerId] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -46,6 +47,7 @@ export default function DrawingEvaluator() {
     formData.append('max_marks', '20')
     formData.append('student_usn', usnValue)
     formData.append('assignment', 'Drawing Sheet 3')
+    if (answerId.trim()) formData.append('answer_id', answerId.trim())
     if (selectedFile) formData.append('file', selectedFile)
 
     try {
@@ -79,6 +81,7 @@ export default function DrawingEvaluator() {
             </div>
             <div className="mt-3 space-y-2">
               <div><label className="label">Student USN</label><input className="input" value={usnValue} onChange={e => setUsnValue(e.target.value)} /></div>
+              <div><label className="label">Answer ID (optional — grades against a real answer scheme)</label><input className="input font-mono text-xs" value={answerId} onChange={e => setAnswerId(e.target.value)} placeholder="e.g. AK-20260624-A1B2C3" /></div>
               <div><label className="label">Assignment</label><select className="select"><option>Drawing Sheet 3 — Orthographic Projection</option></select></div>
             </div>
             <button className="btn-primary w-full justify-center mt-3" onClick={handleEvaluate}>
@@ -128,7 +131,7 @@ export default function DrawingEvaluator() {
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-4">
                   <div>
-                    <h2 className="text-sm font-semibold text-gray-900">Taran Nithin Rao · 1RV23AS060</h2>
+                    <h2 className="text-sm font-semibold text-gray-900">Taran Nithin Rao · 1RV23AS060{drawingResult?.answerId ? ` · ${drawingResult.answerId}` : ''}</h2>
                     <p className="text-xs text-gray-500">Drawing Sheet 3 — Orthographic Projection</p>
                   </div>
                   <div className="text-right">
@@ -149,6 +152,53 @@ export default function DrawingEvaluator() {
                   ))}
                 </div>
               </div>
+
+              {drawingResult?.explanation && (
+                <div className="card p-5">
+                  <h3 className="text-sm font-semibold text-gray-900 mb-2">Why this score — marks awarded / deducted</h3>
+                  <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-3">
+                    <p className="text-xs text-indigo-700">{drawingResult.explanation}</p>
+                  </div>
+                </div>
+              )}
+
+              {drawingResult?.rubric && (
+                <div className="card p-5">
+                  <h3 className="text-sm font-semibold text-gray-900 mb-3">Parts & Dimensions Rubric</h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-xs font-medium text-emerald-700 mb-2">Matched parts ({drawingResult.rubric.matched_parts?.length ?? 0})</p>
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {(drawingResult.rubric.matched_parts ?? []).map((p: string) => <span key={p} className="badge bg-emerald-50 text-emerald-700">{p}</span>)}
+                      </div>
+                      <p className="text-xs font-medium text-red-600 mb-2">Missing parts ({drawingResult.rubric.missing_parts?.length ?? 0}) · -1 each</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(drawingResult.rubric.missing_parts ?? []).map((p: string) => <span key={p} className="badge bg-red-50 text-red-600">{p}</span>)}
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-xs font-medium text-emerald-700 mb-2">Matched dimensions ({drawingResult.rubric.matched_dimensions?.length ?? 0})</p>
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {(drawingResult.rubric.matched_dimensions ?? []).map((d: string) => <span key={d} className="badge bg-emerald-50 text-emerald-700">{d}</span>)}
+                      </div>
+                      <p className="text-xs font-medium text-amber-700 mb-2">Missing ({drawingResult.rubric.missing_dimensions?.length ?? 0}) · -0.5 each</p>
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {(drawingResult.rubric.missing_dimensions ?? []).map((d: string) => <span key={d} className="badge bg-amber-50 text-amber-700">{d}</span>)}
+                      </div>
+                      {(drawingResult.rubric.wrong_dimensions ?? []).length > 0 && (
+                        <>
+                          <p className="text-xs font-medium text-red-600 mb-2">Wrong values ({drawingResult.rubric.wrong_dimensions.length}) · -1 each</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {drawingResult.rubric.wrong_dimensions.map((w: any, i: number) => (
+                              <span key={i} className="badge bg-red-50 text-red-600">expected {w.expected}, found {w.found}</span>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="card p-5">
                 <h3 className="text-sm font-semibold text-gray-900 mb-3">VLM Interpretation (LLaVA output)</h3>

@@ -7,8 +7,9 @@ const MOCK_RESULTS = [
     student: '1RV23ME001', name: 'Arjun Sharma', question: 'Q-052',
     answer: 'The first law of thermodynamics states that energy cannot be created or destroyed...',
     aiScore: 7.5, maxScore: 10, confidence: 0.87,
-    conceptScore: 3.5, detailScore: 4.0,
+    keywordScore: 3.5, semanticScore: 4.0,
     feedback: 'Core principle correctly stated. Missing derivation for open system steady-state SFEE. Nozzle application partially addressed — exit velocity expression derivation incomplete.',
+    explanation: 'Awarded 3.5/4.0 marks for keyword coverage (8/12 key terms matched). Awarded 4.0/6.0 marks for semantic similarity (78% similarity). Total: 7.5/10.',
     keywords: { found: ['conservation of energy', 'enthalpy', 'work done', 'heat transfer'], missing: ['SFEE', 'isentropic', 'velocity head'] },
     co: 'CO1', status: 'graded'
   },
@@ -16,8 +17,9 @@ const MOCK_RESULTS = [
     student: '1RV23ME002', name: 'Priya Nair', question: 'Q-052',
     answer: 'First law: dU = delta Q - delta W. For open systems, we consider enthalpy and kinetic energy...',
     aiScore: 9.0, maxScore: 10, confidence: 0.92,
-    conceptScore: 4.5, detailScore: 4.5,
+    keywordScore: 4.5, semanticScore: 4.5,
     feedback: 'Excellent derivation of SFEE for open system. Nozzle application correctly applied with proper assumptions stated. Minor: did not mention steady-flow assumption explicitly.',
+    explanation: 'Awarded 4.5/4.0 marks for keyword coverage (11/12 key terms matched). Awarded 4.5/6.0 marks for semantic similarity (91% similarity). Total: 9.0/10.',
     keywords: { found: ['SFEE', 'enthalpy', 'kinetic energy', 'steady state', 'isentropic'], missing: ['continuity equation'] },
     co: 'CO1', status: 'graded'
   },
@@ -25,8 +27,9 @@ const MOCK_RESULTS = [
     student: '1RV23ME003', name: 'Rohan Das', question: 'Q-052',
     answer: 'Energy is conserved. In thermodynamics, Q = W + dU is the first law.',
     aiScore: 3.0, maxScore: 10, confidence: 0.78,
-    conceptScore: 2.0, detailScore: 1.0,
+    keywordScore: 1.0, semanticScore: 2.0,
     feedback: 'Only basic statement provided. Open system analysis absent. No derivation of SFEE or application to nozzle. Significant gaps in understanding of flow work and enthalpy.',
+    explanation: 'Awarded 1.0/4.0 marks for keyword coverage (2/12 key terms matched). Awarded 2.0/6.0 marks for semantic similarity (38% similarity). Total: 3.0/10.',
     keywords: { found: ['Q = W', 'energy'], missing: ['SFEE', 'enthalpy', 'open system', 'isentropic', 'nozzle', 'exit velocity'] },
     co: 'CO1', status: 'graded'
   },
@@ -39,6 +42,7 @@ export default function TheoryEvaluator() {
   const [overrideReason, setOverrideReason] = useState('')
   const [grading, setGrading] = useState(false)
   const [answerText, setAnswerText] = useState('')
+  const [answerId, setAnswerId] = useState('')
   const [question, setQuestion] = useState('State and derive the first law of thermodynamics for an open system.')
   const [subject, setSubject] = useState('Thermodynamics')
   const fileRef = useRef<HTMLInputElement>(null)
@@ -47,25 +51,32 @@ export default function TheoryEvaluator() {
     if (!answerText.trim()) { alert('Paste or type the student answer first.'); return }
     setGrading(true)
     try {
+      const body: any = answerId.trim()
+        ? { answer_id: answerId.trim(), student_answer: answerText }
+        : { question, student_answer: answerText, subject, model_answer: '', max_marks: 10 }
       const res = await fetch('/api/eval/theory', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, student_answer: answerText, subject, model_answer: '', max_marks: 10 })
+        body: JSON.stringify(body)
       })
       const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Grading failed')
       const newResult = {
-        student: `S-${Date.now()}`, name: 'Student', question: 'Custom',
+        student: `S-${Date.now()}`, name: 'Student', question: data.questionId || 'Custom',
         answer: answerText,
-        aiScore: data.ai_score ?? 0, maxScore: data.max_score ?? 10,
+        aiScore: data.aiScore ?? 0, maxScore: data.maxScore ?? 10,
         confidence: data.confidence ?? 0,
-        conceptScore: data.concept_score ?? 0, detailScore: data.detail_score ?? 0,
+        keywordScore: data.keywordScore ?? 0, semanticScore: data.semanticScore ?? 0,
         feedback: data.feedback ?? '',
-        keywords: data.keywords || { found: [], missing: [], coverage_ratio: 0 },
+        explanation: data.explanation ?? '',
+        keywords: { found: data.matchedKeywords ?? [], missing: data.missingKeywords ?? [] },
+        answerId: data.answerId,
+        hadReferenceData: data.hadReferenceData,
         co: 'CO1', status: 'graded'
       }
       setResults(prev => [newResult, ...prev])
       setSelected(newResult)
-    } catch { alert('Grading failed — is the backend running?') }
+    } catch (e: any) { alert(e.message || 'Grading failed — is the backend running?') }
     setGrading(false)
   }
 
@@ -78,10 +89,13 @@ export default function TheoryEvaluator() {
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Upload Submissions</h2>
             <div>
+              <label className="label">Answer ID (optional — grades against a real answer scheme)</label>
+              <input className="input mb-2 font-mono text-xs" value={answerId} onChange={e => setAnswerId(e.target.value)} placeholder="e.g. AK-20260624-A1B2C3" />
+              <p className="text-[10px] text-gray-400 mb-3">If set, Question/Subject below are ignored — grading uses the answer scheme's own reference answer.</p>
               <label className="label">Question</label>
-              <input className="input mb-2" value={question} onChange={e => setQuestion(e.target.value)} placeholder="Enter question text" />
+              <input className="input mb-2" value={question} onChange={e => setQuestion(e.target.value)} placeholder="Enter question text" disabled={!!answerId.trim()} />
               <label className="label">Subject</label>
-              <select className="select mb-2" value={subject} onChange={e => setSubject(e.target.value)}>
+              <select className="select mb-2" value={subject} onChange={e => setSubject(e.target.value)} disabled={!!answerId.trim()}>
                 <option>Thermodynamics</option>
                 <option>Strength of Materials</option>
                 <option>Fluid Mechanics</option>
@@ -141,7 +155,7 @@ export default function TheoryEvaluator() {
                 <div className="flex items-center justify-between mb-4">
                   <div>
                     <h2 className="text-sm font-semibold text-gray-900">{selected.name} · {selected.student}</h2>
-                    <p className="text-xs text-gray-500">Question {selected.question} · {selected.co}</p>
+                    <p className="text-xs text-gray-500">Question {selected.question} · {selected.co}{selected.answerId ? ` · ${selected.answerId}` : ''}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-2xl font-bold text-gray-900">{selected.aiScore}<span className="text-sm font-normal text-gray-400">/{selected.maxScore}</span></p>
@@ -151,16 +165,27 @@ export default function TheoryEvaluator() {
                 {/* Score breakdown */}
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <div className="bg-gray-50 rounded-lg p-3">
-                    <p className="text-xs text-gray-500 mb-1">Concept Score</p>
-                    <p className="text-lg font-bold text-gray-800">{selected.conceptScore}<span className="text-xs text-gray-400">/5</span></p>
-                    <p className="text-xs text-gray-400">Core principle presence</p>
+                    <p className="text-xs text-gray-500 mb-1">Keyword Score</p>
+                    <p className="text-lg font-bold text-gray-800">{selected.keywordScore}<span className="text-xs text-gray-400">/{selected.maxScore}</span></p>
+                    <p className="text-xs text-gray-400">Terms matched from source material</p>
                   </div>
                   <div className="bg-gray-50 rounded-lg p-3">
-                    <p className="text-xs text-gray-500 mb-1">Detail Score</p>
-                    <p className="text-lg font-bold text-gray-800">{selected.detailScore}<span className="text-xs text-gray-400">/5</span></p>
-                    <p className="text-xs text-gray-400">Reasoning + terminology</p>
+                    <p className="text-xs text-gray-500 mb-1">Semantic Score</p>
+                    <p className="text-lg font-bold text-gray-800">{selected.semanticScore}<span className="text-xs text-gray-400">/{selected.maxScore}</span></p>
+                    <p className="text-xs text-gray-400">Similarity to reference answer</p>
                   </div>
                 </div>
+                {selected.explanation && (
+                  <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-3 mb-3">
+                    <p className="text-xs font-medium text-indigo-800 mb-1">Why this score — marks awarded / deducted</p>
+                    <p className="text-xs text-indigo-700">{selected.explanation}</p>
+                  </div>
+                )}
+                {selected.hadReferenceData === false && (
+                  <div className="bg-amber-50 border border-amber-100 rounded-lg p-2.5 mb-3">
+                    <p className="text-[11px] text-amber-700">No grounded reference answer was available — this score is ungrounded (manual mode).</p>
+                  </div>
+                )}
                 <div className="bg-amber-50 border border-amber-100 rounded-lg p-3">
                   <p className="text-xs font-medium text-amber-800 mb-1">AI Feedback</p>
                   <p className="text-xs text-amber-700">{selected.feedback}</p>

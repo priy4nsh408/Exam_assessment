@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Search, Trash2, Download, Eye } from 'lucide-react'
+import { useState, useEffect, Fragment } from 'react'
+import { Search, Trash2, Download, ChevronDown, ChevronUp } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { BloomBadge } from '../components/ui/BloomBadge'
 
@@ -26,6 +26,7 @@ export default function QuestionBank() {
   const [filterSubject, setFilterSubject] = useState('all')
   const [questions, setQuestions] = useState<any[]>(ALL_QUESTIONS)
   const [loading, setLoading] = useState(true)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
 
   useEffect(() => {
     fetch('/api/questions')
@@ -102,8 +103,13 @@ export default function QuestionBank() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {filtered.map(q => (
-                <tr key={q.id} className="hover:bg-gray-50 transition-colors">
+              {filtered.map(q => {
+                const bloomLevel = q.bloomLevel ?? q.bloom
+                const hasValidation = q.generationExplanation || q.answerKeyExplanation || q.answerKey
+                const isExpanded = expandedId === q.id
+                return (
+                <Fragment key={q.id}>
+                <tr className="hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3 font-mono text-xs text-gray-400">{q.id}</td>
                   <td className="px-4 py-3 max-w-xs">
                     <p className="text-sm text-gray-800 line-clamp-2">{q.text}</p>
@@ -112,13 +118,18 @@ export default function QuestionBank() {
                   <td className="px-4 py-3">
                     <span className={`badge capitalize ${typeColor[q.type]}`}>{q.type}</span>
                   </td>
-                  <td className="px-4 py-3"><BloomBadge level={q.bloom} /></td>
+                  <td className="px-4 py-3"><BloomBadge level={bloomLevel} /></td>
                   <td className="px-4 py-3"><span className="badge bg-indigo-50 text-indigo-600">{q.co}</span></td>
                   <td className="px-4 py-3 text-sm font-semibold text-gray-700">{q.marks}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1 justify-end">
-                      <button className="w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors">
-                        <Eye className="w-3.5 h-3.5" />
+                      <button
+                        onClick={() => setExpandedId(isExpanded ? null : q.id)}
+                        disabled={!hasValidation}
+                        className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${hasValidation ? 'text-gray-400 hover:text-indigo-600 hover:bg-indigo-50' : 'text-gray-200 cursor-not-allowed'}`}
+                        title={hasValidation ? 'View validation & answer key' : 'No validation data for this question'}
+                      >
+                        {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                       </button>
                       <button onClick={() => handleDelete(q.id)} className="w-7 h-7 flex items-center justify-center rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors">
                         <Trash2 className="w-3.5 h-3.5" />
@@ -126,7 +137,45 @@ export default function QuestionBank() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                {isExpanded && (
+                  <tr className="bg-indigo-50/40">
+                    <td colSpan={7} className="px-4 py-4">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-[10px] font-semibold text-indigo-700 uppercase tracking-wide mb-1">
+                            Document Validation — why / where generated
+                          </p>
+                          <p className="text-xs text-gray-700 leading-relaxed">
+                            {q.generationExplanation || 'No generation explanation recorded for this question.'}
+                          </p>
+                          {q.sourceChunk && (
+                            <details className="mt-2">
+                              <summary className="text-[11px] text-indigo-600 cursor-pointer hover:underline">View raw source chunk</summary>
+                              <p className="text-[11px] text-gray-500 mt-1 bg-white rounded p-2 border border-gray-100 whitespace-pre-wrap">{q.sourceChunk}</p>
+                            </details>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-semibold text-emerald-700 uppercase tracking-wide mb-1">
+                            Answer Key
+                          </p>
+                          <p className="text-xs text-gray-700 leading-relaxed whitespace-pre-wrap">
+                            {q.answerKey || 'No answer key generated for this question.'}
+                          </p>
+                          {q.answerKeyExplanation && (
+                            <p className="text-[11px] text-gray-500 mt-2 italic">{q.answerKeyExplanation}</p>
+                          )}
+                          {q.answerId && (
+                            <p className="text-[11px] text-gray-400 mt-2 font-mono">Answer ID: {q.answerId}</p>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
+                )
+              })}
             </tbody>
           </table>
         </div>

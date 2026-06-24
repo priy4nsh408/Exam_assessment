@@ -35,42 +35,57 @@ export default function NumericalGrader() {
   const [grading, setGrading] = useState(false)
   const [overrideScore, setOverrideScore] = useState('')
   const [numericalResult, setNumericalResult] = useState<any>(null)
+  const [answerId, setAnswerId] = useState('')
   const [solutionText, setSolutionText] = useState('Step 1: η = 1 - 300/900 = 0.667\nStep 2: Q_H = 200 × 0.667 = 133.4 kW\nStep 3: Q_L = 133.4 - 200 = -66.6 kW')
 
   const handleGrade = async () => {
     setGrading(true)
-    const res = await fetch('/api/eval/numerical', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question: 'A Carnot engine operates between 900 K and 300 K producing 200 kW. Find efficiency, heat supplied, heat rejected.',
-        student_solution: solutionText,
-        subject: 'Thermodynamics',
-        max_marks: 10
+    try {
+      const body: any = answerId.trim()
+        ? { answer_id: answerId.trim(), student_solution: solutionText }
+        : {
+            question: 'A Carnot engine operates between 900 K and 300 K producing 200 kW. Find efficiency, heat supplied, heat rejected.',
+            student_solution: solutionText,
+            subject: 'Thermodynamics',
+            max_marks: 10
+          }
+      const res = await fetch('/api/eval/numerical', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
       })
-    })
-    const data = await res.json()
-    // Normalize API response fields to match display expectations
-    const normalized = {
-      student: '1RV23ME004', name: 'Student', question: 'Q-053',
-      questionText: 'A Carnot engine operates between 900 K and 300 K producing 200 kW.',
-      aiScore: data.ai_score ?? data.total_earned ?? 0,
-      maxScore: data.max_score ?? data.total_marks ?? 10,
-      confidence: data.confidence ?? 0.8,
-      totalSteps: (data.steps || []).length,
-      steps: (data.steps || []).map((s: any) => ({
-        step: s.step,
-        description: s.description,
-        expected: s.expected,
-        student: s.student_work ?? s.student ?? '',
-        correct: s.correct,
-        marks: s.marks,
-        earned: s.earned,
-        errorType: s.error_type === 'correct' ? null : s.error_type ?? null,
-        deduction: s.marks - s.earned,
-      }))
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Grading failed')
+      // Normalize API response fields to match display expectations
+      const normalized = {
+        student: '1RV23ME004', name: 'Student', question: data.questionId || 'Q-053',
+        questionText: 'A Carnot engine operates between 900 K and 300 K producing 200 kW.',
+        aiScore: data.ai_score ?? data.total_earned ?? 0,
+        maxScore: data.max_score ?? data.total_marks ?? 10,
+        confidence: data.confidence ?? 0.8,
+        baseScore: data.base_score,
+        deductions: data.deductions,
+        formulaMentioned: data.formula_mentioned,
+        finalAnswerCorrect: data.final_answer_correct,
+        explanation: data.explanation,
+        answerId: data.answerId,
+        totalSteps: (data.steps || []).length,
+        steps: (data.steps || []).map((s: any) => ({
+          step: s.step,
+          description: s.description,
+          expected: s.expected,
+          student: s.student_work ?? s.student ?? '',
+          correct: s.correct,
+          marks: s.marks,
+          earned: s.earned,
+          errorType: s.error_type === 'correct' ? null : s.error_type ?? null,
+          deduction: s.marks - s.earned,
+        }))
+      }
+      setNumericalResult(normalized)
+    } catch (e: any) {
+      alert(e.message || 'Grading failed — is the backend running?')
     }
-    setNumericalResult(normalized)
     setGrading(false)
     setShowResult(true)
   }
@@ -88,6 +103,10 @@ export default function NumericalGrader() {
               <div>
                 <label className="label">Student USN</label>
                 <input className="input" defaultValue="1RV23ME004" readOnly />
+              </div>
+              <div>
+                <label className="label">Answer ID (optional — grades against a real answer scheme)</label>
+                <input className="input font-mono text-xs" value={answerId} onChange={e => setAnswerId(e.target.value)} placeholder="e.g. AK-20260624-A1B2C3" />
               </div>
               <div>
                 <label className="label">Question</label>
@@ -149,7 +168,7 @@ export default function NumericalGrader() {
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <h2 className="text-sm font-semibold text-gray-900">{displayData.name} · {displayData.student}</h2>
+                    <h2 className="text-sm font-semibold text-gray-900">{displayData.name} · {displayData.student}{displayData.answerId ? ` · ${displayData.answerId}` : ''}</h2>
                     <p className="text-xs text-gray-500">{displayData.questionText}</p>
                   </div>
                   <div className="text-right">
@@ -157,6 +176,26 @@ export default function NumericalGrader() {
                     <p className="text-xs text-gray-400">Step accuracy: {displayData.steps.filter((s: any) => s.correct).length}/{displayData.totalSteps}</p>
                   </div>
                 </div>
+                {(displayData.formulaMentioned !== undefined || displayData.finalAnswerCorrect !== undefined) && (
+                  <div className="flex gap-2 mb-3">
+                    {displayData.formulaMentioned !== undefined && (
+                      <span className={`badge ${displayData.formulaMentioned ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                        {displayData.formulaMentioned ? 'Formula mentioned' : 'Formula missing (-1)'}
+                      </span>
+                    )}
+                    {displayData.finalAnswerCorrect !== undefined && (
+                      <span className={`badge ${displayData.finalAnswerCorrect ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                        {displayData.finalAnswerCorrect ? 'Final answer correct' : 'Final answer wrong (-1)'}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {displayData.explanation && (
+                  <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-3">
+                    <p className="text-xs font-medium text-indigo-800 mb-1">Why this score — marks awarded / deducted</p>
+                    <p className="text-xs text-indigo-700">{displayData.explanation}</p>
+                  </div>
+                )}
               </div>
 
               {displayData.steps.map((step: any) => (
