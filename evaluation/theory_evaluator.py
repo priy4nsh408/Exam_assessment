@@ -1,8 +1,23 @@
 """
 Theory answer evaluation engine.
-Uses local LLM (Ollama) + cosine similarity + keyword coverage for two-tier scoring.
-Concept score: is the core principle present?
-Detail score: supporting reasoning + ME-specific terminology?
+
+Grading is based on two deterministic signals, both derived from the
+*reference text actually used to generate the question* (the raw-data
+chunk that was retrieved for that question, or an LLM-written model
+answer distilled from that chunk):
+
+1. Keyword coverage  - how many of the important terms found in the
+   reference text also appear in the student's answer.
+2. Semantic similarity - cosine similarity between sentence embeddings
+   of the student's answer and the reference text.
+
+No static per-subject keyword bank is used any more - keywords are
+extracted on the fly from whatever reference text is supplied, so the
+evaluator works for any subject/unit without manual curation.
+
+An LLM (Ollama) can optionally be used to produce qualitative feedback
+text, but it is NOT used to compute the score itself - the score is
+always the deterministic keyword + semantic blend described above.
 """
 
 import os
@@ -24,39 +39,20 @@ try:
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
 
-# ME domain keyword banks per subject
-ME_KEYWORDS = {
-    "Thermodynamics": [
-        "entropy", "enthalpy", "isentropic", "adiabatic", "isothermal", "isobaric",
-        "isochoric", "carnot", "rankine", "brayton", "otto", "diesel", "SFEE",
-        "first law", "second law", "zeroth law", "heat transfer", "work done",
-        "thermal efficiency", "COP", "refrigeration", "psychrometric", "dryness fraction",
-        "superheated", "saturation", "latent heat", "specific heat", "Clausius",
-        "reversible", "irreversible", "exergy", "availability", "T-s diagram", "p-V diagram",
-    ],
-    "Strength of Materials": [
-        "stress", "strain", "Young's modulus", "Poisson's ratio", "shear force",
-        "bending moment", "neutral axis", "moment of inertia", "section modulus",
-        "deflection", "slope", "torsion", "polar moment", "principal stress",
-        "Mohr's circle", "yield strength", "ultimate strength", "factor of safety",
-        "buckling", "Euler", "slenderness ratio", "thin cylinder", "hoop stress",
-        "longitudinal stress", "shear stress", "flexural formula", "Castigliano",
-    ],
-    "Fluid Mechanics": [
-        "Reynolds number", "Bernoulli", "continuity equation", "viscosity",
-        "laminar", "turbulent", "boundary layer", "Navier-Stokes", "pressure drop",
-        "Darcy-Weisbach", "Moody diagram", "pipe flow", "open channel",
-        "hydraulic gradient", "specific gravity", "surface tension", "capillarity",
-        "venturimeter", "orifice", "pitot tube", "notch", "weir", "buoyancy",
-        "metacentre", "vortex", "circulation", "lift", "drag",
-    ],
-    "Engineering Drawing": [
-        "orthographic", "isometric", "first angle", "third angle", "auxiliary view",
-        "section", "cutting plane", "hatching", "hidden line", "centre line",
-        "dimension", "tolerance", "GD&T", "datum", "surface finish", "Ra",
-        "title block", "scale", "projection", "elevation", "plan", "side view",
-        "true shape", "development", "intersection",
-    ],
+# Generic stopwords filtered out before keyword extraction. Deliberately
+# small/topic-agnostic so it works for any engineering subject.
+STOPWORDS = {
+    "the", "and", "for", "are", "but", "not", "you", "your", "with", "this",
+    "that", "from", "have", "has", "had", "was", "were", "will", "would",
+    "could", "should", "can", "their", "they", "them", "then", "than",
+    "what", "when", "where", "which", "while", "about", "into", "such",
+    "these", "those", "also", "each", "other", "some", "more", "most",
+    "between", "being", "after", "before", "during", "over", "under",
+    "above", "below", "because", "explain", "describe", "discuss",
+    "define", "state", "derive", "calculate", "given", "using", "used",
+    "use", "following", "based", "respect", "various", "different",
+    "example", "examples", "question", "answer", "system", "value",
+    "values", "case", "type", "types", "called", "known", "general",
 }
 
 _embedding_model = None
@@ -74,113 +70,185 @@ def cosine_similarity(a, b) -> float:
     a, b = np.array(a), np.array(b)
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
-def keyword_coverage(student_text: str, subject: str) -> dict:
-    """Returns dict of found/missing keywords and coverage ratio."""
-    keywords = ME_KEYWORDS.get(subject, [])
+def extract_keywords(reference_text: str, top_n: int = 15) -> list:
+    """
+    Extracts the most important terms from a reference text (e.g. the raw
+    source chunk a question was generated from, or its LLM-written model
+    answer). Pure frequency + stopword filtering - no per-subject bank,
+    so it generalizes to any topic.
+    """
+    if not reference_text:
+        return []
+
+    # Words, hyphenated terms, and possessive/apostrophe terms (e.g. "Bernoulli's")
+    tokens = re.findall(r"[A-Za-z][A-Za-z\-']{2,}", reference_text)
+
+    freq = {}
+    for tok in tokens:
+        lt = tok.lower().strip("-'")
+        if len(lt) < 4 or lt in STOPWORDS:
+            continue
+        freq[lt] = freq.get(lt, 0) + 1
+
+    # Rank by frequency, then prefer longer/more specific terms on ties
+    ranked = sorted(freq.items(), key=lambda kv: (-kv[1], -len(kv[0])))
+    return [word for word, _ in ranked[:top_n]]
+
+
+def keyword_coverage(student_text: str, reference_text: str, top_n: int = 15) -> dict:
+    """
+    Extracts keywords from `reference_text` (the raw-data-derived answer
+    for the question) and checks how many appear in the student's answer.
+    Returns found/missing keywords and a coverage ratio in [0, 1].
+    """
+    keywords = extract_keywords(reference_text, top_n=top_n)
     student_lower = student_text.lower()
-    found = [k for k in keywords if k.lower() in student_lower]
-    missing = [k for k in keywords if k.lower() not in student_lower]
+    found = [k for k in keywords if k in student_lower]
+    missing = [k for k in keywords if k not in found]
     return {
-        "found": found[:15],  # top 15
-        "missing": missing[:10],
+        "keywords_considered": keywords,
+        "found": found,
+        "missing": missing,
+        "matched_count": len(found),
+        "total_count": len(keywords),
         "coverage_ratio": len(found) / max(len(keywords), 1),
     }
 
-def llm_evaluate(question: str, model_answer: str, student_answer: str,
-                 subject: str, model: str = None) -> dict:
+def llm_feedback(question: str, reference_answer: str, student_answer: str,
+                  kw: dict, similarity: float, subject: str = "",
+                  model: str = None) -> str:
     """
-    Uses LLM to evaluate student answer against model answer.
-    Returns concept_score (0-5), detail_score (0-5), and feedback.
+    Optional: asks the LLM to write 2-3 sentences of qualitative feedback.
+    This NEVER influences the score - it's purely explanatory text shown
+    alongside the deterministic keyword/semantic score.
     """
     if not OLLAMA_AVAILABLE:
-        return {"concept_score": 0, "detail_score": 0, "feedback": "LLM not available"}
+        return ""
 
     model = model or os.getenv("OLLAMA_MODEL", "mistral")
-    prompt = f"""You are an expert {subject} professor grading a student answer.
+    prompt = f"""You are an expert {subject or 'engineering'} professor.
+A student's theory answer was auto-graded by comparing it against the
+source material the question was generated from.
 
 QUESTION: {question}
 
-MODEL ANSWER: {model_answer}
+REFERENCE MATERIAL / MODEL ANSWER (from the raw source data):
+{reference_answer}
 
 STUDENT ANSWER: {student_answer}
 
-Evaluate the student answer on TWO criteria (0-5 each):
-1. CONCEPT SCORE (0-5): Is the core principle/concept correctly stated and understood?
-   - 5: Perfect understanding, all key concepts present
-   - 3-4: Core concept present, minor gaps
-   - 1-2: Partial understanding, significant gaps
-   - 0: Core concept absent or wrong
+Matched keywords from the reference material: {', '.join(kw['found']) or 'none'}
+Missing keywords from the reference material: {', '.join(kw['missing']) or 'none'}
+Semantic similarity to reference: {similarity:.0%}
 
-2. DETAIL SCORE (0-5): Quality of reasoning, supporting details, correct ME terminology?
-   - 5: Excellent supporting reasoning, all steps/derivations correct, proper terminology
-   - 3-4: Good reasoning with minor omissions
-   - 1-2: Superficial reasoning, missing important steps
-   - 0: No meaningful supporting detail
-
-Respond ONLY in this exact JSON format:
-{{"concept_score": <0-5>, "detail_score": <0-5>, "feedback": "<2-3 sentences of specific feedback>"}}"""
+Write 2-3 sentences of specific, constructive feedback for the student
+explaining what was covered well and what key terms/ideas were missing.
+Respond with feedback text only, no JSON, no preamble."""
 
     try:
-        resp = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}])
-        text = resp["message"]["content"].strip()
-        # Extract JSON
-        match = re.search(r'\{.*?\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+        resp = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.3},
+        )
+        return resp["message"]["content"].strip()
     except Exception:
-        pass
-    return {"concept_score": 0, "detail_score": 0, "feedback": "Evaluation failed — LLM error"}
+        return ""
 
 def evaluate_theory(
     question: str,
     student_answer: str,
-    subject: str,
-    model_answer: str = "",
+    reference_answer: str,
+    subject: str = "",
     max_marks: int = 10,
+    keyword_weight: float = 0.4,
+    semantic_weight: float = 0.6,
+    top_n_keywords: int = 15,
+    skip_llm_feedback: bool = False,
 ) -> dict:
     """
     Main entry point for theory evaluation.
+
+    `reference_answer` is the raw-data-derived answer for this question -
+    i.e. the source chunk it was generated from, or an LLM-distilled model
+    answer based on that chunk. Both keyword extraction AND semantic
+    similarity are computed against this text, so a question generated
+    from different source material is graded against different keywords
+    automatically (no manual per-subject keyword bank needed).
+
+    Score = keyword_weight * keyword_coverage_ratio
+          + semantic_weight * semantic_similarity
+      ...scaled to max_marks. Weights must sum to 1.0.
+
+    `skip_llm_feedback`: when True, skips the llm_feedback() Ollama call and
+    uses the deterministic fallback sentence instead. The score is computed
+    identically either way (feedback never affects ai_score) - this is a
+    free win for callers that only need scores in bulk (e.g. aggregating
+    many submissions for dashboard stats) and would otherwise pay for an
+    LLM call whose text output they immediately discard.
+
     Returns full evaluation result dict.
     """
-    # Keyword analysis
-    kw = keyword_coverage(student_answer, subject)
+    reference_answer = reference_answer or ""
 
-    # Cosine similarity (if model answer provided)
-    similarity = 0.5
-    if model_answer and EMBEDDINGS_AVAILABLE:
-        model_emb = get_embedding_model()
-        if model_emb:
-            vec_model = model_emb.encode(model_answer)
-            vec_student = model_emb.encode(student_answer)
-            similarity = cosine_similarity(vec_model, vec_student)
+    # 1. Keyword coverage against the reference (raw-data-derived) answer
+    kw = keyword_coverage(student_answer, reference_answer, top_n=top_n_keywords)
 
-    # LLM scoring
-    llm_result = llm_evaluate(question, model_answer or question, student_answer, subject)
-    concept_score = llm_result.get("concept_score", 0)
-    detail_score = llm_result.get("detail_score", 0)
-    feedback = llm_result.get("feedback", "")
+    # 2. Semantic similarity against the same reference answer.
+    # When sentence-transformers isn't installed at all, fall back to the
+    # same neutral 0.5 that cosine_similarity() itself returns in that case
+    # - previously this branch left `similarity` at its 0.0 initial value
+    # instead, which silently zeroed out the entire 60%-weighted semantic
+    # component of every score whenever embeddings were unavailable.
+    similarity = 0.0
+    if reference_answer and student_answer:
+        if EMBEDDINGS_AVAILABLE:
+            model_emb = get_embedding_model()
+            if model_emb:
+                vec_ref = model_emb.encode(reference_answer)
+                vec_student = model_emb.encode(student_answer)
+                similarity = cosine_similarity(vec_ref, vec_student)
+            else:
+                similarity = 0.5
+        else:
+            similarity = 0.5
 
-    # If LLM unavailable, estimate from keyword coverage + similarity
-    if not OLLAMA_AVAILABLE:
-        concept_score = round(kw["coverage_ratio"] * 5, 1)
-        detail_score = round(similarity * 5, 1)
+    # 3. Deterministic blended score (keyword count + semantic match)
+    blended = keyword_weight * kw["coverage_ratio"] + semantic_weight * similarity
+    ai_score = round(blended * max_marks, 1)
+    ai_score = max(0.0, min(ai_score, max_marks))
+
+    # 4. Optional LLM-written feedback (does not affect ai_score)
+    feedback = "" if skip_llm_feedback else llm_feedback(question, reference_answer, student_answer, kw, similarity, subject)
+    if not feedback:
         feedback = (
-            f"Keyword coverage: {len(kw['found'])} terms found. "
-            f"Semantic similarity to model answer: {similarity:.0%}."
+            f"Matched {kw['matched_count']}/{kw['total_count']} key terms from the "
+            f"source material ({kw['coverage_ratio']:.0%} keyword coverage). "
+            f"Semantic similarity to the reference answer: {similarity:.0%}."
         )
 
-    # Final score out of max_marks
-    raw_total = concept_score + detail_score  # 0-10
-    ai_score = round((raw_total / 10) * max_marks, 1)
-    confidence = min(0.95, 0.5 + similarity * 0.3 + kw["coverage_ratio"] * 0.2)
+    confidence = round(min(0.95, 0.5 + similarity * 0.3 + kw["coverage_ratio"] * 0.2), 2)
+
+    keyword_marks = round(kw["coverage_ratio"] * keyword_weight * max_marks, 1)
+    semantic_marks = round(similarity * semantic_weight * max_marks, 1)
+    explanation = (
+        f"Awarded {keyword_marks}/{round(keyword_weight * max_marks, 1)} marks for keyword coverage "
+        f"({kw['matched_count']}/{kw['total_count']} key terms from the source material matched: "
+        f"{', '.join(kw['found']) or 'none'}). "
+        f"Awarded {semantic_marks}/{round(semantic_weight * max_marks, 1)} marks for semantic similarity "
+        f"to the reference answer ({similarity:.0%} similarity). "
+        f"Missing key terms: {', '.join(kw['missing']) or 'none'}. "
+        f"Total: {ai_score}/{max_marks}."
+    )
 
     return {
         "ai_score": ai_score,
         "max_score": max_marks,
-        "concept_score": concept_score,
-        "detail_score": detail_score,
-        "confidence": round(confidence, 2),
+        "keyword_score": round(kw["coverage_ratio"] * max_marks, 1),
+        "semantic_score": round(similarity * max_marks, 1),
+        "confidence": confidence,
         "feedback": feedback,
+        "explanation": explanation,
         "keywords": kw,
         "similarity": round(similarity, 3),
     }

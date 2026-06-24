@@ -1,15 +1,10 @@
-import { useState } from 'react'
-import { Sparkles, Download, Send, CheckCircle } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Sparkles, Download, Send, CheckCircle, Plus, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { BloomBadge } from '../components/ui/BloomBadge'
 
-const SUBJECTS = ['Thermodynamics', 'Strength of Materials', 'Fluid Mechanics', 'Engineering Drawing']
-const UNITS: Record<string, string[]> = {
-  'Thermodynamics': ['Unit 1: Laws of Thermodynamics', 'Unit 2: Power Cycles', 'Unit 3: Refrigeration', 'Unit 4: Psychrometrics'],
-  'Strength of Materials': ['Unit 1: Stress & Strain', 'Unit 2: Bending', 'Unit 3: Torsion', 'Unit 4: Columns'],
-  'Fluid Mechanics': ['Unit 1: Fluid Properties', 'Unit 2: Bernoulli', 'Unit 3: Pipe Flow', 'Unit 4: Boundary Layer'],
-  'Engineering Drawing': ['Unit 1: Orthographic', 'Unit 2: Sections', 'Unit 3: Isometric', 'Unit 4: GD&T'],
-}
+const FALLBACK_SUBJECTS = ['General']
+const FALLBACK_UNITS = ['Unit 1', 'Unit 2', 'Unit 3', 'Unit 4', 'Unit 5']
 const BLOOM_LEVELS = [
   { level: 1, label: 'L1 — Remember' },
   { level: 2, label: 'L2 — Understand' },
@@ -20,78 +15,146 @@ const BLOOM_LEVELS = [
 ]
 const QUESTION_TYPES = ['theory', 'numerical', 'drawing']
 const COs = ['CO1', 'CO2', 'CO3', 'CO4', 'CO5']
+const BLOOM_LABELS: Record<number, string> = { 1: 'Remember', 2: 'Understand', 3: 'Apply', 4: 'Analyze', 5: 'Evaluate', 6: 'Create' }
 
-const MOCK_QUESTIONS = [
-  {
-    id: 'Q-052', text: 'State and derive the first law of thermodynamics for an open system operating under steady state conditions. Apply it to a steam nozzle and derive the expression for exit velocity.',
-    bloomLevel: 4, type: 'theory', co: 'CO1', po: 'PO1', marks: 10, difficulty: 'hard', unit: 'Unit 1: Laws of Thermodynamics'
-  },
-  {
-    id: 'Q-053', text: 'A Carnot engine operates between a source at 900 K and a sink at 300 K. The engine produces 200 kW of power. Calculate: (a) thermal efficiency, (b) heat supplied from source, (c) heat rejected to sink.',
-    bloomLevel: 3, type: 'numerical', co: 'CO2', po: 'PO2', marks: 8, difficulty: 'medium', unit: 'Unit 2: Power Cycles'
-  },
-  {
-    id: 'Q-054', text: 'Explain the significance of entropy in thermodynamic processes. How does the Clausius inequality establish the criterion for spontaneity of a process?',
-    bloomLevel: 2, type: 'theory', co: 'CO1', po: 'PO1', marks: 6, difficulty: 'easy', unit: 'Unit 1: Laws of Thermodynamics'
-  },
-  {
-    id: 'Q-055', text: 'For an air-standard Otto cycle with a compression ratio of 8, initial pressure 1 bar and temperature 300 K, heat added 800 kJ/kg — determine all state point conditions and plot the p-V diagram.',
-    bloomLevel: 4, type: 'numerical', co: 'CO2', po: 'PO2', marks: 12, difficulty: 'hard', unit: 'Unit 2: Power Cycles'
-  },
+type SpecRow = { id: string; co: string; bloomLevel: number; marks: number }
+
+let rowCounter = 0
+function newRow(co = 'CO1', bloomLevel = 3, marks = 10): SpecRow {
+  rowCounter += 1
+  return { id: `row-${rowCounter}`, co, bloomLevel, marks }
+}
+
+const PIPELINE_STEPS = [
+  'BloomAnalyzer', 'Scout', 'Generator', 'QualityValidator', 'DifficultyValidator',
+  'CorrectnessValidator', 'PedagogyTagger', 'SyllabusGuardian', 'ProvenanceExplainer',
+  'AnswerKey', 'Archivist',
 ]
 
 export default function QuestionGenerator() {
-  const [subject, setSubject] = useState(SUBJECTS[0])
-  const [unit, setUnit] = useState(UNITS[SUBJECTS[0]][0])
-  const [bloomLevel, setBloomLevel] = useState(3)
+  // Subjects/units are discovered live from data/raw/ (via /api/data-sources)
+  // rather than hardcoded - a hardcoded list previously offered subjects
+  // like "Thermodynamics" that had no matching ingested ChromaDB content at
+  // all, so every generated question silently came back ungrounded. Tying
+  // the dropdown directly to what's actually on disk means that can't
+  // silently drift apart again; the `ingested` flag is shown per subject so
+  // it's visible up front which choices will produce a grounded answer key.
+  const [dataSources, setDataSources] = useState<any[]>([])
+  const [subject, setSubject] = useState('')
+  const [unit, setUnit] = useState('')
   const [questionType, setQuestionType] = useState('theory')
-  const [co, setCo] = useState('CO1')
   const [count, setCount] = useState(4)
-  const [marks, setMarks] = useState(10)
+
+  useEffect(() => {
+    fetch('/api/data-sources')
+      .then(r => r.json())
+      .then(data => {
+        const subjects = data.subjects || []
+        setDataSources(subjects)
+        if (subjects.length > 0) {
+          setSubject(subjects[0].subject)
+          setUnit((subjects[0].units && subjects[0].units[0]) || FALLBACK_UNITS[0])
+        } else {
+          setSubject(FALLBACK_SUBJECTS[0])
+          setUnit(FALLBACK_UNITS[0])
+        }
+      })
+      .catch(() => {
+        setSubject(FALLBACK_SUBJECTS[0])
+        setUnit(FALLBACK_UNITS[0])
+      })
+  }, [])
+
+  const currentSubjectEntry = dataSources.find(s => s.subject === subject)
+  const unitsForSubject: string[] = currentSubjectEntry?.units?.length ? currentSubjectEntry.units : FALLBACK_UNITS
+  const subjectOptions = dataSources.length > 0 ? dataSources.map(s => s.subject) : FALLBACK_SUBJECTS
+
+  // One CO/Bloom/marks row pool, expanded across `count` questions either
+  // sequentially (cycling through the pool in order) or randomly (one pool
+  // entry picked at random per slot). A single row behaves exactly like the
+  // old "one CO/Bloom level" mode - no separate single/multi toggle needed.
+  const [specRows, setSpecRows] = useState<SpecRow[]>([newRow()])
+  const [assignment, setAssignment] = useState<'sequential' | 'random'>('sequential')
+
   const [loading, setLoading] = useState(false)
   const [questions, setQuestions] = useState<any[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [agentStatuses, setAgentStatuses] = useState<Record<string, string>>({})
   const [publishing, setPublishing] = useState(false)
   const [publishDone, setPublishDone] = useState(false)
+  const [warning, setWarning] = useState<string | null>(null)
+  const [groundingNotice, setGroundingNotice] = useState<string | null>(null)
+
+  const addSpecRow = () => setSpecRows(prev => [...prev, newRow(COs[prev.length % COs.length])])
+  const removeSpecRow = (id: string) => setSpecRows(prev => prev.length > 1 ? prev.filter(r => r.id !== id) : prev)
+  const updateSpecRow = (id: string, patch: Partial<SpecRow>) =>
+    setSpecRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r))
+
+  // Expands the spec pool to exactly `count` per-question specs.
+  const buildExpandedSpecs = () => {
+    const pool = specRows
+    const out: { bloom_level: number; co: string; marks: number }[] = []
+    for (let i = 0; i < count; i++) {
+      const row = assignment === 'sequential'
+        ? pool[i % pool.length]
+        : pool[Math.floor(Math.random() * pool.length)]
+      out.push({ bloom_level: row.bloomLevel, co: row.co, marks: row.marks })
+    }
+    return out
+  }
 
   const handleGenerate = async () => {
     setLoading(true)
     setQuestions([])
-    setAgentStatuses({
-      'BloomAnalyzer': 'idle', 'Scout': 'idle', 'Generator': 'idle',
-      'QualityValidator': 'idle', 'DifficultyValidator': 'idle',
-      'CorrectnessValidator': 'idle', 'PedagogyTagger': 'idle',
-      'SyllabusGuardian': 'idle', 'Archivist': 'idle',
-    })
+    setWarning(null)
+    setGroundingNotice(null)
+    setAgentStatuses(Object.fromEntries(PIPELINE_STEPS.map(s => [s, 'idle'])))
 
-    const params = new URLSearchParams({
-      subject, unit, bloom_level: String(bloomLevel),
-      question_type: questionType, co, count: String(count)
-    })
-
-    const eventSource = new EventSource(`/api/questions/generate/stream?${params}`)
-
-    eventSource.onmessage = (e) => {
-      const data = JSON.parse(e.data)
-      if (data.agent) {
-        setAgentStatuses(prev => ({ ...prev, [data.agent]: data.status }))
+    // Lightweight visual progress through the agent chain while the single
+    // batched /api/pipeline/generate request is in flight - this isn't an
+    // SSE stream of real per-agent events (mixed-spec batches run as one
+    // request), just a paced animation so the wait doesn't feel inert.
+    let stepIndex = 0
+    const stepInterval = setInterval(() => {
+      if (stepIndex < PIPELINE_STEPS.length) {
+        const name = PIPELINE_STEPS[stepIndex]
+        setAgentStatuses(prev => ({ ...prev, [name]: 'running' }))
+        setTimeout(() => setAgentStatuses(prev => ({ ...prev, [name]: 'done' })), 350)
+        stepIndex += 1
       }
-      if (data.done) {
-        setQuestions(data.questions || [])
-        setSelected(new Set((data.questions || []).map((q: any) => q.id)))
-        setLoading(false)
-        eventSource.close()
-      }
-    }
-    eventSource.onerror = () => {
+    }, 450)
+
+    try {
+      const res = await fetch('/api/pipeline/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject, chapter: unit, question_type: questionType,
+          questions: buildExpandedSpecs(),
+        }),
+      })
+      if (!res.ok) throw new Error('Server error')
+      const data = await res.json()
+      setQuestions(data.questions || [])
+      setSelected(new Set((data.questions || []).map((q: any) => q.id)))
+      if (data.warning) setWarning(data.warning)
+      if (data.groundingNotice) setGroundingNotice(data.groundingNotice)
+    } catch {
+      alert('Generation failed — is the backend running?')
+    } finally {
+      clearInterval(stepInterval)
+      setAgentStatuses(Object.fromEntries(PIPELINE_STEPS.map(s => [s, 'done'])))
       setLoading(false)
-      eventSource.close()
     }
   }
 
-
-  const BLOOM_LABELS: Record<number, string> = { 1: 'Remember', 2: 'Understand', 3: 'Apply', 4: 'Analyze', 5: 'Evaluate', 6: 'Create' }
+  const toggleExpand = (id: string) => {
+    const next = new Set(expanded)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setExpanded(next)
+  }
 
   const handleExport = () => {
     const selectedQs = questions.filter(q => selected.has(q.id))
@@ -184,43 +247,89 @@ export default function QuestionGenerator() {
             <h2 className="text-sm font-semibold text-gray-900 mb-4">Generation Parameters</h2>
             <div className="space-y-4">
               <div>
-                <label className="label">Subject</label>
-                <select className="select" value={subject} onChange={e => { setSubject(e.target.value); setUnit(UNITS[e.target.value][0]) }}>
-                  {SUBJECTS.map(s => <option key={s}>{s}</option>)}
+                <label className="label flex items-center justify-between">
+                  <span>Subject</span>
+                  {currentSubjectEntry && (
+                    currentSubjectEntry.ingested
+                      ? <span className="text-[10px] font-medium text-emerald-600">Ingested · {currentSubjectEntry.chunkCount} chunks</span>
+                      : <span className="text-[10px] font-medium text-amber-600">Not ingested</span>
+                  )}
+                </label>
+                <select
+                  className="select"
+                  value={subject}
+                  onChange={e => {
+                    setSubject(e.target.value)
+                    const entry = dataSources.find(s => s.subject === e.target.value)
+                    setUnit((entry?.units && entry.units[0]) || FALLBACK_UNITS[0])
+                  }}
+                >
+                  {subjectOptions.map(s => <option key={s}>{s}</option>)}
                 </select>
+                {dataSources.length === 0 && (
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    No subjects discovered under data/raw/ yet - see the Data Source tab.
+                  </p>
+                )}
               </div>
               <div>
                 <label className="label">Unit / Topic</label>
                 <select className="select" value={unit} onChange={e => setUnit(e.target.value)}>
-                  {UNITS[subject].map(u => <option key={u}>{u}</option>)}
+                  {unitsForSubject.map(u => <option key={u}>{u}</option>)}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label">Bloom Level</label>
-                  <select className="select" value={bloomLevel} onChange={e => setBloomLevel(+e.target.value)}>
-                    {BLOOM_LEVELS.map(b => <option key={b.level} value={b.level}>{b.label}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Question Type</label>
-                  <select className="select" value={questionType} onChange={e => setQuestionType(e.target.value)}>
-                    {QUESTION_TYPES.map(t => <option key={t} className="capitalize">{t}</option>)}
-                  </select>
+              <div>
+                <label className="label">Question Type</label>
+                <select className="select" value={questionType} onChange={e => setQuestionType(e.target.value)}>
+                  {QUESTION_TYPES.map(t => <option key={t} className="capitalize">{t}</option>)}
+                </select>
+              </div>
+
+              <div>
+                <label className="label">CO / Bloom Levels</label>
+                <div className="space-y-2">
+                  {specRows.map((row, idx) => (
+                    <div key={row.id} className="flex items-center gap-2 bg-gray-50 rounded-lg p-2">
+                      <span className="text-[10px] text-gray-400 w-4">{idx + 1}</span>
+                      <select className="select text-xs py-1.5" value={row.bloomLevel} onChange={e => updateSpecRow(row.id, { bloomLevel: +e.target.value })}>
+                        {BLOOM_LEVELS.map(b => <option key={b.level} value={b.level}>L{b.level} ({BLOOM_LABELS[b.level]})</option>)}
+                      </select>
+                      <select className="select text-xs py-1.5" value={row.co} onChange={e => updateSpecRow(row.id, { co: e.target.value })}>
+                        {COs.map(c => <option key={c}>{c}</option>)}
+                      </select>
+                      <input type="number" className="input text-xs py-1.5 w-16" value={row.marks} min={1} max={20} onChange={e => updateSpecRow(row.id, { marks: +e.target.value })} />
+                      <button onClick={() => removeSpecRow(row.id)} disabled={specRows.length <= 1} className="text-gray-300 hover:text-red-500 disabled:opacity-30 disabled:hover:text-gray-300 shrink-0">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  <button onClick={addSpecRow} className="text-xs text-indigo-600 hover:underline flex items-center gap-1">
+                    <Plus className="w-3 h-3" /> Add CO / Bloom level
+                  </button>
+
+                  {specRows.length > 1 && (
+                    <div className="pt-2">
+                      <label className="label">Assign across questions</label>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setAssignment('sequential')}
+                          className={`flex-1 text-xs py-1.5 rounded-md border ${assignment === 'sequential' ? 'bg-indigo-600 text-white border-indigo-600' : 'border-gray-200 text-gray-600'}`}
+                        >Sequential</button>
+                        <button
+                          onClick={() => setAssignment('random')}
+                          className={`flex-1 text-xs py-1.5 rounded-md border ${assignment === 'random' ? 'bg-indigo-600 text-white border-indigo-600' : 'border-gray-200 text-gray-600'}`}
+                        >Random</button>
+                      </div>
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        {assignment === 'sequential'
+                          ? 'Cycles through the levels above, in order, across the questions generated.'
+                          : 'Picks one of the levels above at random for each question generated.'}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label">CO Mapping</label>
-                  <select className="select" value={co} onChange={e => setCo(e.target.value)}>
-                    {COs.map(c => <option key={c}>{c}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Marks per Q</label>
-                  <input type="number" className="input" value={marks} min={1} max={20} onChange={e => setMarks(+e.target.value)} />
-                </div>
-              </div>
+
               <div>
                 <label className="label">Number of Questions</label>
                 <input type="number" className="input" value={count} min={1} max={20} onChange={e => setCount(+e.target.value)} />
@@ -253,7 +362,8 @@ export default function QuestionGenerator() {
                   BloomAnalyzer: 'Bloom Analyzer', Scout: 'Scout (RAG)',
                   Generator: 'Generator', QualityValidator: 'Quality Validator',
                   DifficultyValidator: 'Difficulty Validator', CorrectnessValidator: 'Correctness Validator',
-                  PedagogyTagger: 'Pedagogy Tagger', SyllabusGuardian: 'Syllabus Guardian', Archivist: 'Archivist',
+                  PedagogyTagger: 'Pedagogy Tagger', SyllabusGuardian: 'Syllabus Guardian',
+                  ProvenanceExplainer: 'Provenance Explainer', AnswerKey: 'Answer Key', Archivist: 'Archivist',
                 }
                 return (
                 <div key={name} className="flex items-center justify-between">
@@ -275,6 +385,14 @@ export default function QuestionGenerator() {
 
         {/* Results */}
         <div className="col-span-2">
+          {warning && (
+            <div className="card p-3 mb-3 bg-amber-50 border-amber-200 text-xs text-amber-700">{warning}</div>
+          )}
+          {groundingNotice && (
+            <div className="card p-3 mb-3 bg-indigo-50 border-indigo-200 text-xs text-indigo-700">
+              <span className="font-semibold">Grounding notice: </span>{groundingNotice}
+            </div>
+          )}
           {questions.length === 0 && !loading && (
             <div className="card h-full flex items-center justify-center p-12">
               <div className="text-center">
@@ -306,14 +424,19 @@ export default function QuestionGenerator() {
                   <button onClick={() => setSelected(new Set())} className="text-xs text-gray-400 hover:underline">Deselect all</button>
                 </div>
               </div>
-              {questions.map(q => (
+              {questions.map(q => {
+                const isExpanded = expanded.has(q.id)
+                const validation = q.generationExplanation
+                return (
                 <div
                   key={q.id}
-                  className={`card p-4 cursor-pointer transition-all ${selected.has(q.id) ? 'ring-2 ring-indigo-400 border-indigo-200' : ''}`}
-                  onClick={() => toggleSelect(q.id)}
+                  className={`card p-4 transition-all ${selected.has(q.id) ? 'ring-2 ring-indigo-400 border-indigo-200' : ''}`}
                 >
                   <div className="flex items-start gap-3">
-                    <div className={`w-4 h-4 rounded border-2 mt-0.5 shrink-0 flex items-center justify-center transition-colors ${selected.has(q.id) ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'}`}>
+                    <div
+                      className={`w-4 h-4 rounded border-2 mt-0.5 shrink-0 flex items-center justify-center transition-colors cursor-pointer ${selected.has(q.id) ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'}`}
+                      onClick={() => toggleSelect(q.id)}
+                    >
                       {selected.has(q.id) && <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -328,12 +451,26 @@ export default function QuestionGenerator() {
                         </span>
                         <span className="ml-auto text-xs font-semibold text-gray-700">{q.marks} marks</span>
                       </div>
-                      <p className="text-sm text-gray-700 leading-relaxed">{q.text}</p>
-                      <p className="text-xs text-gray-400 mt-2">{q.unit}</p>
+                      <p className="text-sm text-gray-700 leading-relaxed cursor-pointer" onClick={() => toggleSelect(q.id)}>{q.text}</p>
+                      <div className="flex items-center justify-between mt-2">
+                        <p className="text-xs text-gray-400">{q.unit}{q.answerId ? ` · Answer ID: ${q.answerId}` : ''}</p>
+                        {validation && (
+                          <button onClick={() => toggleExpand(q.id)} className="text-[11px] text-indigo-600 hover:underline flex items-center gap-0.5 shrink-0">
+                            Validation {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                          </button>
+                        )}
+                      </div>
+                      {isExpanded && validation && (
+                        <div className="mt-2 bg-indigo-50/60 border border-indigo-100 rounded-lg p-3">
+                          <p className="text-[10px] font-semibold text-indigo-700 uppercase tracking-wide mb-1">Why / where this question was generated from</p>
+                          <p className="text-xs text-indigo-800 leading-relaxed">{validation}</p>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

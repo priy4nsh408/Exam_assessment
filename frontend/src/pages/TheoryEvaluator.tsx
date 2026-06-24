@@ -2,43 +2,19 @@ import { useState, useRef } from 'react'
 import { Upload, CheckCircle } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 
-const MOCK_RESULTS = [
-  {
-    student: '1RV23ME001', name: 'Arjun Sharma', question: 'Q-052',
-    answer: 'The first law of thermodynamics states that energy cannot be created or destroyed...',
-    aiScore: 7.5, maxScore: 10, confidence: 0.87,
-    conceptScore: 3.5, detailScore: 4.0,
-    feedback: 'Core principle correctly stated. Missing derivation for open system steady-state SFEE. Nozzle application partially addressed — exit velocity expression derivation incomplete.',
-    keywords: { found: ['conservation of energy', 'enthalpy', 'work done', 'heat transfer'], missing: ['SFEE', 'isentropic', 'velocity head'] },
-    co: 'CO1', status: 'graded'
-  },
-  {
-    student: '1RV23ME002', name: 'Priya Nair', question: 'Q-052',
-    answer: 'First law: dU = delta Q - delta W. For open systems, we consider enthalpy and kinetic energy...',
-    aiScore: 9.0, maxScore: 10, confidence: 0.92,
-    conceptScore: 4.5, detailScore: 4.5,
-    feedback: 'Excellent derivation of SFEE for open system. Nozzle application correctly applied with proper assumptions stated. Minor: did not mention steady-flow assumption explicitly.',
-    keywords: { found: ['SFEE', 'enthalpy', 'kinetic energy', 'steady state', 'isentropic'], missing: ['continuity equation'] },
-    co: 'CO1', status: 'graded'
-  },
-  {
-    student: '1RV23ME003', name: 'Rohan Das', question: 'Q-052',
-    answer: 'Energy is conserved. In thermodynamics, Q = W + dU is the first law.',
-    aiScore: 3.0, maxScore: 10, confidence: 0.78,
-    conceptScore: 2.0, detailScore: 1.0,
-    feedback: 'Only basic statement provided. Open system analysis absent. No derivation of SFEE or application to nozzle. Significant gaps in understanding of flow work and enthalpy.',
-    keywords: { found: ['Q = W', 'energy'], missing: ['SFEE', 'enthalpy', 'open system', 'isentropic', 'nozzle', 'exit velocity'] },
-    co: 'CO1', status: 'graded'
-  },
-]
+// No mock results - this list only ever holds real graded submissions
+// from /api/eval/theory. Previously seeded with hand-written fake
+// students/scores/feedback (Q-052, etc.) that never went away even after
+// real grading happened, since new results were only ever prepended.
 
 export default function TheoryEvaluator() {
-  const [results, setResults] = useState<any[]>(MOCK_RESULTS)
+  const [results, setResults] = useState<any[]>([])
   const [selected, setSelected] = useState<any | null>(null)
   const [overrideScore, setOverrideScore] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
   const [grading, setGrading] = useState(false)
   const [answerText, setAnswerText] = useState('')
+  const [answerId, setAnswerId] = useState('')
   const [question, setQuestion] = useState('State and derive the first law of thermodynamics for an open system.')
   const [subject, setSubject] = useState('Thermodynamics')
   const fileRef = useRef<HTMLInputElement>(null)
@@ -47,25 +23,33 @@ export default function TheoryEvaluator() {
     if (!answerText.trim()) { alert('Paste or type the student answer first.'); return }
     setGrading(true)
     try {
+      const body: any = answerId.trim()
+        ? { answer_id: answerId.trim(), student_answer: answerText }
+        : { question, student_answer: answerText, subject, model_answer: '', max_marks: 10 }
       const res = await fetch('/api/eval/theory', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, student_answer: answerText, subject, model_answer: '', max_marks: 10 })
+        body: JSON.stringify(body)
       })
       const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Grading failed')
       const newResult = {
-        student: `S-${Date.now()}`, name: 'Student', question: 'Custom',
+        student: 'Manual submission', question: data.questionId || 'Custom',
         answer: answerText,
-        aiScore: data.ai_score ?? 0, maxScore: data.max_score ?? 10,
+        aiScore: data.aiScore ?? 0, maxScore: data.maxScore ?? 10,
         confidence: data.confidence ?? 0,
-        conceptScore: data.concept_score ?? 0, detailScore: data.detail_score ?? 0,
+        keywordScore: data.keywordScore ?? 0, semanticScore: data.semanticScore ?? 0,
         feedback: data.feedback ?? '',
-        keywords: data.keywords || { found: [], missing: [], coverage_ratio: 0 },
-        co: 'CO1', status: 'graded'
+        explanation: data.explanation ?? '',
+        keywords: { found: data.matchedKeywords ?? [], missing: data.missingKeywords ?? [] },
+        answerId: data.answerId,
+        hadReferenceData: data.hadReferenceData,
+        co: data.co ?? null,
+        gradedAt: Date.now(),
       }
       setResults(prev => [newResult, ...prev])
       setSelected(newResult)
-    } catch { alert('Grading failed — is the backend running?') }
+    } catch (e: any) { alert(e.message || 'Grading failed — is the backend running?') }
     setGrading(false)
   }
 
@@ -78,10 +62,13 @@ export default function TheoryEvaluator() {
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Upload Submissions</h2>
             <div>
+              <label className="label">Answer ID (optional — grades against a real answer scheme)</label>
+              <input className="input mb-2 font-mono text-xs" value={answerId} onChange={e => setAnswerId(e.target.value)} placeholder="e.g. AK-20260624-A1B2C3" />
+              <p className="text-[10px] text-gray-400 mb-3">If set, Question/Subject below are ignored — grading uses the answer scheme's own reference answer.</p>
               <label className="label">Question</label>
-              <input className="input mb-2" value={question} onChange={e => setQuestion(e.target.value)} placeholder="Enter question text" />
+              <input className="input mb-2" value={question} onChange={e => setQuestion(e.target.value)} placeholder="Enter question text" disabled={!!answerId.trim()} />
               <label className="label">Subject</label>
-              <select className="select mb-2" value={subject} onChange={e => setSubject(e.target.value)}>
+              <select className="select mb-2" value={subject} onChange={e => setSubject(e.target.value)} disabled={!!answerId.trim()}>
                 <option>Thermodynamics</option>
                 <option>Strength of Materials</option>
                 <option>Fluid Mechanics</option>
@@ -104,14 +91,17 @@ export default function TheoryEvaluator() {
           <div className="card p-5">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Results ({results.length})</h2>
             <div className="space-y-2">
+              {results.length === 0 && (
+                <p className="text-xs text-gray-400">No submissions graded yet — paste an answer and click Grade.</p>
+              )}
               {results.map(r => (
                 <button
-                  key={r.student}
+                  key={r.gradedAt}
                   onClick={() => setSelected(r)}
-                  className={`w-full text-left p-3 rounded-lg border transition-colors ${selected?.student === r.student ? 'border-indigo-200 bg-indigo-50' : 'border-gray-100 bg-gray-50 hover:bg-gray-100'}`}
+                  className={`w-full text-left p-3 rounded-lg border transition-colors ${selected?.gradedAt === r.gradedAt ? 'border-indigo-200 bg-indigo-50' : 'border-gray-100 bg-gray-50 hover:bg-gray-100'}`}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-semibold text-gray-700">{r.name}</span>
+                    <span className="text-xs font-semibold text-gray-700">{r.question}</span>
                     <span className={`text-xs font-bold ${r.aiScore / r.maxScore >= 0.7 ? 'text-emerald-600' : r.aiScore / r.maxScore >= 0.4 ? 'text-amber-600' : 'text-red-600'}`}>
                       {r.aiScore}/{r.maxScore}
                     </span>
@@ -119,7 +109,7 @@ export default function TheoryEvaluator() {
                   <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
                     <div className={`h-full rounded-full ${r.aiScore / r.maxScore >= 0.7 ? 'bg-emerald-500' : r.aiScore / r.maxScore >= 0.4 ? 'bg-amber-400' : 'bg-red-500'}`} style={{ width: `${(r.aiScore / r.maxScore) * 100}%` }} />
                   </div>
-                  <p className="text-[10px] text-gray-400 mt-1">Confidence: {(r.confidence * 100).toFixed(0)}% · {r.co}</p>
+                  <p className="text-[10px] text-gray-400 mt-1">Confidence: {(r.confidence * 100).toFixed(0)}%{r.co ? ` · ${r.co}` : ''}</p>
                 </button>
               ))}
             </div>
@@ -140,8 +130,8 @@ export default function TheoryEvaluator() {
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-4">
                   <div>
-                    <h2 className="text-sm font-semibold text-gray-900">{selected.name} · {selected.student}</h2>
-                    <p className="text-xs text-gray-500">Question {selected.question} · {selected.co}</p>
+                    <h2 className="text-sm font-semibold text-gray-900">Question {selected.question}{selected.answerId ? ` · ${selected.answerId}` : ''}</h2>
+                    <p className="text-xs text-gray-500">{selected.co ? `${selected.co} · ` : ''}{selected.hadReferenceData ? 'Grounded grading' : 'Manual / ungrounded grading'}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-2xl font-bold text-gray-900">{selected.aiScore}<span className="text-sm font-normal text-gray-400">/{selected.maxScore}</span></p>
@@ -151,16 +141,27 @@ export default function TheoryEvaluator() {
                 {/* Score breakdown */}
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <div className="bg-gray-50 rounded-lg p-3">
-                    <p className="text-xs text-gray-500 mb-1">Concept Score</p>
-                    <p className="text-lg font-bold text-gray-800">{selected.conceptScore}<span className="text-xs text-gray-400">/5</span></p>
-                    <p className="text-xs text-gray-400">Core principle presence</p>
+                    <p className="text-xs text-gray-500 mb-1">Keyword Score</p>
+                    <p className="text-lg font-bold text-gray-800">{selected.keywordScore}<span className="text-xs text-gray-400">/{selected.maxScore}</span></p>
+                    <p className="text-xs text-gray-400">Terms matched from source material</p>
                   </div>
                   <div className="bg-gray-50 rounded-lg p-3">
-                    <p className="text-xs text-gray-500 mb-1">Detail Score</p>
-                    <p className="text-lg font-bold text-gray-800">{selected.detailScore}<span className="text-xs text-gray-400">/5</span></p>
-                    <p className="text-xs text-gray-400">Reasoning + terminology</p>
+                    <p className="text-xs text-gray-500 mb-1">Semantic Score</p>
+                    <p className="text-lg font-bold text-gray-800">{selected.semanticScore}<span className="text-xs text-gray-400">/{selected.maxScore}</span></p>
+                    <p className="text-xs text-gray-400">Similarity to reference answer</p>
                   </div>
                 </div>
+                {selected.explanation && (
+                  <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-3 mb-3">
+                    <p className="text-xs font-medium text-indigo-800 mb-1">Why this score — marks awarded / deducted</p>
+                    <p className="text-xs text-indigo-700">{selected.explanation}</p>
+                  </div>
+                )}
+                {selected.hadReferenceData === false && (
+                  <div className="bg-amber-50 border border-amber-100 rounded-lg p-2.5 mb-3">
+                    <p className="text-[11px] text-amber-700">No grounded reference answer was available — this score is ungrounded (manual mode).</p>
+                  </div>
+                )}
                 <div className="bg-amber-50 border border-amber-100 rounded-lg p-3">
                   <p className="text-xs font-medium text-amber-800 mb-1">AI Feedback</p>
                   <p className="text-xs text-amber-700">{selected.feedback}</p>

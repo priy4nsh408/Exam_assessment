@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, FileText, Brain, Calculator, PenTool,
-  BarChart3, Users, CheckSquare, BookOpen, Cpu
+  BarChart3, Users, CheckSquare, BookOpen, Cpu, Database
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -10,6 +10,7 @@ const navItems = [
   { label: 'Question Generator', icon: Brain, path: '/generate' },
   { label: 'Question Bank', icon: BookOpen, path: '/questions' },
   { label: 'Exam Papers', icon: FileText, path: '/exams' },
+  { label: 'Data Source', icon: Database, path: '/data-sources' },
   { divider: true, label: 'Evaluation' },
   { label: 'Theory Grader', icon: Brain, path: '/eval/theory' },
   { label: 'Numerical Grader', icon: Calculator, path: '/eval/numerical' },

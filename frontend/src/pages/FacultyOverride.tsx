@@ -2,12 +2,11 @@ import { useState, useEffect } from 'react'
 import { CheckCircle, XCircle, AlertTriangle } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 
-const PENDING = [
-  { id: 'S-031', student: 'Arjun Sharma', usn: '1RV23ME001', question: 'Q-052', type: 'Theory', aiScore: 7.5, maxScore: 10, confidence: 0.87, flag: 'low_confidence', co: 'CO1' },
-  { id: 'S-034', student: 'Kavitha Rao', usn: '1RV23ME004', question: 'Q-053', type: 'Numerical', aiScore: 4.0, maxScore: 10, confidence: 0.71, flag: 'low_confidence', co: 'CO2' },
-  { id: 'S-038', student: 'Ravi Kumar', usn: '1RV23ME008', question: 'Q-054', type: 'Theory', aiScore: 9.0, maxScore: 10, confidence: 0.95, flag: 'student_dispute', co: 'CO1' },
-  { id: 'S-041', student: 'Meena S', usn: '1RV23ME011', question: 'Q-055', type: 'Numerical', aiScore: 6.5, maxScore: 12, confidence: 0.68, flag: 'low_confidence', co: 'CO2' },
-]
+// No mock fixture - pending starts empty and is populated only by a real
+// /api/submissions?status=flagged response. Previously seeded with four
+// hand-written fake flagged submissions (including the same Q-052/Arjun
+// Sharma data shown in TheoryEvaluator.tsx) that displayed permanently
+// since nothing ever cleared them if the real fetch returned an empty list.
 
 const flagConfig: Record<string, { label: string; color: string }> = {
   low_confidence: { label: 'Low Confidence', color: 'bg-amber-50 text-amber-700 border-amber-200' },
@@ -15,7 +14,8 @@ const flagConfig: Record<string, { label: string; color: string }> = {
 }
 
 export default function FacultyOverride() {
-  const [pending, setPending] = useState(PENDING)
+  const [pending, setPending] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
   const [overrides, setOverrides] = useState<Record<string, { score: string; reason: string; done: boolean }>>({})
 
   useEffect(() => {
@@ -23,9 +23,10 @@ export default function FacultyOverride() {
       .then(r => r.json())
       .then(data => {
         const arr = data.submissions || data
-        if (Array.isArray(arr) && arr.length > 0) setPending(arr)
+        if (Array.isArray(arr)) setPending(arr)
       })
       .catch(() => {})
+      .finally(() => setLoading(false))
   }, [])
 
   const setField = (id: string, field: 'score' | 'reason', value: string) => {
@@ -62,6 +63,12 @@ export default function FacultyOverride() {
         </div>
 
         <div className="space-y-3">
+          {loading && <p className="text-sm text-gray-400">Loading flagged submissions…</p>}
+          {!loading && pending.length === 0 && (
+            <div className="card p-8 text-center">
+              <p className="text-sm text-gray-400">No submissions currently flagged for review.</p>
+            </div>
+          )}
           {pending.map(sub => {
             const ov = overrides[sub.id]
             const done = ov?.done
