@@ -1,0 +1,828 @@
+"""
+Unified answer evaluation engine with OCR support.
+
+Replaces the separate theory_evaluator, numerical_grader, and
+drawing_evaluator with a single entry point that:
+
+1. Accepts an uploaded answer-paper image OR typed text
+2. Runs OCR (LLaVA vision model via Ollama) to extract student text
+3. Auto-detects question type if not specified
+4. Scores using keyword coverage + semantic similarity
+5. For numerical: checks formula presence (-1 if missing) and final answer
+6. For drawing: runs VLM interpretation + IS/BIS compliance
+7. Universal rule: if the question requires a mathematical equation and
+   the student didn't write one, deduct 1 mark
+"""
+
+import os
+import re
+import json
+import base64
+from typing import Optional, List
+from pathlib import Path
+
+try:
+    import ollama
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
+try:
+    from sentence_transformers import SentenceTransformer
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava")
+
+# ── Stopwords for keyword extraction ─────────────────────────────────────────
+
+STOPWORDS = {
+    "the", "and", "for", "are", "but", "not", "you", "your", "with", "this",
+    "that", "from", "have", "has", "had", "was", "were", "will", "would",
+    "could", "should", "can", "their", "they", "them", "then", "than",
+    "what", "when", "where", "which", "while", "about", "into", "such",
+    "these", "those", "also", "each", "other", "some", "more", "most",
+    "between", "being", "after", "before", "during", "over", "under",
+    "above", "below", "because", "explain", "describe", "discuss",
+    "define", "state", "derive", "calculate", "given", "using", "used",
+    "use", "following", "based", "respect", "various", "different",
+    "example", "examples", "question", "answer", "system", "value",
+    "values", "case", "type", "types", "called", "known", "general",
+}
+
+# ── OCR via LLaVA Vision Model ───────────────────────────────────────────────
+
+def preprocess_image(image_path: str) -> Optional[str]:
+    """OpenCV preprocessing: grayscale → CLAHE → adaptive threshold → denoise.
+    Saves preprocessed image and returns its path."""
+    if not CV2_AVAILABLE or not image_path or not Path(image_path).exists():
+        return None
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        edges = cv2.Canny(enhanced, 50, 150, apertureSize=3)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, 100)
+        if lines is not None:
+            angles = [line[0][1] for line in lines[:10]]
+            median_angle = np.median(angles) - np.pi / 2
+            if abs(median_angle) < 0.1:
+                h, w = enhanced.shape
+                M = cv2.getRotationMatrix2D((w // 2, h // 2), np.degrees(median_angle), 1.0)
+                enhanced = cv2.warpAffine(enhanced, M, (w, h), flags=cv2.INTER_CUBIC,
+                                          borderMode=cv2.BORDER_REPLICATE)
+
+        thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, 11, 2)
+        kernel = np.ones((2, 2), np.uint8)
+        cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+        preprocessed_path = image_path.rsplit(".", 1)[0] + "_preprocessed.png"
+        cv2.imwrite(preprocessed_path, cleaned)
+        return preprocessed_path
+    except Exception:
+        return None
+
+
+def image_to_base64(image_path: str) -> Optional[str]:
+    try:
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    except Exception:
+        return None
+
+
+def ocr_with_vlm(image_path: str) -> dict:
+    """Extract text from a student answer paper using LLaVA via Ollama.
+    Returns {text, equations, has_diagram, method}."""
+    if not OLLAMA_AVAILABLE:
+        return {"text": "", "equations": [], "has_diagram": False, "method": "none"}
+
+    img_b64 = image_to_base64(image_path)
+    if not img_b64:
+        return {"text": "", "equations": [], "has_diagram": False, "method": "none"}
+
+    prompt = """You are an OCR system reading a student's handwritten/printed answer paper.
+
+Extract ALL text from this image. Include:
+1. All written text exactly as it appears
+2. All mathematical equations and formulas (write them in plain text, e.g. F = ma, η = 1 - T2/T1)
+3. Note if there are any diagrams or drawings
+
+Respond ONLY in this JSON format:
+{
+  "extracted_text": "the full text content of the answer",
+  "equations": ["list of mathematical equations found"],
+  "has_diagram": true/false,
+  "diagram_description": "brief description of any diagram if present, or null"
+}
+
+Output ONLY valid JSON. No explanation or markdown."""
+
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_VISION_MODEL,
+            messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
+            options={"temperature": 0.1},
+        )
+        text = resp["message"]["content"].strip()
+        parsed = _parse_json(text)
+        if parsed:
+            return {
+                "text": parsed.get("extracted_text", ""),
+                "equations": parsed.get("equations", []),
+                "has_diagram": parsed.get("has_diagram", False),
+                "diagram_description": parsed.get("diagram_description"),
+                "method": "llava",
+            }
+    except Exception:
+        pass
+
+    return {"text": "", "equations": [], "has_diagram": False, "method": "none"}
+
+
+# ── Drawing-specific VLM interpretation ──────────────────────────────────────
+
+IS_RULES = [
+    {
+        "id": "IS696-6.3", "clause": "IS 696:1972 Clause 6.3",
+        "description": "First angle projection must be used in Indian engineering drawings",
+        "check_key": "projection_angle", "invalid_values": ["third_angle", "third angle"],
+        "severity": "major", "deduction": 4,
+    },
+    {
+        "id": "IS696-5.1", "clause": "IS 696:1972 Clause 5.1",
+        "description": "All three principal views (front, top, side) must be present",
+        "check_key": "views_detected", "min_count": 2,
+        "severity": "major", "deduction": 5,
+    },
+    {
+        "id": "IS919-4.1", "clause": "IS 919:1993 Clause 4.1",
+        "description": "Dimensional tolerance notation must follow standard form",
+        "check_key": "tolerances", "pattern_check": True,
+        "severity": "minor", "deduction": 1,
+    },
+    {
+        "id": "SP46-8.2", "clause": "SP:46:2003 Section 8.2",
+        "description": "Title block must include drawing number, scale, and date",
+        "check_key": "title_block", "required_fields": ["drawing_no", "scale", "date"],
+        "severity": "minor", "deduction": 1,
+    },
+    {
+        "id": "IS3073-3.1", "clause": "IS 3073:1967 Clause 3.1",
+        "description": "Surface finish symbols must follow IS 3073 notation",
+        "check_key": "surface_finish", "severity": "minor", "deduction": 1,
+    },
+]
+
+
+def vlm_interpret_drawing(image_path: str) -> dict:
+    """Uses LLaVA to interpret an engineering drawing and return structured JSON."""
+    if not OLLAMA_AVAILABLE:
+        return _fallback_drawing_vlm()
+
+    img_b64 = image_to_base64(image_path)
+    if not img_b64:
+        return _fallback_drawing_vlm()
+
+    prompt = """Analyze this engineering drawing and return ONLY a JSON object:
+{
+  "view_type": "orthographic" or "isometric" or "perspective",
+  "projection_angle": "first_angle" or "third_angle" or "unknown",
+  "views_detected": ["front", "top", "side"],
+  "dimensions": ["45mm", "30mm"],
+  "labeled_parts": ["shaft", "bearing"],
+  "tolerances": ["50±0.5"],
+  "GDT_symbols": ["perpendicularity"],
+  "surface_finish": ["Ra 3.2"],
+  "title_block": {"drawing_no": null, "scale": "1:1", "material": null, "date": null}
+}
+Return ONLY valid JSON."""
+
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_VISION_MODEL,
+            messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
+            options={"temperature": 0.2},
+        )
+        parsed = _parse_json(resp["message"]["content"].strip())
+        if parsed:
+            return parsed
+    except Exception:
+        pass
+    return _fallback_drawing_vlm()
+
+
+def _fallback_drawing_vlm() -> dict:
+    return {
+        "view_type": "orthographic", "projection_angle": "unknown",
+        "views_detected": ["front", "top"], "dimensions": [], "labeled_parts": [],
+        "tolerances": [], "GDT_symbols": [], "surface_finish": [],
+        "title_block": {"drawing_no": None, "scale": None, "material": None, "date": None},
+    }
+
+
+def check_compliance(vlm_output: dict) -> list:
+    violations = []
+    for rule in IS_RULES:
+        key = rule["check_key"]
+        if key == "projection_angle":
+            angle = vlm_output.get("projection_angle", "").lower()
+            if angle in rule.get("invalid_values", []):
+                violations.append({"rule_id": rule["id"], "clause": rule["clause"],
+                                   "issue": rule["description"], "severity": rule["severity"],
+                                   "deduction": rule["deduction"], "found": angle})
+        elif key == "views_detected":
+            views = vlm_output.get("views_detected", [])
+            if len(views) < rule.get("min_count", 2):
+                violations.append({"rule_id": rule["id"], "clause": rule["clause"],
+                                   "issue": f"Only {len(views)} view(s) detected — minimum {rule['min_count']} required",
+                                   "severity": rule["severity"], "deduction": rule["deduction"], "found": views})
+        elif key == "tolerances" and rule.get("pattern_check"):
+            for t in vlm_output.get("tolerances", []):
+                if re.search(r'[±]\s*\.\d', t):
+                    violations.append({"rule_id": rule["id"], "clause": rule["clause"],
+                                       "issue": f"Non-standard tolerance notation: '{t}'",
+                                       "severity": rule["severity"], "deduction": rule["deduction"], "found": t})
+                    break
+        elif key == "title_block":
+            tb = vlm_output.get("title_block", {})
+            missing = [f for f in rule.get("required_fields", []) if not tb.get(f)]
+            if missing:
+                violations.append({"rule_id": rule["id"], "clause": rule["clause"],
+                                   "issue": f"Title block missing: {', '.join(missing)}",
+                                   "severity": rule["severity"], "deduction": rule["deduction"], "found": tb})
+    return violations
+
+
+# ── Keyword & Semantic Scoring ───────────────────────────────────────────────
+
+def extract_keywords(text: str, top_n: int = 15) -> list:
+    if not text:
+        return []
+    tokens = re.findall(r"[A-Za-z][A-Za-z\-']{2,}", text)
+    freq = {}
+    for tok in tokens:
+        lt = tok.lower().strip("-'")
+        if len(lt) < 4 or lt in STOPWORDS:
+            continue
+        freq[lt] = freq.get(lt, 0) + 1
+    ranked = sorted(freq.items(), key=lambda kv: (-kv[1], -len(kv[0])))
+    return [word for word, _ in ranked[:top_n]]
+
+
+def keyword_coverage(student_text: str, reference_text: str, top_n: int = 15) -> dict:
+    keywords = extract_keywords(reference_text, top_n=top_n)
+    student_lower = student_text.lower()
+    found = [k for k in keywords if k in student_lower]
+    missing = [k for k in keywords if k not in found]
+    return {
+        "keywords_considered": keywords, "found": found, "missing": missing,
+        "matched_count": len(found), "total_count": len(keywords),
+        "coverage_ratio": len(found) / max(len(keywords), 1),
+    }
+
+
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None and EMBEDDINGS_AVAILABLE:
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedding_model
+
+
+def cosine_sim(a, b) -> float:
+    if not EMBEDDINGS_AVAILABLE:
+        return 0.5
+    import numpy as np
+    a, b = np.array(a), np.array(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+
+
+def semantic_similarity(student_text: str, reference_text: str) -> float:
+    if not reference_text or not student_text:
+        return 0.5
+    if not EMBEDDINGS_AVAILABLE:
+        return 0.5
+    model = get_embedding_model()
+    if not model:
+        return 0.5
+    return cosine_sim(model.encode(reference_text), model.encode(student_text))
+
+
+# ── Equation / Formula Detection ─────────────────────────────────────────────
+
+_EQ_PATTERN = re.compile(r'[A-Za-zΔδηρσμπ%]{1,8}(?:\s*\([^)]*\))?\s*=\s*[^=\n.;]{2,60}')
+_NUM_PATTERN = re.compile(r'-?\d+(?:\.\d+)?(?:\s*[eE][-+]?\d+)?\s*[a-zA-Z°%/]{0,6}')
+
+
+def extract_equations(text: str) -> list:
+    if not text:
+        return []
+    return [m.group().strip() for m in _EQ_PATTERN.finditer(text)]
+
+
+def extract_final_number(text: str) -> Optional[str]:
+    if not text:
+        return None
+    matches = _NUM_PATTERN.findall(text)
+    return matches[-1].strip() if matches else None
+
+
+def _parse_number(token: str):
+    m = re.match(r'(-?\d+(?:\.\d+)?)\s*([a-zA-Z°%/]*)', token.strip())
+    if not m:
+        return None
+    return float(m.group(1)), m.group(2).lower()
+
+
+def question_requires_equation(question: str) -> bool:
+    """Detect if the question asks the student to use/derive/write a mathematical equation."""
+    if not question:
+        return False
+    eq_cues = [
+        r'\bderive\b', r'\bformula\b', r'\bequation\b', r'\bcalculate\b',
+        r'\bcompute\b', r'\bsolve\b', r'\bnumerical\b', r'\bfind the value\b',
+        r'\bdetermine\b', r'\busing .{0,30}equation\b', r'\bapply .{0,30}formula\b',
+        r'\bprove\b', r'\bshow that\b', r'\bexpression\b',
+    ]
+    return any(re.search(pat, question, re.IGNORECASE) for pat in eq_cues)
+
+
+def equation_present_in_answer(student_text: str, reference_text: str = "",
+                                expected_formula: str = "") -> bool:
+    """Check if the student wrote at least one equation."""
+    student_eqs = extract_equations(student_text)
+    if not student_eqs:
+        return False
+    if not expected_formula and not reference_text:
+        return True
+    ref_eq_source = expected_formula or " ".join(extract_equations(reference_text))
+    if not ref_eq_source:
+        return True
+    ref_tokens = {t.lower() for t in re.findall(r'[A-Za-zΔδηρσμπ]{1,8}', ref_eq_source) if len(t) <= 8}
+    student_tokens = {t.lower() for t in re.findall(r'[A-Za-zΔδηρσμπ]{1,8}', " ".join(student_eqs))}
+    return len(ref_tokens & student_tokens) > 0
+
+
+def final_answer_correct(student_text: str, reference_text: str,
+                          expected_final: str = "", tolerance: float = 0.02) -> bool:
+    expected = expected_final or extract_final_number(reference_text)
+    if not expected:
+        return True
+    exp = _parse_number(expected)
+    got = _parse_number(extract_final_number(student_text) or "")
+    if not exp or not got:
+        return False
+    if exp[0] == 0:
+        return abs(got[0]) < 1e-6
+    return abs(got[0] - exp[0]) / abs(exp[0]) <= tolerance
+
+
+# ── Question Type Auto-Detection ─────────────────────────────────────────────
+
+def detect_question_type(question: str, has_diagram: bool = False) -> str:
+    q = question.lower()
+    if has_diagram:
+        return "drawing"
+    drawing_cues = ["draw", "sketch", "diagram", "engineering drawing", "orthographic",
+                    "isometric", "projection", "front view", "top view", "side view"]
+    if any(cue in q for cue in drawing_cues):
+        return "drawing"
+    numerical_cues = ["calculate", "compute", "find the value", "determine the",
+                      "solve", "numerical", "how much", "how many", "what is the value"]
+    if any(cue in q for cue in numerical_cues):
+        return "numerical"
+    return "theory"
+
+
+# ── LLM Step Grading for Numerical ───────────────────────────────────────────
+
+def _llm_grade_steps(question: str, student_solution: str, reference_answer: str,
+                     subject: str, max_marks: int) -> Optional[dict]:
+    if not OLLAMA_AVAILABLE:
+        return None
+
+    prompt = f"""You are an expert {subject} professor grading a numerical solution.
+
+QUESTION: {question}
+
+{"REFERENCE SOLUTION:" + chr(10) + reference_answer if reference_answer else ""}
+
+STUDENT SOLUTION:
+{student_solution}
+
+Evaluate each step EXCLUDING formula check and final answer check (handled separately).
+Focus on: substitution of values, unit handling, arithmetic, boundary conditions.
+
+Respond ONLY in JSON:
+{{
+  "steps": [
+    {{
+      "step": 1, "description": "What this step calculates",
+      "student_work": "What student wrote", "expected": "Correct value",
+      "correct": true/false,
+      "error_type": "correct" or "substitution_error" or "unit_error" or "arithmetic_error" or "boundary_condition_error",
+      "marks": <max for step>, "earned": <earned>,
+      "explanation": "Brief explanation"
+    }}
+  ],
+  "total_earned": <sum>, "total_marks": <sum>,
+  "feedback": "1-2 sentences on working quality",
+  "confidence": <0.0-1.0>
+}}
+Output ONLY raw JSON."""
+
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.2},
+        )
+        result = _parse_json(resp["message"]["content"].strip())
+        if result:
+            total_m = result.get("total_marks", max_marks) or max_marks
+            total_e = result.get("total_earned", 0)
+            result["ai_score"] = round((total_e / total_m) * max_marks, 1)
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _heuristic_grade_steps(student_solution: str, max_marks: int) -> dict:
+    lines = [l.strip() for l in student_solution.split("\n") if l.strip()]
+    step_count = max(len(lines), 3)
+    marks_per_step = round(max_marks / step_count, 1)
+    steps = []
+    earned_total = 0
+    for i, line in enumerate(lines[:step_count]):
+        has_calc = bool(re.search(r'=\s*[\d\.\-]', line))
+        earned = marks_per_step if has_calc else marks_per_step * 0.5
+        earned_total += earned
+        steps.append({
+            "step": i + 1, "description": f"Step {i+1}",
+            "student_work": line, "expected": "See reference",
+            "correct": has_calc, "error_type": "correct" if has_calc else "arithmetic_error",
+            "marks": marks_per_step, "earned": round(earned, 1),
+            "explanation": "Heuristic evaluation — LLM not available",
+        })
+    return {
+        "steps": steps, "total_earned": round(earned_total, 1), "total_marks": max_marks,
+        "ai_score": round(min(earned_total, max_marks), 1),
+        "feedback": "Heuristic evaluation — connect Ollama for full step-level grading.",
+        "confidence": 0.4,
+    }
+
+
+# ── LLM Feedback (optional, never affects score) ────────────────────────────
+
+def _llm_feedback(question: str, reference: str, student_text: str,
+                  kw: dict, similarity: float, subject: str) -> str:
+    if not OLLAMA_AVAILABLE:
+        return ""
+    prompt = f"""You are an expert {subject or 'engineering'} professor.
+A student's answer was auto-graded against the source material.
+
+QUESTION: {question}
+REFERENCE: {reference}
+STUDENT ANSWER: {student_text}
+
+Matched keywords: {', '.join(kw['found']) or 'none'}
+Missing keywords: {', '.join(kw['missing']) or 'none'}
+Semantic similarity: {similarity:.0%}
+
+Write 2-3 sentences of specific, constructive feedback. No JSON."""
+
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.3},
+        )
+        return resp["message"]["content"].strip()
+    except Exception:
+        return ""
+
+
+# ── Drawing rubric helpers ───────────────────────────────────────────────────
+
+_DIM_PATTERN = re.compile(r'-?\d+(?:\.\d+)?\s*(?:mm|cm|m|in|inch|kg|N|kN|MPa|GPa|°|deg|rpm)\b', re.IGNORECASE)
+
+def extract_expected_dimensions(question: str) -> List[str]:
+    if not question:
+        return []
+    return [m.group().strip() for m in _DIM_PATTERN.finditer(question)]
+
+def extract_expected_parts(question: str) -> List[str]:
+    if not question:
+        return []
+    m = re.search(
+        r'(?:showing|label(?:l?ing)?|comprising|consisting of|indicating|with)\s+(?:the\s+)?([^.?!]+)',
+        question, re.IGNORECASE,
+    )
+    if not m:
+        return []
+    chunk = re.sub(r'\band\b', ',', m.group(1), flags=re.IGNORECASE)
+    parts = []
+    for raw in chunk.split(","):
+        candidate = re.sub(r'^\s*(the|a|an)\s+', '', raw.strip(" ."), flags=re.IGNORECASE)
+        if not candidate or re.search(r'\d', candidate):
+            break
+        if len(candidate.split()) <= 4:
+            parts.append(candidate)
+    return parts
+
+
+def _parse_dim(token: str):
+    m = re.match(r'(-?\d+(?:\.\d+)?)\s*([a-zA-Z°]*)', token.strip())
+    if not m:
+        return None
+    return float(m.group(1)), m.group(2).lower()
+
+
+# ── JSON Parsing ─────────────────────────────────────────────────────────────
+
+def _extract_json_block(text: str) -> Optional[str]:
+    if not text:
+        return None
+    cleaned = re.sub(r'```(?:json)?', '', text).strip()
+    start = cleaned.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(cleaned)):
+        if cleaned[i] == '{':
+            depth += 1
+        elif cleaned[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return cleaned[start:i + 1]
+    return None
+
+
+def _parse_json(text: str) -> Optional[dict]:
+    block = _extract_json_block(text)
+    if not block:
+        return None
+    try:
+        return json.loads(block)
+    except Exception:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN UNIFIED EVALUATOR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def evaluate(
+    question: str,
+    student_answer: str = "",
+    answer_image_path: Optional[str] = None,
+    reference_answer: str = "",
+    max_marks: int = 10,
+    subject: str = "",
+    question_type: str = "auto",
+    expected_formula: str = "",
+    expected_final_answer: str = "",
+    expected_parts: Optional[List[str]] = None,
+    expected_dimensions: Optional[List[str]] = None,
+    keyword_weight: float = 0.4,
+    semantic_weight: float = 0.6,
+    skip_llm_feedback: bool = False,
+) -> dict:
+    """
+    Unified evaluation entry point.
+
+    Accepts either typed student_answer text OR an answer_image_path
+    (photograph of the answer paper). If an image is provided, OCR
+    extracts the text first.
+
+    Scoring:
+      - Theory: keyword_weight * keyword_coverage + semantic_weight * semantic_similarity
+      - Numerical: step-level grading + formula check (-1) + final answer check (-1)
+      - Drawing: VLM interpretation + IS/BIS compliance + part/dimension rubric
+      - Universal: if question requires an equation and student didn't write one → -1 mark
+
+    Returns a unified result dict with all scoring details.
+    """
+
+    ocr_result = None
+    preprocessed = False
+
+    # ── Step 1: OCR if image provided ────────────────────────────────────
+    if answer_image_path and Path(answer_image_path).exists():
+        prep_path = preprocess_image(answer_image_path)
+        preprocessed = prep_path is not None
+
+        ocr_result = ocr_with_vlm(answer_image_path)
+        if ocr_result["text"]:
+            student_answer = ocr_result["text"]
+
+    # ── Step 2: Detect question type ─────────────────────────────────────
+    has_diagram = (ocr_result or {}).get("has_diagram", False)
+    if question_type == "auto":
+        question_type = detect_question_type(question, has_diagram)
+
+    # ── Step 3: Score based on type ──────────────────────────────────────
+    result = {}
+
+    if question_type == "drawing":
+        result = _evaluate_drawing(
+            question, answer_image_path, reference_answer, max_marks,
+            expected_parts, expected_dimensions,
+        )
+    elif question_type == "numerical":
+        result = _evaluate_numerical(
+            question, student_answer, reference_answer, max_marks,
+            subject, expected_formula, expected_final_answer,
+        )
+    else:
+        result = _evaluate_theory(
+            question, student_answer, reference_answer, max_marks,
+            subject, keyword_weight, semantic_weight, skip_llm_feedback,
+        )
+
+    # ── Step 4: Universal equation deduction ─────────────────────────────
+    # If the question requires a mathematical equation and the student
+    # didn't write one, deduct 1 mark (applies to ALL question types)
+    eq_required = question_requires_equation(question)
+    eq_present = equation_present_in_answer(
+        student_answer, reference_answer, expected_formula
+    )
+    eq_deducted = False
+
+    if eq_required and not eq_present and question_type != "drawing":
+        result["ai_score"] = max(0.0, round(result["ai_score"] - 1.0, 1))
+        eq_deducted = True
+        result["feedback"] = (result.get("feedback", "") +
+            " Mathematical equation/formula was required but not found in the answer (-1 mark).")
+        result["explanation"] = (result.get("explanation", "") +
+            " Deducted 1 mark: the question required a mathematical equation but none was written.")
+
+    # ── Step 5: Build unified response ───────────────────────────────────
+    result.update({
+        "question_type": question_type,
+        "ocr_used": ocr_result is not None,
+        "ocr_method": (ocr_result or {}).get("method", "none"),
+        "ocr_text": (ocr_result or {}).get("text", ""),
+        "preprocessed": preprocessed,
+        "equation_required": eq_required,
+        "equation_present": eq_present,
+        "equation_deducted": eq_deducted,
+    })
+
+    return result
+
+
+# ── Type-specific scoring functions ──────────────────────────────────────────
+
+def _evaluate_theory(question: str, student_answer: str, reference_answer: str,
+                     max_marks: int, subject: str,
+                     kw_weight: float, sem_weight: float,
+                     skip_feedback: bool) -> dict:
+    reference_answer = reference_answer or ""
+    kw = keyword_coverage(student_answer, reference_answer)
+    similarity = semantic_similarity(student_answer, reference_answer)
+
+    blended = kw_weight * kw["coverage_ratio"] + sem_weight * similarity
+    ai_score = max(0.0, min(round(blended * max_marks, 1), max_marks))
+
+    feedback = "" if skip_feedback else _llm_feedback(question, reference_answer, student_answer, kw, similarity, subject)
+    if not feedback:
+        feedback = (f"Matched {kw['matched_count']}/{kw['total_count']} key terms "
+                    f"({kw['coverage_ratio']:.0%} coverage). "
+                    f"Semantic similarity: {similarity:.0%}.")
+
+    confidence = round(min(0.95, 0.5 + similarity * 0.3 + kw["coverage_ratio"] * 0.2), 2)
+
+    kw_marks = round(kw["coverage_ratio"] * kw_weight * max_marks, 1)
+    sem_marks = round(similarity * sem_weight * max_marks, 1)
+    explanation = (
+        f"Keyword coverage: {kw['matched_count']}/{kw['total_count']} terms matched "
+        f"({kw_marks}/{round(kw_weight * max_marks, 1)} marks). "
+        f"Semantic similarity: {similarity:.0%} ({sem_marks}/{round(sem_weight * max_marks, 1)} marks). "
+        f"Missing terms: {', '.join(kw['missing']) or 'none'}. "
+        f"Total: {ai_score}/{max_marks}."
+    )
+
+    return {
+        "ai_score": ai_score, "max_score": max_marks,
+        "keyword_score": round(kw["coverage_ratio"] * max_marks, 1),
+        "semantic_score": round(similarity * max_marks, 1),
+        "confidence": confidence, "feedback": feedback, "explanation": explanation,
+        "keywords": kw, "similarity": round(similarity, 3),
+    }
+
+
+def _evaluate_numerical(question: str, student_solution: str, reference_answer: str,
+                        max_marks: int, subject: str,
+                        expected_formula: str, expected_final: str) -> dict:
+    step_result = _llm_grade_steps(question, student_solution, reference_answer, subject, max_marks)
+    if step_result is None:
+        step_result = _heuristic_grade_steps(student_solution, max_marks)
+
+    base_score = step_result["ai_score"]
+    has_formula = equation_present_in_answer(student_solution, reference_answer, expected_formula)
+    answer_ok = final_answer_correct(student_solution, reference_answer, expected_final)
+
+    deductions = 0.0
+    deduction_reasons = []
+    if not has_formula:
+        deductions += 1.0
+        deduction_reasons.append("Formula/equation not mentioned (-1)")
+    if not answer_ok:
+        deductions += 1.0
+        deduction_reasons.append("Final answer does not match expected value (-1)")
+
+    ai_score = max(0.0, min(round(base_score - deductions, 1), max_marks))
+
+    feedback = step_result.get("feedback", "")
+    if deduction_reasons:
+        feedback = (feedback + " " if feedback else "") + " ".join(deduction_reasons)
+
+    lines = [f"Step-level score: {base_score}/{max_marks}."]
+    if not has_formula:
+        lines.append("Deducted 1 mark: expected formula not written.")
+    if not answer_ok:
+        lines.append("Deducted 1 mark: final answer incorrect.")
+    if has_formula and answer_ok:
+        lines.append("No deductions: formula present and final answer correct.")
+    lines.append(f"Total: {ai_score}/{max_marks}.")
+
+    step_result.update({
+        "ai_score": ai_score, "max_score": max_marks, "base_score": base_score,
+        "formula_mentioned": has_formula, "final_answer_correct": answer_ok,
+        "deductions": round(deductions, 1), "feedback": feedback,
+        "explanation": " ".join(lines),
+        "confidence": step_result.get("confidence", 0.5),
+    })
+    return step_result
+
+
+def _evaluate_drawing(question: str, image_path: Optional[str], reference_answer: str,
+                      max_marks: int, expected_parts: Optional[List[str]],
+                      expected_dimensions: Optional[List[str]]) -> dict:
+    vlm_output = vlm_interpret_drawing(image_path) if image_path else _fallback_drawing_vlm()
+    violations = check_compliance(vlm_output)
+    violation_ded = sum(v["deduction"] for v in violations)
+
+    exp_parts = expected_parts if expected_parts is not None else extract_expected_parts(question)
+    exp_dims = expected_dimensions if expected_dimensions is not None else extract_expected_dimensions(question)
+
+    detected_parts_lower = [p.lower() for p in (vlm_output.get("labeled_parts") or [])]
+    detected_dims = vlm_output.get("dimensions") or []
+
+    missing_parts = [p for p in exp_parts if not any(p.lower() in dp or dp in p.lower() for dp in detected_parts_lower)]
+    missing_dims = [d for d in exp_dims if d not in detected_dims]
+
+    part_ded = 1.0 * len(missing_parts)
+    dim_ded = 0.5 * len(missing_dims)
+    total_ded = round(part_ded + dim_ded + violation_ded, 1)
+    ai_score = max(0.0, min(round(max_marks - total_ded, 1), max_marks))
+
+    lines = [f"Started from {max_marks} marks."]
+    if missing_parts:
+        lines.append(f"Missing part(s): {', '.join(missing_parts)} (-{part_ded}).")
+    if missing_dims:
+        lines.append(f"Missing dimension(s): {', '.join(missing_dims)} (-{dim_ded}).")
+    if violations:
+        lines.append(f"IS/BIS violations: {violation_ded} mark(s) deducted.")
+    if not (missing_parts or missing_dims or violations):
+        lines.append("No deductions.")
+    lines.append(f"Total: {ai_score}/{max_marks}.")
+
+    feedback_parts = []
+    if missing_parts:
+        feedback_parts.append(f"Missing: {', '.join(missing_parts)}.")
+    if missing_dims:
+        feedback_parts.append(f"Missing dimensions: {', '.join(missing_dims)}.")
+    if violations:
+        feedback_parts.append(f"{len(violations)} IS/BIS violation(s).")
+    if not feedback_parts:
+        feedback_parts.append("All expected elements present. Drawing meets standards.")
+
+    return {
+        "ai_score": ai_score, "max_score": max_marks,
+        "confidence": 0.75 if image_path else 0.5,
+        "feedback": " ".join(feedback_parts), "explanation": " ".join(lines),
+        "vlm_output": vlm_output, "violations": violations,
+        "violation_deductions": violation_ded,
+        "expected_parts": exp_parts, "expected_dimensions": exp_dims,
+        "missing_parts": missing_parts, "missing_dimensions": missing_dims,
+        "total_deductions": total_ded,
+    }

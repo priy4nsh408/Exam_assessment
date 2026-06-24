@@ -5,9 +5,7 @@ import QuestionGenerator from './pages/QuestionGenerator'
 import QuestionBank from './pages/QuestionBank'
 import ExamPapers from './pages/ExamPapers'
 import DataSource from './pages/DataSource'
-import TheoryEvaluator from './pages/TheoryEvaluator'
-import NumericalGrader from './pages/NumericalGrader'
-import DrawingEvaluator from './pages/DrawingEvaluator'
+import Evaluator from './pages/Evaluator'
 import COPOAnalytics from './pages/COPOAnalytics'
 import Students from './pages/Students'
 import FacultyOverride from './pages/FacultyOverride'
@@ -22,9 +20,7 @@ export default function App() {
           <Route path="questions" element={<QuestionBank />} />
           <Route path="exams" element={<ExamPapers />} />
           <Route path="data-sources" element={<DataSource />} />
-          <Route path="eval/theory" element={<TheoryEvaluator />} />
-          <Route path="eval/numerical" element={<NumericalGrader />} />
-          <Route path="eval/drawing" element={<DrawingEvaluator />} />
+          <Route path="evaluate" element={<Evaluator />} />
           <Route path="analytics" element={<COPOAnalytics />} />
           <Route path="students" element={<Students />} />
           <Route path="override" element={<FacultyOverride />} />

@@ -42,6 +42,12 @@ except ImportError:
     NUMERICAL_EVAL_AVAILABLE = False
 
 try:
+    from evaluation.unified_evaluator import evaluate as unified_evaluate
+    UNIFIED_EVAL_AVAILABLE = True
+except ImportError:
+    UNIFIED_EVAL_AVAILABLE = False
+
+try:
     from generation.langgraph_pipeline import (
         run_pipeline,
         run_pipeline_for_specs as _db_run_pipeline_for_specs,
@@ -133,6 +139,19 @@ class NumericalEvalRequest(BaseModel):
     expected_formula: Optional[str] = ""
     expected_final_answer: Optional[str] = ""
     max_marks: Optional[int] = 10
+
+class UnifiedEvalRequest(BaseModel):
+    """Unified evaluation: accepts text or image, auto-detects question type."""
+    student_answer: Optional[str] = ""
+    answer_id: Optional[str] = None
+    question_id: Optional[str] = None
+    question: Optional[str] = ""
+    subject: Optional[str] = ""
+    reference_answer: Optional[str] = ""
+    max_marks: Optional[int] = 10
+    question_type: Optional[str] = "auto"
+    expected_formula: Optional[str] = ""
+    expected_final_answer: Optional[str] = ""
 
 class QuestionSpecRequest(BaseModel):
     bloom_level: int
@@ -1308,6 +1327,74 @@ async def eval_numerical(body: NumericalEvalRequest):
     _log_activity_safe(
         action=f"Graded 1 numerical submission ({result.get('ai_score')}/{result.get('max_score')})",
         activity_type="grade", subject=ref.get("subject", ""), detail=ref.get("question_id") or "",
+    )
+    return result
+
+
+# ── Unified Evaluation Endpoint ──────────────────────────────────────────────
+
+@app.post("/api/eval/unified")
+async def eval_unified(
+    file: UploadFile = File(None),
+    student_answer: str = Form(""),
+    answer_id: str = Form(""),
+    question_id: str = Form(""),
+    question: str = Form(""),
+    subject: str = Form(""),
+    reference_answer: str = Form(""),
+    max_marks: int = Form(10),
+    question_type: str = Form("auto"),
+    expected_formula: str = Form(""),
+    expected_final_answer: str = Form(""),
+):
+    """
+    Unified evaluation endpoint. Accepts:
+    - An uploaded answer paper image (OCR extracts text via LLaVA)
+    - OR typed student_answer text
+    - Auto-detects question type (theory/numerical/drawing) or accepts explicit type
+    - Applies universal equation deduction: if question requires math formula and
+      student didn't write one, deducts 1 mark
+    """
+    if not UNIFIED_EVAL_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Unified evaluator not available")
+
+    image_path = None
+    if file and file.filename:
+        upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        image_path = str(upload_dir / file.filename)
+        with open(image_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+    ref = _resolve_grading_reference(
+        answer_id=answer_id or None, question_id=question_id or None,
+        question_fallback=question or "", subject_fallback=subject or "",
+        reference_fallback=reference_answer or "",
+        max_marks_fallback=max_marks or 10,
+    )
+
+    result = unified_evaluate(
+        question=ref["question_text"] or question,
+        student_answer=student_answer,
+        answer_image_path=image_path,
+        reference_answer=ref["reference_answer"] or reference_answer,
+        max_marks=ref["max_marks"] or max_marks,
+        subject=ref["subject"] or subject,
+        question_type=question_type,
+        expected_formula=expected_formula,
+        expected_final_answer=expected_final_answer,
+    )
+
+    result["questionId"] = ref["question_id"]
+    result["answerId"] = ref["answer_id"]
+    result["co"] = ref.get("co")
+    result["hadReferenceData"] = ref["grounded"] and bool(ref["reference_answer"])
+
+    _log_activity_safe(
+        action=f"Evaluated 1 {result.get('question_type', 'unified')} submission "
+               f"({result.get('ai_score')}/{result.get('max_score')})",
+        activity_type="grade", subject=ref.get("subject", ""),
+        detail=ref.get("question_id") or "",
     )
     return result
 
