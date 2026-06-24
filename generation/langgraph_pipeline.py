@@ -742,9 +742,12 @@ def provenance_explainer_agent(state: PipelineState) -> PipelineState:
             grounding = f'It was generated from the following passage in the raw data for "{q["unit"]}": "{excerpt}"'
         else:
             grounding = (
-                "No matching passage was retrieved from the raw data for this chapter, "
-                "so this question was produced from a generic template instead - treat it "
-                "as lower-confidence and review before use."
+                "No matching passage was retrieved from the raw data for this chapter, so the LLM "
+                "wrote this question from its own general knowledge instead of your source material. "
+                "If the subject name is an abbreviation or otherwise ambiguous (e.g. an acronym the "
+                "model doesn't recognize), it may have guessed an unrelated topic entirely - read the "
+                "question text carefully and discard it if it doesn't match this chapter, rather than "
+                "assuming it's merely 'lower confidence' but still on-topic."
             )
 
         q["generation_explanation"] = (
