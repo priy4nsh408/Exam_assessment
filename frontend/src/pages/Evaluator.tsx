@@ -68,16 +68,21 @@ export default function Evaluator() {
     const newScripts: StudentScript[] = []
     Array.from(files).forEach(file => {
       const id = `script-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      const reader = new FileReader()
-      reader.onloadend = () => {
+      const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+      if (isPdf) {
         setStudentScripts(prev => [...prev, {
-          id,
-          file,
-          preview: reader.result as string,
-          studentName: file.name.replace(/\.[^/.]+$/, ''),
+          id, file, preview: '', studentName: file.name.replace(/\.[^/.]+$/, ''),
         }])
+      } else {
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          setStudentScripts(prev => [...prev, {
+            id, file, preview: reader.result as string,
+            studentName: file.name.replace(/\.[^/.]+$/, ''),
+          }])
+        }
+        reader.readAsDataURL(file)
       }
-      reader.readAsDataURL(file)
     })
     if (scriptInputRef.current) scriptInputRef.current.value = ''
   }
@@ -367,13 +372,13 @@ export default function Evaluator() {
                 <div className="flex items-center gap-2 mb-3">
                   <Upload className="w-4 h-4 text-purple-600" />
                   <span className="text-xs font-semibold text-gray-700">Upload Student Answer Scripts</span>
-                  <span className="text-[10px] text-gray-400 ml-auto">Select multiple images — each is OCR'd and scored</span>
+                  <span className="text-[10px] text-gray-400 ml-auto">Select multiple images or PDFs — each is OCR'd and scored</span>
                 </div>
                 <div className="flex items-center gap-3">
                   <input
                     ref={scriptInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,.pdf"
                     multiple
                     onChange={handleAddScripts}
                     className="flex-1 text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200"
@@ -386,7 +391,13 @@ export default function Evaluator() {
                   <p className="text-xs font-medium text-gray-600">{studentScripts.length} script(s) added:</p>
                   {studentScripts.map(s => (
                     <div key={s.id} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
-                      <img src={s.preview} alt="" className="w-12 h-12 rounded border border-gray-200 object-cover" />
+                      {s.preview ? (
+                        <img src={s.preview} alt="" className="w-12 h-12 rounded border border-gray-200 object-cover" />
+                      ) : (
+                        <div className="w-12 h-12 rounded border border-blue-200 bg-blue-50 flex items-center justify-center">
+                          <FileText className="w-5 h-5 text-blue-500" />
+                        </div>
+                      )}
                       <input
                         type="text"
                         value={s.studentName}
@@ -408,14 +419,14 @@ export default function Evaluator() {
               <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-xl p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <Camera className="w-4 h-4 text-indigo-500" />
-                  <span className="text-xs font-semibold text-gray-700">Upload Answer Paper (OCR)</span>
-                  <span className="text-[10px] text-gray-400 ml-auto">Uses LLaVA vision model to read handwriting</span>
+                  <span className="text-xs font-semibold text-gray-700">Upload Answer Paper (Image or PDF)</span>
+                  <span className="text-[10px] text-gray-400 ml-auto">OCR for images (LLaVA), text extraction for PDFs</span>
                 </div>
                 <div className="flex items-center gap-3">
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,.pdf"
                     onChange={handleImageChange}
                     className="flex-1 text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-600 hover:file:bg-indigo-100"
                   />
@@ -423,9 +434,16 @@ export default function Evaluator() {
                     <button onClick={clearImage} className="text-xs text-red-500 hover:text-red-700">Clear</button>
                   )}
                 </div>
-                {imagePreview && (
+                {answerImage && (
                   <div className="mt-3">
-                    <img src={imagePreview} alt="Answer paper preview" className="max-h-48 rounded-lg border border-gray-200" />
+                    {answerImage.type === 'application/pdf' ? (
+                      <div className="flex items-center gap-2 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                        <FileText className="w-5 h-5 text-blue-600" />
+                        <span className="text-sm text-blue-800 font-medium">{answerImage.name}</span>
+                      </div>
+                    ) : imagePreview ? (
+                      <img src={imagePreview} alt="Answer paper preview" className="max-h-48 rounded-lg border border-gray-200" />
+                    ) : null}
                   </div>
                 )}
               </div>

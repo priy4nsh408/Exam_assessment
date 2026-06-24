@@ -1383,9 +1383,15 @@ async def eval_unified(
 
     image_path = None
     if file and file.filename:
-        image_path = str(upload_dir / file.filename)
-        with open(image_path, "wb") as f:
+        file_save_path = str(upload_dir / file.filename)
+        with open(file_save_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
+        if file.filename.lower().endswith(".pdf"):
+            pdf_text = _extract_text_from_pdf(file_save_path)
+            if pdf_text and not student_answer:
+                student_answer = pdf_text
+        else:
+            image_path = file_save_path
 
     ref = _resolve_grading_reference(
         answer_id=answer_id or None, question_id=question_id or None,
