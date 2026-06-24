@@ -137,6 +137,7 @@ def is_duplicate(sha: str) -> bool:
     return row is not None
 
 def save_question(q: dict):
+    init_db()
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("""
@@ -164,6 +165,7 @@ def update_question_fields(qid: str, fields: dict):
     allowed = {k: v for k, v in fields.items() if k in QUESTION_COLUMNS and k != "id"}
     if not allowed:
         return
+    init_db()
     conn = sqlite3.connect(DB_PATH)
     try:
         set_clause = ", ".join(f"{k} = ?" for k in allowed)
@@ -240,6 +242,7 @@ def get_answer_scheme_by_question_id(question_id: str) -> Optional[dict]:
     return schemes[0] if schemes else None
 
 def get_all_questions(subject=None, unit=None, bloom_level=None, q_type=None):
+    init_db()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     query = "SELECT * FROM questions WHERE 1=1"
@@ -262,6 +265,7 @@ def get_all_questions(subject=None, unit=None, bloom_level=None, q_type=None):
     return [dict(r) for r in rows]
 
 def get_question_by_id(qid: str) -> Optional[dict]:
+    init_db()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
@@ -271,6 +275,7 @@ def get_question_by_id(qid: str) -> Optional[dict]:
     return dict(row)
 
 def delete_question(qid: str):
+    init_db()
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM questions WHERE id = ?", (qid,))
     conn.commit()

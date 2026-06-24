@@ -164,6 +164,7 @@ def evaluate_theory(
     keyword_weight: float = 0.4,
     semantic_weight: float = 0.6,
     top_n_keywords: int = 15,
+    skip_llm_feedback: bool = False,
 ) -> dict:
     """
     Main entry point for theory evaluation.
@@ -178,6 +179,13 @@ def evaluate_theory(
     Score = keyword_weight * keyword_coverage_ratio
           + semantic_weight * semantic_similarity
       ...scaled to max_marks. Weights must sum to 1.0.
+
+    `skip_llm_feedback`: when True, skips the llm_feedback() Ollama call and
+    uses the deterministic fallback sentence instead. The score is computed
+    identically either way (feedback never affects ai_score) - this is a
+    free win for callers that only need scores in bulk (e.g. aggregating
+    many submissions for dashboard stats) and would otherwise pay for an
+    LLM call whose text output they immediately discard.
 
     Returns full evaluation result dict.
     """
@@ -211,7 +219,7 @@ def evaluate_theory(
     ai_score = max(0.0, min(ai_score, max_marks))
 
     # 4. Optional LLM-written feedback (does not affect ai_score)
-    feedback = llm_feedback(question, reference_answer, student_answer, kw, similarity, subject)
+    feedback = "" if skip_llm_feedback else llm_feedback(question, reference_answer, student_answer, kw, similarity, subject)
     if not feedback:
         feedback = (
             f"Matched {kw['matched_count']}/{kw['total_count']} key terms from the "

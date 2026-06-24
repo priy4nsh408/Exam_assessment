@@ -16,6 +16,10 @@ and their sample submissions are demo fixtures, clearly marked as such.
 
 import sys
 import os
+import json
+import hashlib
+from pathlib import Path
+from typing import Optional
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -122,19 +126,75 @@ def _ensure_demo_questions_seeded():
 
 _grade_cache = None
 
+# Disk cache lives next to questions.db (gitignored data/ folder) - one small
+# JSON file, deliberately not a new SQLite table, since this is purely a
+# perf optimization for an expensive computation (real Ollama calls for
+# numerical grading) that would otherwise re-run on every process restart.
+_CACHE_PATH = Path(__file__).parent.parent / "data" / "demo_grades_cache.json"
+
+
+def _compute_cache_key() -> str:
+    """
+    Hashes everything that affects the grading output: each demo
+    submission's content plus its question's current reference text
+    (answer_key/source_chunk) and marks. If seed_demo_data.py is re-run
+    with different seeded content (or questions.db is deleted/reseeded),
+    this key changes and the disk cache is treated as stale automatically -
+    no manual cache-busting needed.
+    """
+    parts = []
+    for sub in DEMO_SUBMISSIONS:
+        question = get_question_by_id(sub["questionId"])
+        reference = (question.get("answer_key") or question.get("source_chunk") or "") if question else ""
+        marks = question.get("marks") if question else None
+        parts.append(f"{sub['id']}|{sub['content']}|{reference}|{marks}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def _load_disk_cache() -> Optional[dict]:
+    if not _CACHE_PATH.exists():
+        return None
+    try:
+        with open(_CACHE_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None  # corrupt/unreadable cache - treat as absent, recompute
+
+
+def _save_disk_cache(key: str, results: dict) -> None:
+    try:
+        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_CACHE_PATH, "w") as f:
+            json.dump({"key": key, "results": results}, f)
+    except Exception:
+        pass  # caching is an optimization only - never let a write failure break grading
+
 
 def _grade_all_demo_submissions():
     """
     Runs the real evaluators (evaluate_theory / grade_numerical) against
     every demo submission, against the real seeded answer key for its
-    question. Cached for the process lifetime since the underlying demo
-    data never changes - avoids re-running embeddings on every request.
+    question. Cached two ways:
+      1. In-memory for the process lifetime (instant on repeat calls within
+         the same running server).
+      2. On disk, keyed by a content hash (see _compute_cache_key) - so a
+         server restart (manual or --reload triggered) doesn't pay the full
+         ~30s real-Ollama-calls cost again, but a genuine content change
+         (e.g. re-seeding with edited answer keys) still recomputes
+         correctly instead of silently serving stale scores.
     """
     global _grade_cache
     if _grade_cache is not None:
         return _grade_cache
 
     _ensure_demo_questions_seeded()
+
+    cache_key = _compute_cache_key()
+    disk_cache = _load_disk_cache()
+    if disk_cache and disk_cache.get("key") == cache_key:
+        _grade_cache = disk_cache["results"]
+        return _grade_cache
+
     results = {}
     for sub in DEMO_SUBMISSIONS:
         question = get_question_by_id(sub["questionId"])
@@ -147,7 +207,7 @@ def _grade_all_demo_submissions():
             r = evaluate_theory(
                 question=question["text"], student_answer=sub["content"],
                 reference_answer=reference, subject=question.get("subject", ""),
-                max_marks=max_marks,
+                max_marks=max_marks, skip_llm_feedback=True,
             )
             score_pct = round((r["ai_score"] / max_marks) * 100) if max_marks else 0
         else:
@@ -170,6 +230,7 @@ def _grade_all_demo_submissions():
         }
 
     _grade_cache = results
+    _save_disk_cache(cache_key, results)
     return results
 
 
