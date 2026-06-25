@@ -71,10 +71,10 @@ interface BatchResult {
 }
 
 interface DepStatus {
-  pdf2image: { available: boolean; error: string }
-  easyocr:  { available: boolean; error: string }
-  pillow:   { available: boolean; error: string }
-  ready:    boolean
+  pymupdf:   { available: boolean; error: string }
+  tesseract: { available: boolean; error: string }
+  pillow:    { available: boolean; error: string }
+  ready:     boolean
 }
 
 const TYPE_ICON: Record<string, React.ReactNode> = {
@@ -97,9 +97,10 @@ function ScorePill({ score, max }: { score: number; max: number }) {
 function DepBanner({ deps }: { deps: DepStatus }) {
   if (deps.ready) return null
   const missing = [
-    !deps.pdf2image?.available && 'pdf2image',
-    !deps.easyocr?.available && 'easyocr',
+    !deps.pymupdf?.available && 'pymupdf',
+    !deps.tesseract?.available && 'tesseract',
   ].filter(Boolean)
+  if (missing.length === 0) return null
   return (
     <div className="card p-4 bg-amber-50 border-amber-300 flex items-start gap-3">
       <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
@@ -109,10 +110,10 @@ function DepBanner({ deps }: { deps: DepStatus }) {
           Missing: <code className="bg-amber-100 px-1 rounded">{missing.join(', ')}</code>
         </p>
         <p className="text-xs text-amber-600 mt-1 font-mono bg-amber-100 px-2 py-1 rounded mt-2">
-          pip install easyocr pdf2image Pillow &amp;&amp; apt-get install -y poppler-utils
+          pip install pymupdf pytesseract Pillow
         </p>
         <p className="text-xs text-amber-600 mt-1">
-          Without these, uploaded PDFs cannot be read. Install on the server then restart.
+          Also install Tesseract binary on Windows: <code className="bg-amber-100 px-1 rounded">winget install UB-Mannheim.TesseractOCR</code>
         </p>
       </div>
     </div>
