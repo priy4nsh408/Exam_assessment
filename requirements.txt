@@ -10,3 +10,4 @@ chromadb==0.5.15
 unstructured[local-inference]
 docx2txt
 pypdf
+PyMuPDF

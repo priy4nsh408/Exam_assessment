@@ -1334,8 +1334,68 @@ async def eval_numerical(body: NumericalEvalRequest):
 
 # ── Unified Evaluation Endpoint ──────────────────────────────────────────────
 
+def _check_pdf_deps():
+    """Check PDF dependencies on startup and print instructions if missing."""
+    available = []
+    missing = []
+    for pkg, imp in [("pypdf", "pypdf"), ("PyMuPDF", "fitz"), ("PyPDF2", "PyPDF2")]:
+        try:
+            __import__(imp)
+            available.append(pkg)
+        except ImportError:
+            missing.append(pkg)
+    if not available:
+        print("\n" + "=" * 60)
+        print("WARNING: No PDF extraction library found!")
+        print("PDF scheme parsing will NOT work.")
+        print("Install at least one: pip install pypdf PyMuPDF")
+        print("=" * 60 + "\n")
+    else:
+        print(f"[PDF] Available extractors: {', '.join(available)}")
+    return available
+
+_PDF_AVAILABLE = _check_pdf_deps()
+
+
 def _extract_text_from_pdf(pdf_path: str) -> str:
-    # Try PyPDFLoader first
+    # Try pypdf
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_path)
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if text.strip():
+            return text
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[PDF] pypdf failed for {pdf_path}: {e}")
+
+    # Try PyMuPDF (fitz)
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        text = "\n".join(page.get_text() for page in doc)
+        doc.close()
+        if text.strip():
+            return text
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[PDF] PyMuPDF failed for {pdf_path}: {e}")
+
+    # Try PyPDF2 (older, might be installed)
+    try:
+        from PyPDF2 import PdfReader as PdfReader2
+        reader = PdfReader2(pdf_path)
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if text.strip():
+            return text
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[PDF] PyPDF2 failed for {pdf_path}: {e}")
+
+    # Try PyPDFLoader (langchain)
     try:
         from langchain_community.document_loaders import PyPDFLoader
         loader = PyPDFLoader(pdf_path)
@@ -1346,28 +1406,8 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
     except Exception as e:
         print(f"[PDF] PyPDFLoader failed for {pdf_path}: {e}")
 
-    # Fallback to PyPDF2/pypdf
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(pdf_path)
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        if text.strip():
-            return text
-    except Exception as e:
-        print(f"[PDF] pypdf fallback failed for {pdf_path}: {e}")
-
-    # Fallback to PyMuPDF (fitz)
-    try:
-        import fitz
-        doc = fitz.open(pdf_path)
-        text = "\n".join(page.get_text() for page in doc)
-        doc.close()
-        if text.strip():
-            return text
-    except Exception as e:
-        print(f"[PDF] PyMuPDF fallback failed for {pdf_path}: {e}")
-
     print(f"[PDF] All extractors failed for {pdf_path}")
+    print(f"[PDF] Install a PDF library: pip install pypdf PyMuPDF")
     return ""
 
 
