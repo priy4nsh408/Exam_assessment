@@ -1412,11 +1412,23 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
 
 
 def _parse_answer_scheme(pdf_text: str) -> list:
-    """Use LLM to extract structured questions from answer scheme text.
-    Returns list of {question_number, question_text, reference_answer, marks, question_type, expected_formula, expected_final_answer}."""
+    """Extract structured questions from answer scheme text.
+    Uses heuristic parser first (reliable for structured schemes), falls back to LLM."""
     if not pdf_text.strip():
         return []
 
+    # Try heuristic parser first — it handles the full document
+    heuristic_result = _heuristic_parse_scheme(pdf_text)
+
+    # If heuristic found multiple real questions (not the single-question fallback), use it
+    if len(heuristic_result) > 1:
+        total_m = sum(q['marks'] for q in heuristic_result)
+        print(f"[parse-scheme] Heuristic parser found {len(heuristic_result)} questions, total: {total_m} marks")
+        for q in heuristic_result:
+            print(f"  Q{q['question_number']}: {q['marks']}m ({q['question_type']}) - {q['question_text'][:70]}")
+        return heuristic_result
+
+    # Fallback to LLM for unstructured documents
     if OLLAMA_AVAILABLE:
         try:
             prompt = f"""You are parsing an exam answer scheme / marking scheme document.
@@ -1430,7 +1442,7 @@ Extract EVERY question from the document. For each question determine:
 - expected_final_answer: the expected final numerical answer if applicable (or empty string)
 
 DOCUMENT:
-{pdf_text[:6000]}
+{pdf_text[:12000]}
 
 Respond ONLY in JSON format:
 {{
@@ -1455,7 +1467,6 @@ Output ONLY valid JSON. No markdown or explanation."""
                 options={"temperature": 0.1},
             )
             text = resp["message"]["content"].strip()
-            # Parse JSON from response
             import re as _re
             cleaned = _re.sub(r'```(?:json)?', '', text).strip()
             start = cleaned.find('{')
@@ -1467,16 +1478,19 @@ Output ONLY valid JSON. No markdown or explanation."""
                         depth -= 1
                         if depth == 0:
                             parsed = json.loads(cleaned[start:i+1])
-                            return parsed.get("questions", [])
-        except Exception:
-            pass
+                            llm_result = parsed.get("questions", [])
+                            if len(llm_result) > len(heuristic_result):
+                                print(f"[parse-scheme] LLM parser found {len(llm_result)} questions")
+                                return llm_result
+        except Exception as e:
+            print(f"[parse-scheme] LLM parsing failed: {e}")
 
-    result = _heuristic_parse_scheme(pdf_text)
-    total_m = sum(q['marks'] for q in result)
-    print(f"[parse-scheme] Heuristic parser found {len(result)} questions, total: {total_m} marks")
-    for q in result:
-        print(f"  Q{q['question_number']}: {q['marks']}m ({q['question_type']}) - {q['question_text'][:70]}")
-    return result
+    if heuristic_result:
+        total_m = sum(q['marks'] for q in heuristic_result)
+        print(f"[parse-scheme] Heuristic fallback: {len(heuristic_result)} questions, total: {total_m} marks")
+        return heuristic_result
+
+    return []
 
 
 def _heuristic_parse_scheme(text: str) -> list:
