@@ -1670,15 +1670,17 @@ async def eval_unified(
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse answer scheme PDF if provided
+    parsed_questions = []
     if scheme_pdf and scheme_pdf.filename:
         pdf_path = str(upload_dir / f"scheme_{scheme_pdf.filename}")
         with open(pdf_path, "wb") as f:
             shutil.copyfileobj(scheme_pdf.file, f)
         scheme_text = _extract_text_from_pdf(pdf_path)
         if scheme_text:
-            if not reference_answer:
+            parsed_questions = _parse_answer_scheme(scheme_text)
+            if not reference_answer and not parsed_questions:
                 reference_answer = scheme_text
-            if not question:
+            if not question and not parsed_questions:
                 lines = [l.strip() for l in scheme_text.split("\n") if l.strip()]
                 if lines:
                     question = lines[0]
@@ -1694,6 +1696,77 @@ async def eval_unified(
                 student_answer = pdf_text
         else:
             image_path = file_save_path
+
+    # Multi-question scheme: evaluate each question and return batch-style results
+    if len(parsed_questions) > 1:
+        question_results = []
+        total_score = 0
+        total_max = 0
+        for q in parsed_questions:
+            q_result = unified_evaluate(
+                question=q.get("question_text", ""),
+                student_answer=student_answer,
+                answer_image_path=image_path,
+                reference_answer=q.get("reference_answer", ""),
+                max_marks=q.get("marks", 10),
+                subject=subject,
+                question_type=q.get("question_type", "auto"),
+                expected_formula=q.get("expected_formula", ""),
+                expected_final_answer=q.get("expected_final_answer", ""),
+            )
+            q_result["question_number"] = q.get("question_number", "")
+            q_result["question_text"] = q.get("question_text", "")
+            question_results.append(q_result)
+            total_score += q_result.get("ai_score", 0)
+            total_max += q_result.get("max_score", 0)
+
+        student_name_val = student_name or (file.filename.rsplit(".", 1)[0] if file and file.filename else "Unknown")
+        student_record = {
+            "student_name": student_name_val,
+            "script_file": file.filename if file and file.filename else "typed_answer",
+            "total_score": round(total_score, 1),
+            "total_max": total_max,
+            "question_results": question_results,
+            "ocr_used": any(r.get("ocr_used") for r in question_results),
+            "avg_confidence": round(sum(r.get("confidence", 0) for r in question_results) / max(len(question_results), 1), 2),
+        }
+
+        eval_id = f"EVAL-{str(uuid.uuid4())[:8].upper()}"
+        history_record = {
+            "id": eval_id,
+            "student_name": student_name_val,
+            "question": f"{len(parsed_questions)} questions from answer scheme",
+            "subject": subject,
+            "question_type": "mixed",
+            "ai_score": round(total_score, 1),
+            "max_score": total_max,
+            "confidence": student_record["avg_confidence"],
+            "ocr_used": student_record["ocr_used"],
+            "ocr_method": "llava" if student_record["ocr_used"] else "pdf",
+            "feedback": f"Evaluated against {len(parsed_questions)} questions. Total: {round(total_score, 1)}/{total_max}",
+            "explanation": "; ".join(
+                f"Q{r['question_number']}: {r.get('ai_score', 0)}/{r.get('max_score', 0)}"
+                for r in question_results
+            ),
+            "overridden": False,
+            "evaluated_at": datetime.utcnow().isoformat() + "Z",
+            "script_file": file.filename if file and file.filename else None,
+            "question_results": question_results,
+        }
+        EVAL_HISTORY.insert(0, history_record)
+        student_record["eval_id"] = eval_id
+
+        _log_activity_safe(
+            action=f"Evaluated 1 script against {len(parsed_questions)} questions ({round(total_score, 1)}/{total_max})",
+            activity_type="grade", subject=subject,
+        )
+        return {
+            "batch": True,
+            "results": [student_record],
+            "total_students": 1,
+            "total_questions": len(parsed_questions),
+            "questions": parsed_questions,
+        }
 
     ref = _resolve_grading_reference(
         answer_id=answer_id or None, question_id=question_id or None,

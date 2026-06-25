@@ -218,6 +218,8 @@ export default function Evaluator() {
         const data = await res.json()
         if (!res.ok) {
           setError(data.detail || 'Evaluation failed')
+        } else if (data.batch) {
+          setBatchResults(data)
         } else {
           setResult(data)
         }
