@@ -1499,6 +1499,8 @@ def _heuristic_parse_scheme(text: str) -> list:
     questions = []
     lines = text.split('\n')
 
+    q_header_with_marks = _re.compile(r'^\s*Q\.?\s*(\d+(?:\.\d+|[a-e])?)\s*\.?\s+(.+?)\s*\((\d+)\s*[Mm]arks?\)', _re.IGNORECASE)
+    q_header_q_prefix = _re.compile(r'^\s*Q\.?\s*(\d+(?:\.\d+|[a-e])?)\s*\.?\s+([A-Za-z].+)', _re.IGNORECASE)
     q_header_pattern = _re.compile(r'^\s*(\d+(?:\.\d+|[a-e])?)\s+([A-Za-z].+)', _re.IGNORECASE)
     q_number_only = _re.compile(r'^\s*(\d+(?:\.\d+|[a-e]))\s*$')
     marks_line_pattern = _re.compile(r'^(\d{1,2})\s+\d+\s+\d+\s*$')
@@ -1508,6 +1510,8 @@ def _heuristic_parse_scheme(text: str) -> list:
     total_marks_line = _re.compile(r'Total\s+(\d+)\s*Marks', _re.IGNORECASE)
     page_line = _re.compile(r'^\d+\s*\|\s*P\s*a\s*g\s*e')
     skip_lines = _re.compile(r'^(PART\s*[–\-]\s*[A-Z]|Q\.\s*$|No\s+Question|Academic Year|Department of|Date:|Semester:|Course)', _re.IGNORECASE)
+
+    has_q_prefix = bool(_re.search(r'^\s*Q\.?\s*\d', text, _re.MULTILINE | _re.IGNORECASE))
 
     segments = []
     current_qnum = None
@@ -1520,15 +1524,35 @@ def _heuristic_parse_scheme(text: str) -> list:
         if stripped.lower().startswith('no question m bt co') or stripped.lower() == 'question m bt co':
             continue
 
-        header_match = q_header_pattern.match(stripped)
-        numonly_match = q_number_only.match(stripped)
+        hm_match = q_header_with_marks.match(stripped)
+        qp_match = q_header_q_prefix.match(stripped) if not hm_match else None
+        header_match = q_header_pattern.match(stripped) if not hm_match and not qp_match and not has_q_prefix else None
+        numonly_match = q_number_only.match(stripped) if not hm_match and not qp_match and not header_match and not has_q_prefix else None
 
-        if header_match:
+        if hm_match:
+            if current_qnum:
+                segments.append((current_qnum, current_lines))
+            current_qnum = hm_match.group(1)
+            q_text_part = hm_match.group(2).strip()
+            header_marks = hm_match.group(3)
+            current_lines = [q_text_part, f"__marks__:{header_marks}"] if q_text_part else [f"__marks__:{header_marks}"]
+        elif qp_match:
+            if current_qnum:
+                segments.append((current_qnum, current_lines))
+            current_qnum = qp_match.group(1)
+            q_text_part = qp_match.group(2).strip()
+            # Check for (X Marks) at end of text
+            paren_marks = _re.search(r'\((\d+)\s*[Mm]arks?\)\s*$', q_text_part)
+            if paren_marks:
+                q_text_part = q_text_part[:paren_marks.start()].strip()
+                current_lines = [q_text_part, f"__marks__:{paren_marks.group(1)}"]
+            else:
+                current_lines = [q_text_part] if q_text_part else []
+        elif header_match:
             if current_qnum:
                 segments.append((current_qnum, current_lines))
             current_qnum = header_match.group(1)
             q_text_part = header_match.group(2).strip()
-            # Strip trailing M BT CO marks from question text (some extractors put them on same line)
             tm = trailing_marks.search(q_text_part)
             if tm:
                 q_text_part = q_text_part[:tm.start()].strip()
@@ -1550,6 +1574,9 @@ def _heuristic_parse_scheme(text: str) -> list:
         marks = 0
         filtered = []
         for cl in content_lines:
+            if cl.startswith("__marks__:"):
+                marks = int(cl.split(":")[1])
+                continue
             m = marks_line_pattern.match(cl.strip())
             if m:
                 marks = int(m.group(1))
