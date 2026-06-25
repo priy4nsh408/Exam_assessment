@@ -85,27 +85,39 @@ def _render_page_to_image(page: "_fitz.Page", out_path: str, dpi: int = 200) -> 
 def _tesseract_on_image(image_path: str) -> Tuple[str, float]:
     """
     Run Tesseract on an image file.
-    Returns (text, confidence_0_to_1).
-    Config: PSM 6 = assume a single uniform block of text (good for answer pages).
+    PSM 3 = fully automatic page segmentation (best for mixed handwriting/print).
+    PSM 6 tried as fallback if PSM 3 returns nothing.
     """
     if not TESSERACT_AVAILABLE:
-        return "[Tesseract not available]", 0.0
+        return "", 0.0
 
     try:
         import pytesseract as _tess
         from PIL import Image as _PILImage
+
         img = _PILImage.open(image_path)
+        # Upscale small images — Tesseract works better at higher resolution
+        w, h = img.size
+        if w < 1500:
+            scale = 1500 / w
+            img = img.resize((int(w * scale), int(h * scale)), _PILImage.LANCZOS)
 
-        # Get per-word confidence data
-        data = _tess.image_to_data(img, config="--psm 6", output_type=_tess.Output.DICT)
-        words  = [w for w, c in zip(data["text"], data["conf"]) if w.strip() and int(c) > 0]
-        confs  = [int(c) / 100.0 for c in data["conf"] if int(c) > 0]
-        text   = _tess.image_to_string(img, config="--psm 6").strip()
-
-        avg_conf = sum(confs) / len(confs) if confs else 0.5
-        return text, avg_conf
+        best_text = ""
+        best_conf = 0.0
+        for psm in ("3", "6", "4"):
+            cfg = f"--psm {psm} --oem 3"
+            try:
+                data = _tess.image_to_data(img, config=cfg, output_type=_tess.Output.DICT)
+                confs = [int(c) / 100.0 for c in data["conf"] if int(c) > 0]
+                text  = _tess.image_to_string(img, config=cfg).strip()
+                avg   = sum(confs) / len(confs) if confs else 0.0
+                if len(text) > len(best_text):
+                    best_text, best_conf = text, avg
+            except Exception:
+                continue
+        return best_text, best_conf
     except Exception as e:
-        return f"[OCR error: {e}]", 0.0
+        return "", 0.0
 
 
 def _pdf_to_images_pymupdf(pdf_path: str, dpi: int = 200) -> List[str]:
