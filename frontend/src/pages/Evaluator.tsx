@@ -204,6 +204,7 @@ export default function Evaluator() {
       if (answerImage) formData.append('file', answerImage)
       if (schemePdf) formData.append('scheme_pdf', schemePdf)
       formData.append('student_answer', studentAnswer)
+      formData.append('student_name', answerImage ? answerImage.name.replace(/\.[^/.]+$/, '') : 'Student')
       formData.append('question', question)
       formData.append('subject', subject)
       formData.append('reference_answer', referenceAnswer)
