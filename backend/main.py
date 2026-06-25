@@ -1884,7 +1884,9 @@ async def eval_batch(
         student_name = student_file.filename.rsplit(".", 1)[0]
         import concurrent.futures
 
-        def _eval_q(q):
+        n_questions = len(parsed_questions)
+
+        def _eval_q(q, idx=0):
             return unified_evaluate(
                 question=q.get("question_text", ""),
                 student_answer=file_text,
@@ -1897,6 +1899,8 @@ async def eval_batch(
                 expected_formula=q.get("expected_formula", ""),
                 expected_final_answer=q.get("expected_final_answer", ""),
                 skip_llm_feedback=True,
+                question_index=idx,
+                total_questions=n_questions,
             )
 
         question_results = []
@@ -1904,8 +1908,8 @@ async def eval_batch(
         total_max = 0
 
         if scanned_page_images:
-            for q in parsed_questions:
-                q_result = _eval_q(q)
+            for idx, q in enumerate(parsed_questions):
+                q_result = _eval_q(q, idx)
                 q_result["question_number"] = q.get("question_number", "")
                 q_result["question_text"] = q.get("question_text", "")
                 question_results.append(q_result)
@@ -2038,7 +2042,9 @@ async def eval_unified(
     if len(parsed_questions) > 1:
         import concurrent.futures
 
-        def _eval_one(q):
+        n_questions = len(parsed_questions)
+
+        def _eval_one(q, idx=0):
             return unified_evaluate(
                 question=q.get("question_text", ""),
                 student_answer=student_answer,
@@ -2051,6 +2057,8 @@ async def eval_unified(
                 expected_formula=q.get("expected_formula", ""),
                 expected_final_answer=q.get("expected_final_answer", ""),
                 skip_llm_feedback=True,
+                question_index=idx,
+                total_questions=n_questions,
             )
 
         question_results = []
@@ -2059,8 +2067,8 @@ async def eval_unified(
 
         # Sequential for vision grading (Ollama processes one at a time), parallel for text
         if scanned_page_images:
-            for q in parsed_questions:
-                q_result = _eval_one(q)
+            for idx, q in enumerate(parsed_questions):
+                q_result = _eval_one(q, idx)
                 q_result["question_number"] = q.get("question_number", "")
                 q_result["question_text"] = q.get("question_text", "")
                 question_results.append(q_result)

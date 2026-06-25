@@ -716,20 +716,30 @@ Output ONLY valid JSON. No markdown or explanation outside the JSON."""
 
 def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: List[str],
                            max_marks: int, subject: str, question_type: str,
-                           expected_formula: str = "", expected_final_answer: str = "") -> Optional[dict]:
+                           expected_formula: str = "", expected_final_answer: str = "",
+                           question_index: int = 0, total_questions: int = 1) -> Optional[dict]:
     """Grade a student's answer by sending page images directly to LLaVA.
-    Used for scanned/handwritten PDFs where OCR fails."""
+    Used for scanned/handwritten PDFs where OCR fails.
+    Selects ~2-3 pages per question based on estimated position."""
     if not OLLAMA_AVAILABLE or not image_paths:
         return None
 
+    # Estimate which pages belong to this question
+    n_pages = len(image_paths)
+    pages_per_q = max(1, n_pages / max(total_questions, 1))
+    start_page = int(question_index * pages_per_q)
+    end_page = min(n_pages, int((question_index + 1) * pages_per_q) + 1)
+    # Take at most 2 pages to stay within LLaVA's context
+    selected = image_paths[start_page:end_page][:2]
+
     images_b64 = []
-    for img_path in image_paths:
+    for img_path in selected:
         b64 = image_to_base64(img_path)
         if b64:
             images_b64.append(b64)
     if not images_b64:
         return None
-    print(f"[VLM-grade] Sending {len(images_b64)} page images to LLaVA for Q: {question[:50]}...")
+    print(f"[VLM-grade] Q{question_index+1}: sending pages {start_page+1}-{start_page+len(selected)} of {n_pages} to LLaVA")
 
     formula_section = ""
     if expected_formula:
@@ -737,62 +747,49 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
     if expected_final_answer:
         formula_section += f"\nEXPECTED FINAL ANSWER: {expected_final_answer}"
 
-    prompt = f"""You are an expert {subject or 'engineering'} professor. The attached images are pages from a student's handwritten answer paper.
+    ref_short = reference_answer[:800] if reference_answer else "Not provided"
+    prompt = f"""Grade this student's handwritten answer. Read the images carefully.
 
-QUESTION ({question_type}, {max_marks} marks):
-{question}
-
-MODEL ANSWER:
-{reference_answer[:2000]}
+QUESTION ({max_marks} marks): {question}
 {formula_section}
+KEY POINTS FROM MODEL ANSWER: {ref_short}
 
-Read the student's handwritten answer from the images. Find the part where the student answers this specific question. Then grade it.
-
-IMPORTANT: The student's paper may contain answers to multiple questions. Focus ONLY on the answer to the question above. Look for the question number, relevant formulas, diagrams, and calculations.
-
-Respond ONLY in JSON:
-{{
-  "score": <0 to {max_marks}>,
-  "student_wrote": "brief summary of what the student wrote for this question",
-  "keyword_analysis": {{"found": [], "missing": [], "coverage_percent": 0}},
-  "conceptual_accuracy": <0-100>,
-  "completeness": <0-100>,
-  "equation_present": true/false,
-  "formula_correct": true/false,
-  "final_answer_correct": true/false,
-  "feedback": "2-3 sentences explaining the score",
-  "confidence": <0.0-1.0>
-}}
+Grade out of {max_marks}. Reply ONLY in JSON:
+{{"score": <0-{max_marks}>, "student_wrote": "summary", "feedback": "2 sentences", "confidence": 0.7}}
 Output ONLY valid JSON."""
 
     try:
         resp = ollama.chat(
             model=OLLAMA_VISION_MODEL,
             messages=[{"role": "user", "content": prompt, "images": images_b64}],
-            options={"temperature": 0.2, "num_predict": 512},
+            options={"temperature": 0.2, "num_predict": 256},
         )
-        parsed = _parse_json(resp["message"]["content"].strip())
+        raw = resp["message"]["content"].strip()
+        parsed = _parse_json(raw)
         if parsed and "score" in parsed:
             score = max(0.0, min(float(parsed["score"]), max_marks))
-            kw_analysis = parsed.get("keyword_analysis", {})
             return {
                 "ai_score": round(score, 1),
                 "max_score": max_marks,
                 "confidence": min(0.95, max(0.3, float(parsed.get("confidence", 0.6)))),
                 "feedback": parsed.get("feedback", ""),
                 "explanation": parsed.get("student_wrote", ""),
-                "keywords": {
-                    "found": kw_analysis.get("found", []),
-                    "missing": kw_analysis.get("missing", []),
-                    "matched_count": len(kw_analysis.get("found", [])),
-                    "total_count": len(kw_analysis.get("found", [])) + len(kw_analysis.get("missing", [])),
-                    "coverage_ratio": (kw_analysis.get("coverage_percent", 50) or 50) / 100,
-                },
-                "conceptual_accuracy": parsed.get("conceptual_accuracy", 0),
-                "completeness": parsed.get("completeness", 0),
-                "formula_mentioned": parsed.get("formula_correct", True),
-                "final_answer_correct": parsed.get("final_answer_correct", True),
-                "equation_present": parsed.get("equation_present", True),
+                "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
+                "llm_graded": True,
+                "vision_graded": True,
+            }
+        # If JSON parsing failed, try to extract just a number
+        import re as _re
+        score_match = _re.search(r'(\d+(?:\.\d+)?)\s*/\s*\d+', raw)
+        if score_match:
+            score = max(0.0, min(float(score_match.group(1)), max_marks))
+            return {
+                "ai_score": round(score, 1),
+                "max_score": max_marks,
+                "confidence": 0.5,
+                "feedback": raw[:200],
+                "explanation": "",
+                "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
                 "llm_graded": True,
                 "vision_graded": True,
             }
@@ -821,6 +818,8 @@ def evaluate(
     keyword_weight: float = 0.4,
     semantic_weight: float = 0.6,
     skip_llm_feedback: bool = False,
+    question_index: int = 0,
+    total_questions: int = 1,
 ) -> dict:
     """
     Unified evaluation entry point.
@@ -863,6 +862,7 @@ def evaluate(
         result = _vlm_grade_with_images(
             question, reference_answer, answer_image_paths,
             max_marks, subject, question_type, expected_formula, expected_final_answer,
+            question_index=question_index, total_questions=total_questions,
         )
         if result:
             result["ocr_used"] = True
