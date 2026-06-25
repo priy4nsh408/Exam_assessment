@@ -825,38 +825,6 @@ Output ONLY valid JSON."""
     if best_result:
         return best_result
     return None
-        raw = resp["message"]["content"].strip()
-        parsed = _parse_json(raw)
-        if parsed and "score" in parsed:
-            score = max(0.0, min(float(parsed["score"]), max_marks))
-            return {
-                "ai_score": round(score, 1),
-                "max_score": max_marks,
-                "confidence": min(0.95, max(0.3, float(parsed.get("confidence", 0.6)))),
-                "feedback": parsed.get("feedback", ""),
-                "explanation": parsed.get("student_wrote", ""),
-                "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
-                "llm_graded": True,
-                "vision_graded": True,
-            }
-        # If JSON parsing failed, try to extract just a number
-        import re as _re
-        score_match = _re.search(r'(\d+(?:\.\d+)?)\s*/\s*\d+', raw)
-        if score_match:
-            score = max(0.0, min(float(score_match.group(1)), max_marks))
-            return {
-                "ai_score": round(score, 1),
-                "max_score": max_marks,
-                "confidence": 0.5,
-                "feedback": raw[:200],
-                "explanation": "",
-                "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
-                "llm_graded": True,
-                "vision_graded": True,
-            }
-    except Exception as e:
-        print(f"[VLM-grade] Error: {e}")
-    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
