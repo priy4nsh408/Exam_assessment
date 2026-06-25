@@ -321,7 +321,20 @@ def semantic_similarity(student_text: str, reference_text: str) -> float:
     model = get_embedding_model()
     if not model:
         return 0.5
-    return cosine_sim(model.encode(reference_text), model.encode(student_text))
+    embeddings = model.encode([reference_text, student_text])
+    return cosine_sim(embeddings[0], embeddings[1])
+
+
+def batch_semantic_similarity(student_text: str, reference_texts: List[str]) -> List[float]:
+    if not EMBEDDINGS_AVAILABLE or not student_text:
+        return [0.5] * len(reference_texts)
+    model = get_embedding_model()
+    if not model:
+        return [0.5] * len(reference_texts)
+    all_texts = [student_text] + reference_texts
+    embeddings = model.encode(all_texts)
+    student_emb = embeddings[0]
+    return [cosine_sim(student_emb, embeddings[i + 1]) for i in range(len(reference_texts))]
 
 
 # ── Equation / Formula Detection ─────────────────────────────────────────────
@@ -451,7 +464,7 @@ Output ONLY raw JSON."""
         resp = ollama.chat(
             model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.2},
+            options={"temperature": 0.2, "num_predict": 512},
         )
         result = _parse_json(resp["message"]["content"].strip())
         if result:
@@ -512,7 +525,7 @@ Write 2-3 sentences of specific, constructive feedback. No JSON."""
         resp = ollama.chat(
             model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.3},
+            options={"temperature": 0.3, "num_predict": 256},
         )
         return resp["message"]["content"].strip()
     except Exception:
@@ -608,11 +621,11 @@ QUESTION ({question_type}, {max_marks} marks):
 {question}
 
 ANSWER SCHEME / MODEL ANSWER:
-{reference_answer}
+{reference_answer[:3000]}
 {formula_section}
 
 STUDENT'S ANSWER:
-{student_answer}
+{student_answer[:3000]}
 
 Grade the student's answer against the answer scheme. Evaluate on these metrics:
 
@@ -655,7 +668,7 @@ Output ONLY valid JSON. No markdown or explanation outside the JSON."""
         resp = ollama.chat(
             model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.2},
+            options={"temperature": 0.2, "num_predict": 512},
         )
         parsed = _parse_json(resp["message"]["content"].strip())
         if parsed and "score" in parsed:

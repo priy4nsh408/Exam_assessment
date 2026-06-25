@@ -96,6 +96,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def _preload_models():
+    import threading
+    def _load():
+        try:
+            from evaluation.unified_evaluator import get_embedding_model
+            get_embedding_model()
+            print("[startup] Embedding model preloaded")
+        except Exception:
+            pass
+    threading.Thread(target=_load, daemon=True).start()
+
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class QuestionGenerateRequest(BaseModel):
@@ -1760,6 +1772,7 @@ async def eval_batch(
                 question_type=q.get("question_type", "auto"),
                 expected_formula=q.get("expected_formula", ""),
                 expected_final_answer=q.get("expected_final_answer", ""),
+                skip_llm_feedback=True,
             )
 
         question_results = []
@@ -1898,6 +1911,7 @@ async def eval_unified(
                 question_type=q.get("question_type", "auto"),
                 expected_formula=q.get("expected_formula", ""),
                 expected_final_answer=q.get("expected_final_answer", ""),
+                skip_llm_feedback=True,
             )
 
         question_results = []
