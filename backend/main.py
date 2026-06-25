@@ -1424,58 +1424,121 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
 
 
 def _extract_images_from_pdf(pdf_path: str, upload_dir: str, max_pages: int = 20) -> list:
-    """Extract page images from a scanned PDF. Returns list of image file paths.
-    Uses 100 DPI and skips near-blank pages for speed."""
+    """Extract page images from a scanned PDF. Returns list of image file paths."""
     image_paths = []
     try:
         import fitz
         doc = fitz.open(pdf_path)
-        for i, page in enumerate(doc):
-            if i >= max_pages:
-                break
-            pix = page.get_pixmap(dpi=100)
-            # Skip near-blank pages (less than 1% non-white pixels)
-            samples = pix.samples
-            if len(samples) > 0:
-                dark_pixels = sum(1 for j in range(0, len(samples), pix.n) if samples[j] < 200)
-                total_pixels = pix.width * pix.height
-                if total_pixels > 0 and dark_pixels / total_pixels < 0.01:
-                    print(f"[OCR] Skipping blank page {i+1}")
-                    continue
-            img_path = os.path.join(upload_dir, f"_page_{i+1}_{os.path.basename(pdf_path)}.png")
-            pix.save(img_path)
-            image_paths.append(img_path)
+        page_count = len(doc)
+        for i in range(min(page_count, max_pages)):
+            try:
+                page = doc.load_page(i)
+                pix = page.get_pixmap(dpi=100)
+                img_path = os.path.join(upload_dir, f"_page_{i+1}_{os.path.basename(pdf_path)}.png")
+                pix.save(img_path)
+                # Quick blank check: sample a few pixels
+                if pix.width > 0 and pix.height > 0:
+                    raw = pix.samples
+                    sample_count = min(2000, len(raw) // pix.n)
+                    step = max(1, len(raw) // (sample_count * pix.n))
+                    dark = sum(1 for j in range(0, min(len(raw), sample_count * step * pix.n), step * pix.n) if raw[j] < 200)
+                    if sample_count > 0 and dark / sample_count < 0.01:
+                        print(f"[OCR] Skipping blank page {i+1}")
+                        os.remove(img_path)
+                        continue
+                image_paths.append(img_path)
+            except Exception as e:
+                print(f"[OCR] Error on page {i+1}: {e}")
         doc.close()
-        print(f"[OCR] Extracted {len(image_paths)} non-blank pages from {len(doc)} total")
+        print(f"[OCR] Extracted {len(image_paths)} non-blank pages from {page_count} total")
     except Exception as e:
         print(f"[PDF] Image extraction failed: {e}")
     return image_paths
 
 
-def _ocr_scanned_pdf(pdf_path: str, upload_dir: str) -> str:
-    """Run OCR on a scanned PDF by extracting page images and using LLaVA."""
+def _ocr_page_tesseract(image_path: str) -> str:
+    """Fast OCR using Tesseract. Works well for printed text."""
+    try:
+        import pytesseract
+        from PIL import Image
+        img = Image.open(image_path)
+        return pytesseract.image_to_string(img)
+    except ImportError:
+        return ""
+    except Exception:
+        return ""
+
+
+def _ocr_page_vlm_with_timeout(image_path: str, timeout: int = 90) -> str:
+    """Run LLaVA OCR on a single page with a timeout."""
     if not UNIFIED_EVAL_AVAILABLE:
         return ""
+    import concurrent.futures
     from evaluation.unified_evaluator import ocr_with_vlm
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(ocr_with_vlm, image_path, True)
+        try:
+            result = future.result(timeout=timeout)
+            return result.get("text", "")
+        except concurrent.futures.TimeoutError:
+            print(f"[OCR] LLaVA timed out after {timeout}s for {os.path.basename(image_path)}")
+            return ""
+        except Exception:
+            return ""
+
+
+def _ocr_scanned_pdf(pdf_path: str, upload_dir: str) -> str:
+    """Run OCR on a scanned PDF. Uses Tesseract (fast) first, falls back to LLaVA
+    for pages where Tesseract output is too garbled."""
     image_paths = _extract_images_from_pdf(pdf_path, upload_dir)
     if not image_paths:
         return ""
-    print(f"[OCR] Running fast OCR on {len(image_paths)} pages from scanned PDF")
-    import concurrent.futures
-    results_map = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(image_paths), 4)) as executor:
-        futures = {executor.submit(ocr_with_vlm, img, True): i for i, img in enumerate(image_paths)}
-        for future in concurrent.futures.as_completed(futures):
-            idx = futures[future]
-            try:
-                result = future.result()
-                if result.get("text"):
-                    results_map[idx] = result["text"]
-            except Exception:
-                pass
-    texts = [results_map[i] for i in sorted(results_map.keys())]
+
+    # Check if Tesseract is available
+    tesseract_available = False
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        tesseract_available = True
+    except Exception:
+        pass
+
+    print(f"[OCR] Processing {len(image_paths)} pages (tesseract={'yes' if tesseract_available else 'no'}, llava={'yes' if UNIFIED_EVAL_AVAILABLE else 'no'})")
+
+    texts = []
+    for i, img_path in enumerate(image_paths):
+        page_text = ""
+        if tesseract_available:
+            page_text = _ocr_page_tesseract(img_path)
+            # Check if Tesseract output is usable (has enough real words)
+            words = [w for w in page_text.split() if len(w) > 2 and w.isalpha()]
+            # Check if enough real words AND average word length is reasonable
+            avg_word_len = sum(len(w) for w in words) / max(len(words), 1)
+            is_usable = len(words) >= 8 and avg_word_len >= 3.5
+            if is_usable:
+                print(f"[OCR] Page {i+1}: Tesseract OK ({len(page_text)} chars, {len(words)} words)")
+                texts.append(page_text)
+                continue
+            else:
+                print(f"[OCR] Page {i+1}: Tesseract low quality ({len(words)} words, avg len {avg_word_len:.1f}), trying LLaVA...")
+
+        # Fall back to LLaVA with timeout
+        if UNIFIED_EVAL_AVAILABLE:
+            vlm_text = _ocr_page_vlm_with_timeout(img_path, timeout=90)
+            if vlm_text:
+                print(f"[OCR] Page {i+1}: LLaVA OK ({len(vlm_text)} chars)")
+                texts.append(vlm_text)
+                continue
+
+        # Use whatever Tesseract gave us, even if garbled
+        if page_text.strip():
+            texts.append(page_text)
+            print(f"[OCR] Page {i+1}: Using garbled Tesseract output ({len(page_text)} chars)")
+        else:
+            print(f"[OCR] Page {i+1}: No text extracted")
+
     combined = "\n\n".join(texts)
-    print(f"[OCR] Extracted {len(combined)} chars from {len(texts)}/{len(image_paths)} pages")
+    print(f"[OCR] Total: {len(combined)} chars from {len(texts)}/{len(image_paths)} pages")
     return combined
 
 
