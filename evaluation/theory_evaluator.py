@@ -154,14 +154,23 @@ Respond with ONLY valid JSON (no explanation outside JSON):
 {{"score": <integer or decimal, 0 to {max_marks}>, "feedback": "<2-3 sentences of specific constructive feedback>", "covered": ["<key concept covered>"], "missing": ["<key concept missing>"]}}"""
 
     try:
-        resp = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1},
-        )
-        import json as _json
-        content = resp["message"]["content"].strip()
-        # extract JSON even if wrapped in markdown code block
+        import threading, json as _json
+        result_holder: list = [None]
+        def _call():
+            try:
+                result_holder[0] = ollama.chat(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0.1},
+                )
+            except Exception:
+                pass
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=20)          # 20 s max — if Ollama not running, falls back immediately
+        if result_holder[0] is None:
+            return None
+        content = result_holder[0]["message"]["content"].strip()
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if not json_match:
             return None

@@ -105,13 +105,44 @@ def segment_answers(pages: List[Dict]) -> List[Dict]:
             for i, p in enumerate(pages, start=1)
         ]
 
+    # Filter: only keep matches whose question number ≤ total pages × 3 (sanity cap)
+    # and that form a roughly sequential run starting from 1-3.
+    # This prevents stray numbers in headers/footers/marks-tables from becoming fake questions.
+    filtered = []
+    expected = None
+    for pos, qnum, m in sorted([(m.start(), _q_num(m), m) for m in matches], key=lambda x: x[0]):
+        if qnum > max(15, len(pages) * 3):   # hard cap — no real exam has >15 questions per script
+            continue
+        if expected is None:
+            if qnum <= 3:                     # must start from Q1, Q2, or Q3
+                filtered.append((pos, qnum, m))
+                expected = qnum + 1
+        else:
+            if qnum == expected or qnum == expected + 1:  # allow one skip
+                filtered.append((pos, qnum, m))
+                expected = qnum + 1
+
+    if not filtered:
+        # Fall back: one segment per page
+        return [
+            {
+                "q_number": i,
+                "text": p["text"],
+                "image_paths": [p["image_path"]],
+                "page_start": p["page"],
+                "ocr_confidence": p.get("confidence", 1.0),
+                "low_confidence": p.get("low_confidence", False),
+            }
+            for i, p in enumerate(pages, start=1)
+        ]
+
     segments: List[Dict] = []
-    for idx, m in enumerate(matches):
+    for idx, (pos, qnum, m) in enumerate(filtered):
         start = m.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(full_text)
+        end = filtered[idx + 1][2].start() if idx + 1 < len(filtered) else len(full_text)
         img, conf = _img_conf_for_offset(m.start())
         segments.append({
-            "q_number": _q_num(m),
+            "q_number": qnum,
             "text": full_text[start:end].strip(),
             "image_paths": [img],
             "page_start": next(

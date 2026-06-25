@@ -91,7 +91,7 @@ const TYPE_COLOR: Record<string, string> = {
 function ScorePill({ score, max }: { score: number; max: number }) {
   const pct = max > 0 ? (score / max) * 100 : 0
   const color = pct >= 70 ? 'text-emerald-600' : pct >= 40 ? 'text-amber-600' : 'text-red-500'
-  return <span className={`font-bold text-base ${color}`}>{score}<span className="text-xs text-gray-400">/{max}</span></span>
+  return <span className={`font-bold text-base ${color}`}>{score}<span className="text-xs text-gray-400 ml-0.5">marks</span></span>
 }
 
 function DepBanner({ deps }: { deps: DepStatus }) {
