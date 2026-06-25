@@ -1411,29 +1411,77 @@ def _heuristic_parse_scheme(text: str) -> list:
     """Regex-based fallback to extract questions when LLM is unavailable."""
     import re as _re
     questions = []
-    pattern = _re.compile(
-        r'(?:Q(?:uestion)?\.?\s*)?(\d+[a-z]?)[.\s)]\s*(.+?)(?=(?:Q(?:uestion)?\.?\s*)?\d+[a-z]?[.\s)]|\Z)',
-        _re.DOTALL | _re.IGNORECASE
-    )
-    marks_pattern = _re.compile(r'\[?\s*(\d+)\s*(?:marks?|pts?|points?)\s*\]?', _re.IGNORECASE)
+    lines = text.split('\n')
 
-    for match in pattern.finditer(text):
-        q_num = match.group(1)
-        content = match.group(2).strip()
-        marks_match = marks_pattern.search(content)
-        marks = int(marks_match.group(1)) if marks_match else 10
+    q_header_pattern = _re.compile(r'^(\d+(?:\.\d+|[a-e])?)\s+([A-Za-z].+)', _re.IGNORECASE)
+    q_number_only = _re.compile(r'^(\d+(?:\.\d+|[a-e]))\s*$')
+    marks_line_pattern = _re.compile(r'^(\d{1,2})\s+\d+\s+\d+\s*$')
+    inline_marks = _re.compile(r'\[?\s*(\d+)\s*(?:marks?|pts?|points?)\s*\]?', _re.IGNORECASE)
+    total_marks_line = _re.compile(r'Total\s+(\d+)\s*Marks', _re.IGNORECASE)
+    page_line = _re.compile(r'^\d+\s*\|\s*P\s*a\s*g\s*e')
+    skip_lines = _re.compile(r'^(PART\s*[–\-]\s*[A-Z]|Q\.\s*$|No\s+Question|Academic Year|Department of|Date:|Semester:|Course)', _re.IGNORECASE)
 
-        lines = [l.strip() for l in content.split('\n') if l.strip()]
-        q_text = lines[0] if lines else content[:200]
-        ref_answer = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+    segments = []
+    current_qnum = None
+    current_lines = []
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or page_line.match(stripped) or skip_lines.match(stripped):
+            continue
+        if stripped.lower().startswith('no question m bt co') or stripped.lower() == 'question m bt co':
+            continue
+
+        header_match = q_header_pattern.match(stripped)
+        numonly_match = q_number_only.match(stripped)
+
+        if header_match:
+            if current_qnum:
+                segments.append((current_qnum, current_lines))
+            current_qnum = header_match.group(1)
+            current_lines = [header_match.group(2).strip()] if header_match.group(2).strip() else []
+        elif numonly_match:
+            if current_qnum:
+                segments.append((current_qnum, current_lines))
+            current_qnum = numonly_match.group(1)
+            current_lines = []
+        elif current_qnum is not None:
+            current_lines.append(stripped)
+
+    if current_qnum:
+        segments.append((current_qnum, current_lines))
+
+    for q_num, content_lines in segments:
+        marks = 0
+        filtered = []
+        for cl in content_lines:
+            m = marks_line_pattern.match(cl)
+            if m:
+                marks = int(m.group(1))
+            else:
+                filtered.append(cl)
+
+        if not marks:
+            tm = total_marks_line.search('\n'.join(filtered))
+            if tm:
+                marks = int(tm.group(1))
+        if not marks:
+            for cl in filtered:
+                im = inline_marks.search(cl)
+                if im:
+                    marks = int(im.group(1))
+                    break
+        if not marks:
+            marks = 10
+
+        q_text = filtered[0] if filtered else f"Question {q_num}"
+        ref_answer = '\n'.join(filtered[1:]) if len(filtered) > 1 else ""
 
         q_type = "theory"
         q_lower = q_text.lower()
-        num_cues = ["calculate", "compute", "find the value", "determine", "solve", "numerical"]
-        draw_cues = ["draw", "sketch", "diagram", "orthographic", "isometric"]
-        if any(c in q_lower for c in num_cues):
+        if any(c in q_lower for c in ["calculate", "compute", "find the value", "determine", "solve", "numerical"]):
             q_type = "numerical"
-        elif any(c in q_lower for c in draw_cues):
+        elif any(c in q_lower for c in ["draw", "sketch", "diagram", "orthographic", "isometric"]):
             q_type = "drawing"
 
         questions.append({
