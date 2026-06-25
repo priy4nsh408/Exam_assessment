@@ -1423,6 +1423,52 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
     return ""
 
 
+def _extract_images_from_pdf(pdf_path: str, upload_dir: str, max_pages: int = 20) -> list:
+    """Extract page images from a scanned PDF. Returns list of image file paths."""
+    image_paths = []
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        for i, page in enumerate(doc):
+            if i >= max_pages:
+                break
+            pix = page.get_pixmap(dpi=150)
+            img_path = os.path.join(upload_dir, f"_page_{i+1}_{os.path.basename(pdf_path)}.png")
+            pix.save(img_path)
+            image_paths.append(img_path)
+        doc.close()
+    except Exception as e:
+        print(f"[PDF] Image extraction failed: {e}")
+    return image_paths
+
+
+def _ocr_scanned_pdf(pdf_path: str, upload_dir: str) -> str:
+    """Run OCR on a scanned PDF by extracting page images and using LLaVA."""
+    if not UNIFIED_EVAL_AVAILABLE:
+        return ""
+    from evaluation.unified_evaluator import ocr_with_vlm
+    image_paths = _extract_images_from_pdf(pdf_path, upload_dir)
+    if not image_paths:
+        return ""
+    print(f"[OCR] Running OCR on {len(image_paths)} pages from scanned PDF")
+    import concurrent.futures
+    results_map = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(image_paths), 4)) as executor:
+        futures = {executor.submit(ocr_with_vlm, img): i for i, img in enumerate(image_paths)}
+        for future in concurrent.futures.as_completed(futures):
+            idx = futures[future]
+            try:
+                result = future.result()
+                if result.get("text"):
+                    results_map[idx] = result["text"]
+            except Exception:
+                pass
+    texts = [results_map[i] for i in sorted(results_map.keys())]
+    combined = "\n\n".join(texts)
+    print(f"[OCR] Extracted {len(combined)} chars from {len(texts)}/{len(image_paths)} pages")
+    return combined
+
+
 def _parse_answer_scheme(pdf_text: str) -> list:
     """Extract structured questions from answer scheme text.
     Uses heuristic parser first (reliable for structured schemes), falls back to LLM."""
@@ -1749,6 +1795,8 @@ async def eval_batch(
         image_path = None
         if student_file.filename.lower().endswith(".pdf"):
             file_text = _extract_text_from_pdf(file_save_path)
+            if not file_text:
+                file_text = _ocr_scanned_pdf(file_save_path, str(upload_dir))
         elif student_file.filename.lower().endswith(".txt"):
             with open(file_save_path, "r", encoding="utf-8", errors="ignore") as tf:
                 file_text = tf.read()
@@ -1893,6 +1941,10 @@ async def eval_unified(
             pdf_text = _extract_text_from_pdf(file_save_path)
             if pdf_text and not student_answer:
                 student_answer = pdf_text
+            elif not pdf_text:
+                ocr_text = _ocr_scanned_pdf(file_save_path, str(upload_dir))
+                if ocr_text:
+                    student_answer = ocr_text
         else:
             image_path = file_save_path
 
