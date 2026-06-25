@@ -208,22 +208,53 @@ If Ollama is not running, numerical grading uses a heuristic fallback that still
 
 ## Running
 
-```bash
-# Terminal 1 — backend
+### Every time you start
+
+**Terminal 1 — Backend**
+
+```powershell
+cd C:\Users\sriva\OneDrive\Desktop\IDP6SEMEL
+git pull origin claude/practical-goldberg-12yy6e
+.\.venv\Scripts\Activate.ps1
 cd backend
-# Windows PowerShell:
-.\venv\Scripts\Activate.ps1
-# macOS/Linux:
-# source ../venv/bin/activate
-
 uvicorn main:app --reload --port 8000
+```
 
-# Terminal 2 — frontend
-cd frontend
+Wait until you see:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+**Terminal 2 — Frontend** (new terminal window)
+
+```powershell
+cd C:\Users\sriva\OneDrive\Desktop\IDP6SEMEL\frontend
 npm run dev
 ```
 
-Open `http://localhost:5173`
+Open **http://localhost:5173**
+
+---
+
+### First-time setup only
+
+```powershell
+cd C:\Users\sriva\OneDrive\Desktop\IDP6SEMEL
+
+# Allow scripts to run (once per machine)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# Activate venv and install backend packages
+.\.venv\Scripts\Activate.ps1
+cd backend
+pip install -r requirements.txt
+cd ..
+
+# Install frontend packages
+cd frontend
+npm install
+cd ..
+```
 
 ---
 
