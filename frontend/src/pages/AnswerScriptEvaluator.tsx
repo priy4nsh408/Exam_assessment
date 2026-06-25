@@ -312,11 +312,6 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
 }
 
 function SingleReport({ report }: { report: ScriptReport }) {
-  const pct = report.percentage
-  const grade = pct >= 90 ? 'O' : pct >= 80 ? 'A+' : pct >= 70 ? 'A' : pct >= 60 ? 'B+' : pct >= 50 ? 'B' : pct >= 40 ? 'C' : 'F'
-  const scoreColor = pct >= 70 ? 'text-emerald-700' : pct >= 40 ? 'text-amber-700' : 'text-red-600'
-  const cardColor  = pct >= 70 ? 'bg-emerald-50 border-emerald-200' : pct >= 40 ? 'bg-amber-50 border-amber-200' : 'bg-red-50 border-red-200'
-
   return (
     <div className="space-y-4">
       {report.ocr_warning && (
@@ -328,21 +323,13 @@ function SingleReport({ report }: { report: ScriptReport }) {
         </div>
       )}
 
-      {/* Score summary — clean and simple */}
-      <div className={`card p-5 ${cardColor}`}>
-        <div className="flex items-center justify-between flex-wrap gap-4">
-          <div>
-            <p className="text-xs text-gray-500 mb-1">Marks Scored</p>
-            <p className={`text-4xl font-bold ${scoreColor}`}>
-              {report.total_score}
-              <span className="text-xl text-gray-400 font-normal"> / {report.max_total}</span>
-            </p>
-          </div>
-          <div className="text-right">
-            <p className={`text-3xl font-bold ${scoreColor}`}>{report.percentage}%</p>
-            <p className="text-lg font-semibold text-indigo-600 mt-0.5">{grade}</p>
-          </div>
-        </div>
+      {/* Score summary — marks only */}
+      <div className="card p-5 bg-indigo-50 border-indigo-200">
+        <p className="text-xs text-gray-500 mb-1">Marks Obtained</p>
+        <p className="text-5xl font-bold text-indigo-700">
+          {report.total_score}
+          <span className="text-2xl text-gray-400 font-normal"> / {report.max_total}</span>
+        </p>
         <div className="flex gap-4 mt-3 text-xs text-gray-500 flex-wrap">
           <span>{report.questions_evaluated} question(s) evaluated</span>
           <span>·</span>
@@ -368,15 +355,6 @@ function SingleReport({ report }: { report: ScriptReport }) {
 
       <div className="space-y-2">
         {report.answers.map(ans => <AnswerCard key={ans.q_number} ans={ans} />)}
-      </div>
-
-      <div className={`card p-4 flex items-center gap-3 ${pct >= 40 ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
-        {pct >= 40
-          ? <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
-          : <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />}
-        <p className={`text-sm font-medium ${pct >= 40 ? 'text-emerald-800' : 'text-red-700'}`}>
-          {pct >= 40 ? 'Pass' : 'Fail'} — {grade} ({report.percentage}%) · {report.total_score}/{report.max_total} marks
-        </p>
       </div>
     </div>
   )

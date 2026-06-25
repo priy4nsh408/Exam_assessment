@@ -1625,6 +1625,190 @@ async def delete_eval_result(result_id: str):
     return {"deleted": result_id}
 
 
+@app.post("/api/eval/seed-demo")
+async def seed_demo_results():
+    """Insert 2 realistic pre-crafted evaluation results for showcase purposes."""
+    import uuid, json as _json
+    conn = _get_results_conn()
+
+    demo_reports = [
+        {
+            "id": "demo-001",
+            "student_name": "Arjun Sharma",
+            "student_usn": "1RV21ME010",
+            "subject": "Aerospace Structures",
+            "total_score": 22.0,
+            "max_total": 30,
+            "percentage": 73.3,
+            "questions_evaluated": 3,
+            "ocr_pages": 4,
+            "avg_ocr_confidence": 0.81,
+            "low_confidence_pages": [],
+            "ocr_warning": False,
+            "deps": {},
+            "answers": [
+                {
+                    "q_number": 1,
+                    "q_type": "theory",
+                    "question": "Define stress and strain. Differentiate between engineering stress and true stress with suitable examples.",
+                    "ocr_text": "Stress is defined as the internal resisting force per unit area developed within a body when subjected to external load. Strain is the ratio of change in dimension to original dimension. Engineering stress uses original area while true stress uses instantaneous area. For ductile materials under large deformation, true stress is always greater than engineering stress.",
+                    "ai_score": 8.0,
+                    "max_score": 10,
+                    "confidence": 0.88,
+                    "feedback": "Excellent definitions with clear differentiation. The student correctly identified that true stress uses instantaneous area and explained the relationship for ductile materials under large deformation. Could have included a numerical example to further illustrate the difference.",
+                    "grading_method": "llm",
+                    "ocr_confidence": 0.84,
+                    "low_confidence": False,
+                    "image_paths": [],
+                    "page_start": 1,
+                    "detail": {
+                        "covered": ["stress definition", "strain definition", "engineering vs true stress", "instantaneous area"],
+                        "missing": ["numerical example"]
+                    }
+                },
+                {
+                    "q_number": 2,
+                    "q_type": "numerical",
+                    "question": "A cylindrical rod of diameter 20 mm and length 500 mm is subjected to an axial tensile load of 50 kN. Find the stress, strain, and elongation if E = 200 GPa.",
+                    "ocr_text": "Given: d = 20 mm, L = 500 mm, P = 50 kN = 50000 N, E = 200 GPa\nArea A = π/4 × d² = π/4 × 20² = 314.16 mm²\nStress σ = P/A = 50000/314.16 = 159.15 MPa\nStrain ε = σ/E = 159.15/(200×10³) = 7.96×10⁻⁴\nElongation δ = ε × L = 7.96×10⁻⁴ × 500 = 0.398 mm",
+                    "ai_score": 9.0,
+                    "max_score": 10,
+                    "confidence": 0.92,
+                    "feedback": "All three quantities correctly computed with proper unit conversions. Area calculation, stress, strain and elongation are all accurate. Minor: could state Hooke's Law explicitly before applying it.",
+                    "grading_method": "llm",
+                    "ocr_confidence": 0.79,
+                    "low_confidence": False,
+                    "image_paths": [],
+                    "page_start": 2,
+                    "detail": {
+                        "steps": ["area calculation", "stress calculation", "strain calculation", "elongation"],
+                        "error_summary": {},
+                        "formula_mentioned": True,
+                        "final_answer_correct": True,
+                        "deductions": []
+                    }
+                },
+                {
+                    "q_number": 3,
+                    "q_type": "theory",
+                    "question": "Explain the concept of Poisson's ratio and its significance in structural analysis.",
+                    "ocr_text": "Poisson's ratio is defined as the ratio of lateral strain to longitudinal strain when a material is subjected to axial load. It is denoted by ν and for most metals ranges from 0.25 to 0.35. It is significant in structural analysis because it determines multi-axial stress states and is used in plane stress and plane strain conditions.",
+                    "ai_score": 5.0,
+                    "max_score": 10,
+                    "confidence": 0.75,
+                    "feedback": "Basic definition is correct and the typical range is mentioned. However, the answer lacks depth on significance in structural analysis — generalized Hooke's Law equations, applications in thin plates, pressure vessels, or composite structures were not discussed.",
+                    "grading_method": "llm",
+                    "ocr_confidence": 0.81,
+                    "low_confidence": False,
+                    "image_paths": [],
+                    "page_start": 3,
+                    "detail": {
+                        "covered": ["definition", "symbol", "typical range"],
+                        "missing": ["generalized Hooke's Law", "plane stress application", "plane strain application", "numerical significance"]
+                    }
+                }
+            ]
+        },
+        {
+            "id": "demo-002",
+            "student_name": "Priya Nair",
+            "student_usn": "1RV21ME027",
+            "subject": "Aerospace Structures",
+            "total_score": 17.0,
+            "max_total": 30,
+            "percentage": 56.7,
+            "questions_evaluated": 3,
+            "ocr_pages": 3,
+            "avg_ocr_confidence": 0.68,
+            "low_confidence_pages": [2],
+            "ocr_warning": True,
+            "deps": {},
+            "answers": [
+                {
+                    "q_number": 1,
+                    "q_type": "theory",
+                    "question": "Define stress and strain. Differentiate between engineering stress and true stress with suitable examples.",
+                    "ocr_text": "Stress is force per area. Strain is change in length over original length. Engineering stress uses original cross section area and true stress uses actual area at the time of loading.",
+                    "ai_score": 5.0,
+                    "max_score": 10,
+                    "confidence": 0.70,
+                    "feedback": "Basic definitions are present but very brief. The differentiation between engineering and true stress is mentioned but lacks explanation of when and why it matters. No example provided to illustrate the concept.",
+                    "grading_method": "llm",
+                    "ocr_confidence": 0.72,
+                    "low_confidence": False,
+                    "image_paths": [],
+                    "page_start": 1,
+                    "detail": {
+                        "covered": ["stress definition", "strain definition", "engineering vs true stress"],
+                        "missing": ["numerical example", "ductile material context", "large deformation scenario"]
+                    }
+                },
+                {
+                    "q_number": 2,
+                    "q_type": "numerical",
+                    "question": "A cylindrical rod of diameter 20 mm and length 500 mm is subjected to an axial tensile load of 50 kN. Find the stress, strain, and elongation if E = 200 GPa.",
+                    "ocr_text": "d = 20 mm, P = 50 kN, L = 500, E = 200 GPa\nA = π × 20² / 4 = 314 mm²\nσ = 50000/314 = 159.2 MPa\nε = 159.2/200000 = 7.96 × 10⁻⁴\nδ = 7.96 × 10⁻⁴ × 500 = 0.4 mm",
+                    "ai_score": 8.0,
+                    "max_score": 10,
+                    "confidence": 0.85,
+                    "feedback": "Correct approach and final answers. Minor rounding in area (314 vs 314.16) leads to slightly rounded final answer but methodology is sound. Unit conversion for E is correctly applied.",
+                    "grading_method": "llm",
+                    "ocr_confidence": 0.62,
+                    "low_confidence": True,
+                    "image_paths": [],
+                    "page_start": 2,
+                    "detail": {
+                        "steps": ["area", "stress", "strain", "elongation"],
+                        "error_summary": {"rounding": 1},
+                        "formula_mentioned": True,
+                        "final_answer_correct": True,
+                        "deductions": [{"reason": "minor rounding", "marks": 0}]
+                    }
+                },
+                {
+                    "q_number": 3,
+                    "q_type": "theory",
+                    "question": "Explain the concept of Poisson's ratio and its significance in structural analysis.",
+                    "ocr_text": "Poisson ratio is lateral strain divided by axial strain. It is used in material properties.",
+                    "ai_score": 4.0,
+                    "max_score": 10,
+                    "confidence": 0.55,
+                    "feedback": "Very brief answer. The definition is technically correct but no discussion of significance in structural analysis, typical values, applications, or multi-axial stress states. Substantial marks lost for missing content.",
+                    "grading_method": "llm",
+                    "ocr_confidence": 0.71,
+                    "low_confidence": False,
+                    "image_paths": [],
+                    "page_start": 3,
+                    "detail": {
+                        "covered": ["definition"],
+                        "missing": ["significance", "typical values", "plane stress", "plane strain", "applications"]
+                    }
+                }
+            ]
+        }
+    ]
+
+    inserted = []
+    for r in demo_reports:
+        existing = conn.execute("SELECT id FROM eval_results WHERE id=?", (r["id"],)).fetchone()
+        if existing:
+            inserted.append({"id": r["id"], "status": "already_exists"})
+            continue
+        conn.execute(
+            "INSERT INTO eval_results (id, student_name, student_usn, subject, total_score, max_total, "
+            "percentage, questions_evaluated, report_json, evaluated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                r["id"], r["student_name"], r["student_usn"], r["subject"],
+                r["total_score"], r["max_total"], r["percentage"], r["questions_evaluated"],
+                _json.dumps(r), "2024-12-15T10:30:00"
+            )
+        )
+        inserted.append({"id": r["id"], "student": r["student_name"], "status": "inserted"})
+    conn.commit()
+    conn.close()
+    return {"seeded": inserted}
+
+
 @app.post("/api/eval/script/batch")
 async def eval_answer_script_batch(
     files: List[UploadFile] = File(...),
