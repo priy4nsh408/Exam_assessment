@@ -585,6 +585,108 @@ def _parse_json(text: str) -> Optional[dict]:
         return None
 
 
+# ── LLM-Based Comprehensive Grading ─────────────────────────────────────────
+
+def _llm_grade_answer(question: str, student_answer: str, reference_answer: str,
+                      max_marks: int, subject: str, question_type: str,
+                      expected_formula: str = "", expected_final_answer: str = "") -> Optional[dict]:
+    """Use LLM to read both the answer scheme and student answer, then grade
+    based on evaluation metrics: keyword coverage, conceptual accuracy,
+    equation/formula presence, step correctness, and completeness."""
+    if not OLLAMA_AVAILABLE or not student_answer.strip():
+        return None
+
+    formula_section = ""
+    if expected_formula:
+        formula_section = f"\nEXPECTED FORMULA: {expected_formula}"
+    if expected_final_answer:
+        formula_section += f"\nEXPECTED FINAL ANSWER: {expected_final_answer}"
+
+    prompt = f"""You are an expert {subject or 'engineering'} professor grading a student's answer.
+
+QUESTION ({question_type}, {max_marks} marks):
+{question}
+
+ANSWER SCHEME / MODEL ANSWER:
+{reference_answer}
+{formula_section}
+
+STUDENT'S ANSWER:
+{student_answer}
+
+Grade the student's answer against the answer scheme. Evaluate on these metrics:
+
+1. **Keyword Coverage** (how many key technical terms from the scheme appear in the student answer)
+2. **Conceptual Accuracy** (does the student demonstrate correct understanding)
+3. **Completeness** (are all required points/steps covered)
+4. **Mathematical Equations** (if required: did the student write the correct formula/equation)
+5. **Final Answer** (for numerical: is the final value correct)
+6. **Clarity & Structure** (is the answer well-organized)
+
+SCORING RULES:
+- Maximum marks: {max_marks}
+- If a mathematical equation is required but missing: deduct 1 mark
+- For numerical: if formula not mentioned, deduct 1 mark; if final answer wrong, deduct 2 marks
+- Award partial marks for partially correct answers
+
+Respond ONLY in this JSON format:
+{{
+  "score": <number between 0 and {max_marks}>,
+  "keyword_analysis": {{
+    "found": ["list of key terms student mentioned"],
+    "missing": ["list of key terms student missed"],
+    "coverage_percent": <0-100>
+  }},
+  "conceptual_accuracy": <0-100>,
+  "completeness": <0-100>,
+  "equation_present": true/false,
+  "formula_correct": true/false,
+  "final_answer_correct": true/false,
+  "deductions": [
+    {{"reason": "why marks deducted", "marks": <number>}}
+  ],
+  "feedback": "2-3 sentences of specific feedback explaining the score",
+  "explanation": "Detailed breakdown of how marks were awarded and deducted",
+  "confidence": <0.0 to 1.0>
+}}
+Output ONLY valid JSON. No markdown or explanation outside the JSON."""
+
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.2},
+        )
+        parsed = _parse_json(resp["message"]["content"].strip())
+        if parsed and "score" in parsed:
+            score = max(0.0, min(float(parsed["score"]), max_marks))
+            kw_analysis = parsed.get("keyword_analysis", {})
+            return {
+                "ai_score": round(score, 1),
+                "max_score": max_marks,
+                "confidence": min(0.95, max(0.3, float(parsed.get("confidence", 0.7)))),
+                "feedback": parsed.get("feedback", ""),
+                "explanation": parsed.get("explanation", ""),
+                "keywords": {
+                    "found": kw_analysis.get("found", []),
+                    "missing": kw_analysis.get("missing", []),
+                    "matched_count": len(kw_analysis.get("found", [])),
+                    "total_count": len(kw_analysis.get("found", [])) + len(kw_analysis.get("missing", [])),
+                    "coverage_ratio": (kw_analysis.get("coverage_percent", 50) or 50) / 100,
+                },
+                "conceptual_accuracy": parsed.get("conceptual_accuracy", 0),
+                "completeness": parsed.get("completeness", 0),
+                "formula_mentioned": parsed.get("formula_correct", True),
+                "final_answer_correct": parsed.get("final_answer_correct", True),
+                "equation_present": parsed.get("equation_present", True),
+                "deductions": parsed.get("deductions", []),
+                "llm_graded": True,
+            }
+    except Exception:
+        pass
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN UNIFIED EVALUATOR
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -638,41 +740,57 @@ def evaluate(
     if question_type == "auto":
         question_type = detect_question_type(question, has_diagram)
 
-    # ── Step 3: Score based on type ──────────────────────────────────────
-    result = {}
+    # ── Step 3: LLM reads scheme + answer, then score ─────────────────
+    result = None
 
-    if question_type == "drawing":
-        result = _evaluate_drawing(
-            question, answer_image_path, reference_answer, max_marks,
-            expected_parts, expected_dimensions,
-        )
-    elif question_type == "numerical":
-        result = _evaluate_numerical(
+    # Try LLM-based comprehensive grading first (reads both documents)
+    if question_type != "drawing" and student_answer.strip():
+        result = _llm_grade_answer(
             question, student_answer, reference_answer, max_marks,
-            subject, expected_formula, expected_final_answer,
+            subject, question_type, expected_formula, expected_final_answer,
         )
-    else:
-        result = _evaluate_theory(
-            question, student_answer, reference_answer, max_marks,
-            subject, keyword_weight, semantic_weight, skip_llm_feedback,
-        )
+
+    # Fall back to type-specific heuristic scoring if LLM unavailable
+    if result is None:
+        if question_type == "drawing":
+            result = _evaluate_drawing(
+                question, answer_image_path, reference_answer, max_marks,
+                expected_parts, expected_dimensions,
+            )
+        elif question_type == "numerical":
+            result = _evaluate_numerical(
+                question, student_answer, reference_answer, max_marks,
+                subject, expected_formula, expected_final_answer,
+            )
+        else:
+            result = _evaluate_theory(
+                question, student_answer, reference_answer, max_marks,
+                subject, keyword_weight, semantic_weight, skip_llm_feedback,
+            )
 
     # ── Step 4: Universal equation deduction ─────────────────────────────
-    # If the question requires a mathematical equation and the student
-    # didn't write one, deduct 1 mark (applies to ALL question types)
-    eq_required = question_requires_equation(question)
-    eq_present = equation_present_in_answer(
-        student_answer, reference_answer, expected_formula
-    )
-    eq_deducted = False
+    # If LLM graded, it already applied deductions — use its findings.
+    # Otherwise, apply heuristic equation check.
+    llm_graded = result.get("llm_graded", False)
 
-    if eq_required and not eq_present and question_type != "drawing":
-        result["ai_score"] = max(0.0, round(result["ai_score"] - 1.0, 1))
-        eq_deducted = True
-        result["feedback"] = (result.get("feedback", "") +
-            " Mathematical equation/formula was required but not found in the answer (-1 mark).")
-        result["explanation"] = (result.get("explanation", "") +
-            " Deducted 1 mark: the question required a mathematical equation but none was written.")
+    if llm_graded:
+        eq_required = question_requires_equation(question)
+        eq_present = result.get("equation_present", True)
+        eq_deducted = eq_required and not eq_present
+    else:
+        eq_required = question_requires_equation(question)
+        eq_present = equation_present_in_answer(
+            student_answer, reference_answer, expected_formula
+        )
+        eq_deducted = False
+
+        if eq_required and not eq_present and question_type != "drawing":
+            result["ai_score"] = max(0.0, round(result["ai_score"] - 1.0, 1))
+            eq_deducted = True
+            result["feedback"] = (result.get("feedback", "") +
+                " Mathematical equation/formula was required but not found in the answer (-1 mark).")
+            result["explanation"] = (result.get("explanation", "") +
+                " Deducted 1 mark: the question required a mathematical equation but none was written.")
 
     # ── Step 5: Build unified response ───────────────────────────────────
     result.update({

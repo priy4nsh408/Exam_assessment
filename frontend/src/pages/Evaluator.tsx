@@ -687,6 +687,57 @@ export default function Evaluator() {
                 )}
               </div>
 
+              {/* LLM Grading Badge */}
+              {result.llm_graded && (
+                <div className="flex items-center gap-1 mb-3">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    <CheckCircle2 className="w-3 h-3 inline mr-0.5" />LLM Graded
+                  </span>
+                  <span className="text-[10px] text-gray-400">Model read both scheme & answer</span>
+                </div>
+              )}
+
+              {/* LLM Metrics: Conceptual Accuracy + Completeness */}
+              {result.llm_graded && (result.conceptual_accuracy !== undefined || result.completeness !== undefined) && (
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  {result.conceptual_accuracy !== undefined && (
+                    <div className="p-2 bg-blue-50 rounded-lg">
+                      <p className="text-[10px] font-semibold text-blue-600 uppercase">Conceptual Accuracy</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="flex-1 h-2 bg-blue-100 rounded-full overflow-hidden">
+                          <div className="h-full bg-blue-500 rounded-full" style={{ width: `${result.conceptual_accuracy}%` }} />
+                        </div>
+                        <span className="text-xs font-bold text-blue-700">{result.conceptual_accuracy}%</span>
+                      </div>
+                    </div>
+                  )}
+                  {result.completeness !== undefined && (
+                    <div className="p-2 bg-purple-50 rounded-lg">
+                      <p className="text-[10px] font-semibold text-purple-600 uppercase">Completeness</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="flex-1 h-2 bg-purple-100 rounded-full overflow-hidden">
+                          <div className="h-full bg-purple-500 rounded-full" style={{ width: `${result.completeness}%` }} />
+                        </div>
+                        <span className="text-xs font-bold text-purple-700">{result.completeness}%</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Deductions Breakdown */}
+              {result.deductions && result.deductions.length > 0 && (
+                <div className="mb-3 space-y-1">
+                  <p className="text-[10px] font-semibold text-red-600 uppercase">Deductions</p>
+                  {result.deductions.map((d: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between p-1.5 bg-red-50 rounded text-xs">
+                      <span className="text-red-700">{d.reason}</span>
+                      <span className="font-bold text-red-600">-{d.marks}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Feedback */}
               <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-700 space-y-2">
                 <p><strong>Feedback:</strong> {result.feedback}</p>
