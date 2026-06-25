@@ -144,7 +144,80 @@ def _save_eval_result(report: dict) -> str:
     conn.close()
     return result_id
 
-def _get_override_conn():
+def _get_kappa_conn():
+    conn = sqlite3.connect(str(_RESULTS_DB))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS kappa_scores (
+            id          TEXT PRIMARY KEY,
+            result_id   TEXT NOT NULL,
+            q_number    INTEGER NOT NULL,
+            q_type      TEXT,
+            subject     TEXT,
+            ai_score    REAL,
+            faculty_score REAL NOT NULL,
+            max_score   REAL,
+            created_at  TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def _compute_kappa(pairs: list) -> dict:
+    if not pairs:
+        return {"kappa": None, "pairs": [], "interpretation": "No faculty scores entered yet — score some submissions below to compute Kappa.", "n_pairs": 0}
+
+    def bucket(score: float, max_score: float) -> int:
+        pct = (score / max_score * 10) if max_score else 0
+        if pct <= 3: return 0
+        if pct <= 6: return 1
+        return 2
+
+    BUCKET_LABELS = {0: "Low (0–3)", 1: "Mid (4–6)", 2: "High (7–10)"}
+
+    enriched = []
+    for p in pairs:
+        ab = bucket(p["ai_score"], p["max_score"])
+        fb = bucket(p["faculty_score"], p["max_score"])
+        enriched.append({**p, "ai_bucket": BUCKET_LABELS[ab], "faculty_bucket": BUCKET_LABELS[fb], "agreement": ab == fb})
+
+    from collections import Counter
+    n = len(enriched)
+    n_agree = sum(1 for p in enriched if p["agreement"])
+    p_observed = n_agree / n
+    ai_counts  = Counter(p["ai_bucket"] for p in enriched)
+    fac_counts = Counter(p["faculty_bucket"] for p in enriched)
+    p_expected = sum((ai_counts.get(b, 0) / n) * (fac_counts.get(b, 0) / n) for b in set(ai_counts) | set(fac_counts))
+    kappa = round((p_observed - p_expected) / (1 - p_expected), 3) if p_expected < 1.0 else 1.0
+
+    if kappa >= 0.80:   interp = "Almost perfect agreement (κ ≥ 0.80)"
+    elif kappa >= 0.75: interp = "Substantial agreement — meets project target (κ ≥ 0.75)"
+    elif kappa >= 0.60: interp = "Moderate agreement (κ ≥ 0.60)"
+    elif kappa >= 0.40: interp = "Fair agreement (κ ≥ 0.40)"
+    else:               interp = "Slight agreement (κ < 0.40)"
+
+    theory_pairs  = [p for p in enriched if p.get("q_type") == "theory"]
+    num_pairs     = [p for p in enriched if p.get("q_type") == "numerical"]
+    drawing_pairs = [p for p in enriched if p.get("q_type") == "drawing"]
+
+    return {
+        "kappa":              kappa,
+        "p_observed":         round(p_observed, 3),
+        "p_expected":         round(p_expected, 3),
+        "n_pairs":            n,
+        "n_agreement":        n_agree,
+        "interpretation":     interp,
+        "target":             "κ ≥ 0.75",
+        "target_met":         kappa >= 0.75,
+        "theory_accuracy":    round(sum(1 for p in theory_pairs if p["agreement"]) / len(theory_pairs), 3) if theory_pairs else None,
+        "numerical_accuracy": round(sum(1 for p in num_pairs if p["agreement"]) / len(num_pairs), 3) if num_pairs else None,
+        "drawing_accuracy":   round(sum(1 for p in drawing_pairs if p["agreement"]) / len(drawing_pairs), 3) if drawing_pairs else None,
+        "pairs":              enriched,
+        "note": "Buckets: Low=0–3, Mid=4–6, High=7–10 (as % of max_score scaled to 10). Cohen's κ = (P_o − P_e) / (1 − P_e).",
+    }
+
+
     _OVERRIDE_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_OVERRIDE_DB))
     conn.row_factory = sqlite3.Row
@@ -1311,125 +1384,123 @@ async def eval_numerical(body: NumericalEvalRequest):
 
 @app.get("/api/eval/validate/kappa")
 async def eval_validate_kappa():
+    """Compute Cohen's Kappa from real faculty scores entered via the UI."""
+    conn = _get_kappa_conn()
+    rows = conn.execute("SELECT * FROM kappa_scores ORDER BY created_at").fetchall()
+    conn.close()
+    pairs = [dict(r) for r in rows]
+    return _compute_kappa(pairs)
+
+
+@app.get("/api/eval/validate/kappa/submissions")
+async def kappa_list_submissions():
     """
-    Computes Cohen's Kappa between AI scores and simulated faculty scores on
-    the demo dataset (theory + numerical submissions). This demonstrates the
-    validation methodology described in the synopsis (target κ ≥ 0.75).
-
-    Faculty scores are derived from known answer quality tiers authored in
-    seed_demo_data.py - "good" answers get near-full marks, "poor" answers
-    get low marks, matching what a faculty member would assign. The AI scores
-    are computed live by the real evaluators against the seeded answer keys.
-
-    Score buckets for κ computation: 0-3 (Low), 4-6 (Mid), 7-10 (High).
-    Cohen's κ = (P_o - P_e) / (1 - P_e) where P_o = observed agreement,
-    P_e = expected agreement by chance.
+    Return all evaluated scripts with their per-question AI scores,
+    plus which questions already have faculty scores entered.
+    Faculty uses this to pick a script and enter their own marks.
     """
-    if not HAS_DEMO_DATA:
-        raise HTTPException(status_code=503, detail="Demo data not available")
-
-    try:
-        grades = _demo._grade_all_demo_submissions()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not compute grades: {e}")
-
-    # Simulated faculty scores based on known answer quality tiers.
-    # These represent what a human examiner would award for each submission,
-    # serving as the "ground truth" for Kappa computation.
-    # Submission ID assignment (from demo_data._build_submissions, in order):
-    # ST-001 Arjun:   S-001 theory (good), S-002 numerical (good)
-    # ST-002 Priya:   S-003 theory (good), S-004 numerical (good)
-    # ST-003 Rohan:   S-005 theory (poor), S-006 numerical (wrong_final)
-    # ST-004 Kavitha: S-007 theory (good), S-008 numerical (no_formula)
-    # ST-005 Suresh:  S-009 theory (poor), S-010 numerical (good)
-    FACULTY_SCORES = {
-        # Theory submissions (out of 10): good → 8, poor → 2
-        "S-001": 8,   # Arjun - good theory
-        "S-003": 8,   # Priya - good theory
-        "S-005": 2,   # Rohan - poor theory
-        "S-007": 8,   # Kavitha - good theory
-        "S-009": 2,   # Suresh - poor theory
-        # Numerical submissions (out of 10): good → 10, no_formula → 7, wrong_final → 7
-        "S-002": 10,  # Arjun - good numerical
-        "S-004": 10,  # Priya - good numerical
-        "S-006": 7,   # Rohan - wrong_final (-1)
-        "S-008": 7,   # Kavitha - no_formula (-1)
-        "S-010": 10,  # Suresh - good numerical
-    }
-
-    # Map scores to 3-bucket ordinal scale
-    def bucket(score: float, max_score: float) -> int:
-        pct = (score / max_score * 10) if max_score else 0
-        if pct <= 3: return 0
-        if pct <= 6: return 1
-        return 2
-
-    BUCKET_LABELS = {0: "Low (0-3)", 1: "Mid (4-6)", 2: "High (7-10)"}
-
-    pairs = []
-    for sub_id, faculty_raw in FACULTY_SCORES.items():
-        g = grades.get(sub_id)
-        if not g:
-            continue
-        ai_bucket = bucket(g["ai_score"], g["max_score"])
-        fac_bucket = bucket(faculty_raw, 10)
-        pairs.append({
-            "submission_id": sub_id,
-            "type": g["type"],
-            "ai_score": g["ai_score"],
-            "max_score": g["max_score"],
-            "ai_bucket": BUCKET_LABELS[ai_bucket],
-            "faculty_score": faculty_raw,
-            "faculty_bucket": BUCKET_LABELS[fac_bucket],
-            "agreement": ai_bucket == fac_bucket,
-        })
-
-    if not pairs:
-        return {"kappa": None, "pairs": [], "interpretation": "No pairs computed"}
-
-    n = len(pairs)
-    n_agree = sum(1 for p in pairs if p["agreement"])
-    p_observed = n_agree / n
-
-    # Expected agreement by chance (marginal frequencies)
-    from collections import Counter
-    ai_counts = Counter(p["ai_bucket"] for p in pairs)
-    fac_counts = Counter(p["faculty_bucket"] for p in pairs)
-    p_expected = sum(
-        (ai_counts.get(b, 0) / n) * (fac_counts.get(b, 0) / n)
-        for b in set(ai_counts) | set(fac_counts)
+    res_conn  = _get_results_conn()
+    kap_conn  = _get_kappa_conn()
+    results   = res_conn.execute(
+        "SELECT id, student_name, student_usn, subject, total_score, max_total, "
+        "percentage, questions_evaluated, evaluated_at FROM eval_results ORDER BY evaluated_at DESC"
+    ).fetchall()
+    scored_keys = set(
+        f"{r['result_id']}_{r['q_number']}"
+        for r in kap_conn.execute("SELECT result_id, q_number FROM kappa_scores").fetchall()
     )
+    res_conn.close()
+    kap_conn.close()
 
-    kappa = round((p_observed - p_expected) / (1 - p_expected), 3) if p_expected < 1.0 else 1.0
+    out = []
+    for r in results:
+        r = dict(r)
+        # load per-question AI scores from report_json
+        full_conn = _get_results_conn()
+        row = full_conn.execute("SELECT report_json FROM eval_results WHERE id=?", (r["id"],)).fetchone()
+        full_conn.close()
+        answers = []
+        if row:
+            try:
+                rep = json.loads(row["report_json"])
+                for a in rep.get("answers", []):
+                    answers.append({
+                        "q_number":     a.get("q_number"),
+                        "q_type":       a.get("q_type"),
+                        "question":     a.get("question", ""),
+                        "ai_score":     a.get("ai_score", 0),
+                        "max_score":    a.get("max_score", 10),
+                        "already_scored": f"{r['id']}_{a.get('q_number')}" in scored_keys,
+                    })
+            except Exception:
+                pass
+        r["answers"] = answers
+        out.append(r)
+    return {"submissions": out}
 
-    if kappa >= 0.80:
-        interpretation = "Almost perfect agreement (κ ≥ 0.80)"
-    elif kappa >= 0.75:
-        interpretation = "Substantial agreement — meets project target (κ ≥ 0.75)"
-    elif kappa >= 0.60:
-        interpretation = "Moderate agreement (κ ≥ 0.60)"
-    elif kappa >= 0.40:
-        interpretation = "Fair agreement (κ ≥ 0.40)"
+
+class KappaScoreRequest(BaseModel):
+    result_id:     str
+    q_number:      int
+    faculty_score: float
+
+
+@app.post("/api/eval/validate/kappa/score")
+async def kappa_submit_score(body: KappaScoreRequest):
+    """Faculty submits their score for one question in an evaluated script."""
+    res_conn = _get_results_conn()
+    row = res_conn.execute("SELECT report_json FROM eval_results WHERE id=?", (body.result_id,)).fetchone()
+    res_conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Evaluation result not found")
+
+    rep = json.loads(row["report_json"])
+    answer = next((a for a in rep.get("answers", []) if a.get("q_number") == body.q_number), None)
+    if not answer:
+        raise HTTPException(status_code=404, detail=f"Question {body.q_number} not found in this result")
+
+    max_score = answer.get("max_score", 10)
+    if body.faculty_score < 0 or body.faculty_score > max_score:
+        raise HTTPException(status_code=400, detail=f"Faculty score must be 0–{max_score}")
+
+    conn = _get_kappa_conn()
+    # upsert — one faculty score per (result_id, q_number)
+    existing = conn.execute(
+        "SELECT id FROM kappa_scores WHERE result_id=? AND q_number=?",
+        (body.result_id, body.q_number)
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            "UPDATE kappa_scores SET faculty_score=?, created_at=? WHERE id=?",
+            (body.faculty_score, datetime.utcnow().isoformat() + "Z", existing["id"])
+        )
+        score_id = existing["id"]
     else:
-        interpretation = "Slight agreement (κ < 0.40)"
+        score_id = uuid.uuid4().hex[:12]
+        conn.execute("""
+            INSERT INTO kappa_scores
+              (id, result_id, q_number, q_type, subject, ai_score, faculty_score, max_score, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (
+            score_id, body.result_id, body.q_number,
+            answer.get("q_type", "theory"), rep.get("subject", ""),
+            answer.get("ai_score", 0), body.faculty_score, max_score,
+            datetime.utcnow().isoformat() + "Z",
+        ))
+    conn.commit()
+    conn.close()
+    return {"id": score_id, "result_id": body.result_id, "q_number": body.q_number,
+            "ai_score": answer.get("ai_score", 0), "faculty_score": body.faculty_score, "max_score": max_score}
 
-    theory_pairs = [p for p in pairs if p["type"] == "theory"]
-    num_pairs = [p for p in pairs if p["type"] == "numerical"]
 
-    return {
-        "kappa": kappa,
-        "p_observed": round(p_observed, 3),
-        "p_expected": round(p_expected, 3),
-        "n_pairs": n,
-        "n_agreement": n_agree,
-        "interpretation": interpretation,
-        "target": "κ ≥ 0.75",
-        "target_met": kappa >= 0.75,
-        "theory_accuracy": round(sum(1 for p in theory_pairs if p["agreement"]) / len(theory_pairs), 3) if theory_pairs else None,
-        "numerical_accuracy": round(sum(1 for p in num_pairs if p["agreement"]) / len(num_pairs), 3) if num_pairs else None,
-        "pairs": pairs,
-        "note": "Faculty scores are derived from known answer quality tiers authored in seed_demo_data.py. Buckets: Low=0-3, Mid=4-6, High=7-10 (out of 10).",
-    }
+@app.delete("/api/eval/validate/kappa/score/{score_id}")
+async def kappa_delete_score(score_id: str):
+    conn = _get_kappa_conn()
+    conn.execute("DELETE FROM kappa_scores WHERE id=?", (score_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": score_id}
 
 
 @app.post("/api/eval/script")
