@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Header } from '../components/layout/Header'
-import { X, Download, ChevronRight, AlertCircle, FileText } from 'lucide-react'
+import { X, Download, ChevronRight, AlertCircle, FileText, Trash2 } from 'lucide-react'
 
 interface EvalResult {
   id: string
@@ -46,9 +46,7 @@ function ReportModal({ result, onClose }: { result: EvalResult; onClose: () => v
       .finally(() => setLoading(false))
   }, [result.id])
 
-  const pct = result.percentage
-  const g   = grade(pct)
-  const scoreColor = pct >= 70 ? 'text-emerald-700' : pct >= 40 ? 'text-amber-700' : 'text-red-600'
+  const scoreColor = 'text-indigo-700'
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -61,9 +59,8 @@ function ReportModal({ result, onClose }: { result: EvalResult; onClose: () => v
           <div className="flex items-center gap-4">
             <div className="text-right">
               <p className={`text-2xl font-bold ${scoreColor}`}>
-                {result.total_score}<span className="text-base text-gray-400 font-normal">/{result.max_total}</span>
+                {result.total_score}<span className="text-sm text-gray-400 font-normal"> / {result.max_total} marks</span>
               </p>
-              <p className="text-sm text-indigo-600 font-semibold">{pct}% · {g}</p>
             </div>
             <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
               <X className="w-5 h-5 text-gray-400" />
@@ -93,7 +90,7 @@ function ReportModal({ result, onClose }: { result: EvalResult; onClose: () => v
                     )}
                   </div>
                   <span className={`text-sm font-bold ${aColor}`}>
-                    {ans.ai_score}<span className="text-gray-400 font-normal text-xs">/{ans.max_score}</span>
+                    {ans.ai_score}<span className="text-gray-400 font-normal text-xs"> marks</span>
                   </span>
                 </div>
                 {ans.question && <p className="text-xs text-gray-500 line-clamp-1">{ans.question}</p>}
@@ -112,6 +109,13 @@ export default function Students() {
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<EvalResult | null>(null)
   const [search, setSearch] = useState('')
+
+  const deleteResult = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation()
+    if (!confirm('Delete this result?')) return
+    await fetch(`/api/eval/results/${id}`, { method: 'DELETE' }).catch(() => {})
+    setResults(prev => prev.filter(r => r.id !== id))
+  }
 
   useEffect(() => {
     fetch('/api/eval/results')
@@ -140,23 +144,12 @@ export default function Students() {
     r.subject.toLowerCase().includes(search.toLowerCase())
   )
 
-  const atRisk = filtered.filter(r => r.percentage < 40).length
-
   return (
     <div>
       <Header title="Student Results" subtitle="All evaluated answer scripts — click any row to see question-level breakdown" />
       <div className="p-6 space-y-4 max-w-5xl">
 
-        {atRisk > 0 && (
-          <div className="card p-3 bg-red-50 border-red-200 flex items-center gap-3">
-            <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
-            <p className="text-xs text-red-700">
-              <strong>{atRisk}</strong> script{atRisk > 1 ? 's' : ''} below 40% — failing.
-            </p>
-          </div>
-        )}
-
-        <div className="flex items-center gap-3">
+<div className="flex items-center gap-3">
           <input
             type="text"
             placeholder="Search by name, USN, or subject…"
@@ -176,8 +169,6 @@ export default function Students() {
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Student</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Subject</th>
                 <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Marks</th>
-                <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">%</th>
-                <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Grade</th>
                 <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Qs</th>
                 <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Date</th>
                 <th className="px-4 py-3"></th>
@@ -185,11 +176,11 @@ export default function Students() {
             </thead>
             <tbody className="divide-y divide-gray-50">
               {loading && (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-400">Loading…</td></tr>
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">Loading…</td></tr>
               )}
               {!loading && filtered.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center">
+                  <td colSpan={6} className="px-4 py-10 text-center">
                     <FileText className="w-8 h-8 text-gray-200 mx-auto mb-2" />
                     <p className="text-sm text-gray-400">No evaluated scripts yet.</p>
                     <p className="text-xs text-gray-300 mt-1">Go to Evaluate Scripts to upload and grade answer scripts.</p>
@@ -197,13 +188,10 @@ export default function Students() {
                 </tr>
               )}
               {filtered.map(r => {
-                const pct = r.percentage
-                const g   = grade(pct)
-                const fail = pct < 40
                 return (
                   <tr
                     key={r.id}
-                    className={`hover:bg-indigo-50/40 cursor-pointer transition-colors ${fail ? 'bg-red-50/20' : ''}`}
+                    className="hover:bg-indigo-50/40 cursor-pointer transition-colors"
                     onClick={() => setSelected(r)}
                   >
                     <td className="px-4 py-3">
@@ -217,17 +205,20 @@ export default function Students() {
                           <p className="text-sm font-medium text-gray-800">{r.student_name || '(unnamed)'}</p>
                           {r.student_usn && <p className="text-xs text-gray-400">{r.student_usn}</p>}
                         </div>
-                        {fail && <span className="badge bg-red-50 text-red-600 text-[10px]">Fail</span>}
-                      </div>
+                        </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-500">{r.subject}</td>
-                    <td className="px-4 py-3 text-right font-semibold text-gray-700">{r.total_score}/{r.max_total}</td>
-                    <td className="px-4 py-3 text-right"><ScoreBadge pct={pct} /></td>
-                    <td className="px-4 py-3 text-center font-bold text-indigo-600">{g}</td>
+                    <td className="px-4 py-3 text-right font-bold text-gray-800 text-base">{r.total_score}<span className="text-xs text-gray-400 font-normal"> / {r.max_total}</span></td>
                     <td className="px-4 py-3 text-center text-gray-500">{r.questions_evaluated}</td>
                     <td className="px-4 py-3 text-right text-xs text-gray-400">{new Date(r.evaluated_at).toLocaleDateString()}</td>
-                    <td className="px-4 py-3 text-center">
+                    <td className="px-4 py-3 text-center flex items-center gap-2 justify-end">
                       <ChevronRight className="w-4 h-4 text-gray-300" />
+                      <button
+                        onClick={e => deleteResult(e, r.id)}
+                        className="p-1 hover:bg-red-50 rounded transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-gray-300 hover:text-red-500" />
+                      </button>
                     </td>
                   </tr>
                 )
@@ -237,17 +228,8 @@ export default function Students() {
         </div>
 
         {results.length > 0 && (
-          <div className="grid grid-cols-3 gap-4">
-            {[
-              { label: 'Total Evaluated', value: results.length, color: 'text-gray-800' },
-              { label: 'Class Average', value: `${Math.round(results.reduce((s, r) => s + r.percentage, 0) / results.length)}%`, color: 'text-indigo-600' },
-              { label: 'Pass Rate', value: `${Math.round(results.filter(r => r.percentage >= 40).length / results.length * 100)}%`, color: 'text-emerald-600' },
-            ].map(s => (
-              <div key={s.label} className="card p-4">
-                <p className="text-xs text-gray-500 mb-1">{s.label}</p>
-                <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
-              </div>
-            ))}
+          <div className="card p-4 flex items-center gap-2 text-sm text-gray-500">
+            <span className="font-semibold text-gray-700">{results.length}</span> script{results.length !== 1 ? 's' : ''} evaluated
           </div>
         )}
       </div>
