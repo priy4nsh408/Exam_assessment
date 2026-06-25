@@ -105,9 +105,10 @@ def image_to_base64(image_path: str) -> Optional[str]:
         return None
 
 
-def ocr_with_vlm(image_path: str) -> dict:
+def ocr_with_vlm(image_path: str, fast_mode: bool = False) -> dict:
     """Extract text from a student answer paper using LLaVA via Ollama.
-    Returns {text, equations, has_diagram, method}."""
+    Returns {text, equations, has_diagram, method}.
+    fast_mode=True uses a simpler prompt for batch/multi-page OCR."""
     if not OLLAMA_AVAILABLE:
         return {"text": "", "equations": [], "has_diagram": False, "method": "none"}
 
@@ -115,7 +116,10 @@ def ocr_with_vlm(image_path: str) -> dict:
     if not img_b64:
         return {"text": "", "equations": [], "has_diagram": False, "method": "none"}
 
-    prompt = """You are an OCR system reading a student's handwritten/printed answer paper.
+    if fast_mode:
+        prompt = "Read all handwritten and printed text from this image. Include mathematical equations. Output ONLY the extracted text, nothing else."
+    else:
+        prompt = """You are an OCR system reading a student's handwritten/printed answer paper.
 
 Extract ALL text from this image. Include:
 1. All written text exactly as it appears
@@ -136,9 +140,18 @@ Output ONLY valid JSON. No explanation or markdown."""
         resp = ollama.chat(
             model=OLLAMA_VISION_MODEL,
             messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
-            options={"temperature": 0.1},
+            options={"temperature": 0.1, "num_predict": 1024},
         )
         text = resp["message"]["content"].strip()
+
+        if fast_mode:
+            return {
+                "text": text,
+                "equations": [],
+                "has_diagram": False,
+                "method": "llava",
+            }
+
         parsed = _parse_json(text)
         if parsed:
             return {
@@ -148,6 +161,7 @@ Output ONLY valid JSON. No explanation or markdown."""
                 "diagram_description": parsed.get("diagram_description"),
                 "method": "llava",
             }
+        return {"text": text, "equations": [], "has_diagram": False, "method": "llava"}
     except Exception:
         pass
 

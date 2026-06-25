@@ -1424,7 +1424,8 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
 
 
 def _extract_images_from_pdf(pdf_path: str, upload_dir: str, max_pages: int = 20) -> list:
-    """Extract page images from a scanned PDF. Returns list of image file paths."""
+    """Extract page images from a scanned PDF. Returns list of image file paths.
+    Uses 100 DPI and skips near-blank pages for speed."""
     image_paths = []
     try:
         import fitz
@@ -1432,11 +1433,20 @@ def _extract_images_from_pdf(pdf_path: str, upload_dir: str, max_pages: int = 20
         for i, page in enumerate(doc):
             if i >= max_pages:
                 break
-            pix = page.get_pixmap(dpi=150)
+            pix = page.get_pixmap(dpi=100)
+            # Skip near-blank pages (less than 1% non-white pixels)
+            samples = pix.samples
+            if len(samples) > 0:
+                dark_pixels = sum(1 for j in range(0, len(samples), pix.n) if samples[j] < 200)
+                total_pixels = pix.width * pix.height
+                if total_pixels > 0 and dark_pixels / total_pixels < 0.01:
+                    print(f"[OCR] Skipping blank page {i+1}")
+                    continue
             img_path = os.path.join(upload_dir, f"_page_{i+1}_{os.path.basename(pdf_path)}.png")
             pix.save(img_path)
             image_paths.append(img_path)
         doc.close()
+        print(f"[OCR] Extracted {len(image_paths)} non-blank pages from {len(doc)} total")
     except Exception as e:
         print(f"[PDF] Image extraction failed: {e}")
     return image_paths
@@ -1450,11 +1460,11 @@ def _ocr_scanned_pdf(pdf_path: str, upload_dir: str) -> str:
     image_paths = _extract_images_from_pdf(pdf_path, upload_dir)
     if not image_paths:
         return ""
-    print(f"[OCR] Running OCR on {len(image_paths)} pages from scanned PDF")
+    print(f"[OCR] Running fast OCR on {len(image_paths)} pages from scanned PDF")
     import concurrent.futures
     results_map = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(image_paths), 4)) as executor:
-        futures = {executor.submit(ocr_with_vlm, img): i for i, img in enumerate(image_paths)}
+        futures = {executor.submit(ocr_with_vlm, img, True): i for i, img in enumerate(image_paths)}
         for future in concurrent.futures.as_completed(futures):
             idx = futures[future]
             try:
