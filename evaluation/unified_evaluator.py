@@ -714,12 +714,59 @@ Output ONLY valid JSON. No markdown or explanation outside the JSON."""
     return None
 
 
+def _detect_question_numbers_on_page(image_path: str) -> List[int]:
+    """Crop the left ~15% of a page and run Tesseract to detect question numbers."""
+    try:
+        from PIL import Image
+        import pytesseract
+    except ImportError:
+        return []
+    try:
+        img = Image.open(image_path)
+        w, h = img.size
+        left_strip = img.crop((0, 0, int(w * 0.18), h))
+        text = pytesseract.image_to_string(left_strip, config="--psm 6")
+        numbers = []
+        for m in re.finditer(r'(?:^|[Qq\s])(\d{1,2})\b', text):
+            n = int(m.group(1))
+            if 1 <= n <= 30:
+                numbers.append(n)
+        return sorted(set(numbers))
+    except Exception:
+        return []
+
+
+def _map_pages_to_questions(image_paths: List[str], total_questions: int) -> dict:
+    """Build a mapping: question_number -> [page_indices] by scanning left margins."""
+    q_to_pages = {q: [] for q in range(1, total_questions + 1)}
+    page_detections = []
+    for i, path in enumerate(image_paths):
+        detected = _detect_question_numbers_on_page(path)
+        page_detections.append(detected)
+        print(f"[page-detect] Page {i+1}: found Q numbers {detected}")
+        for qn in detected:
+            if qn in q_to_pages:
+                q_to_pages[qn].append(i)
+
+    # For pages with no detection, assign to the last detected question (continuation)
+    last_q = None
+    for i, detected in enumerate(page_detections):
+        if detected:
+            last_q = detected[-1]
+        elif last_q and last_q in q_to_pages and i not in q_to_pages[last_q]:
+            q_to_pages[last_q].append(i)
+            print(f"[page-detect] Page {i+1}: no Q number, assigned to Q{last_q} (continuation)")
+
+    return q_to_pages
+
+
 def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: List[str],
                            max_marks: int, subject: str, question_type: str,
                            expected_formula: str = "", expected_final_answer: str = "",
-                           question_index: int = 0, total_questions: int = 1) -> Optional[dict]:
+                           question_index: int = 0, total_questions: int = 1,
+                           page_map: Optional[dict] = None) -> Optional[dict]:
     """Grade a student's answer by trying each page image one at a time with LLaVA.
-    Sends 1 image per call (LLaVA handles single images reliably), keeps best score."""
+    Uses page_map (from left-margin Q-number detection) to pick relevant pages first."""
     if not OLLAMA_AVAILABLE or not image_paths:
         return None
 
@@ -731,17 +778,22 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
 
     ref_short = reference_answer[:800] if reference_answer else "Not provided"
 
-    # Estimate likely pages for this question, but try all if needed
     n_pages = len(image_paths)
-    pages_per_q = max(1, n_pages / max(total_questions, 1))
-    est_start = int(question_index * pages_per_q)
-    est_end = min(n_pages, int((question_index + 1) * pages_per_q) + 1)
+    q_num = question_index + 1
 
-    # Try estimated pages first, then remaining pages
-    ordered_indices = list(range(est_start, est_end))
-    for i in range(n_pages):
-        if i not in ordered_indices:
-            ordered_indices.append(i)
+    # Use page_map if available, otherwise fall back to estimation
+    if page_map and q_num in page_map and page_map[q_num]:
+        ordered_indices = list(page_map[q_num])
+        print(f"[VLM-grade] Q{q_num}: using mapped pages {[i+1 for i in ordered_indices]}")
+    else:
+        pages_per_q = max(1, n_pages / max(total_questions, 1))
+        est_start = int(question_index * pages_per_q)
+        est_end = min(n_pages, int((question_index + 1) * pages_per_q) + 1)
+        ordered_indices = list(range(est_start, est_end))
+        for i in range(n_pages):
+            if i not in ordered_indices:
+                ordered_indices.append(i)
+        print(f"[VLM-grade] Q{q_num}: no page map, using estimated order")
 
     best_result = None
     best_score = 0.0
@@ -849,6 +901,7 @@ def evaluate(
     skip_llm_feedback: bool = False,
     question_index: int = 0,
     total_questions: int = 1,
+    page_map: Optional[dict] = None,
 ) -> dict:
     """
     Unified evaluation entry point.
@@ -892,6 +945,7 @@ def evaluate(
             question, reference_answer, answer_image_paths,
             max_marks, subject, question_type, expected_formula, expected_final_answer,
             question_index=question_index, total_questions=total_questions,
+            page_map=page_map,
         )
         if result:
             result["ocr_used"] = True

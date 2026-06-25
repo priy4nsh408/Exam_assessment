@@ -42,7 +42,7 @@ except ImportError:
     NUMERICAL_EVAL_AVAILABLE = False
 
 try:
-    from evaluation.unified_evaluator import evaluate as unified_evaluate
+    from evaluation.unified_evaluator import evaluate as unified_evaluate, _map_pages_to_questions
     UNIFIED_EVAL_AVAILABLE = True
 except ImportError:
     UNIFIED_EVAL_AVAILABLE = False
@@ -1962,6 +1962,11 @@ async def eval_batch(
 
         n_questions = len(parsed_questions)
 
+        # Build page-to-question map once for scanned PDFs
+        page_map = None
+        if scanned_page_images:
+            page_map = _map_pages_to_questions(scanned_page_images, n_questions)
+
         def _eval_q(q, idx=0):
             return unified_evaluate(
                 question=q.get("question_text", ""),
@@ -1977,6 +1982,7 @@ async def eval_batch(
                 skip_llm_feedback=True,
                 question_index=idx,
                 total_questions=n_questions,
+                page_map=page_map,
             )
 
         question_results = []
@@ -2121,6 +2127,10 @@ async def eval_unified(
 
         n_questions = len(parsed_questions)
 
+        page_map = None
+        if scanned_page_images:
+            page_map = _map_pages_to_questions(scanned_page_images, n_questions)
+
         def _eval_one(q, idx=0):
             return unified_evaluate(
                 question=q.get("question_text", ""),
@@ -2136,6 +2146,7 @@ async def eval_unified(
                 skip_llm_feedback=True,
                 question_index=idx,
                 total_questions=n_questions,
+                page_map=page_map,
             )
 
         question_results = []
