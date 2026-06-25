@@ -18,10 +18,12 @@
 MechAssess is a closed-loop AI assessment platform for Mechanical Engineering education. It covers the complete assessment lifecycle:
 
 1. **Question Generation** — 11-agent LangGraph RAG pipeline generates syllabus-aligned questions with Bloom level, CO/PO tags, SHA-256 deduplication, and SQLite persistence
-2. **Theory Evaluation** — Two-tier LLM scoring (concept + detail) with ME keyword banks and cosine similarity
-3. **Numerical Grading** — Step-level automated grading with 5-category error classification via chain-of-thought LLM
-4. **Drawing Evaluation** — OpenCV preprocessing + YOLOv8 detection + LLaVA VLM + IS/BIS compliance engine
-5. **Unified Dashboard** — React + TypeScript frontend with real-time SSE streaming, CO/PO analytics, and human-in-the-loop grade override
+2. **Unified Answer Evaluation** — Upload answer scheme PDF + student answer scripts (images or PDFs), auto-parses all questions with marks, evaluates each question with per-question score breakdown, keyword analysis, conceptual accuracy, and completeness metrics
+3. **Theory Evaluation** — Two-tier LLM scoring (concept + detail) with ME keyword banks and cosine similarity
+4. **Numerical Grading** — Step-level automated grading with 5-category error classification via chain-of-thought LLM
+5. **Drawing Evaluation** — OpenCV preprocessing + YOLOv8 detection + LLaVA VLM + IS/BIS compliance engine
+6. **Evaluated Answer Scripts** — History of all evaluations with expandable per-question breakdown, faculty score override with reason tracking, and low OCR confidence warnings
+7. **Unified Dashboard** — React + TypeScript frontend with real-time SSE streaming, CO/PO analytics, and human-in-the-loop grade override
 
 ---
 
@@ -31,17 +33,18 @@ MechAssess is a closed-loop AI assessment platform for Mechanical Engineering ed
 Exam_assessment/
 ├── frontend/                    # React + TypeScript + Tailwind CSS dashboard
 │   └── src/
-│       ├── pages/               # 9 dashboard pages (all wired to real API)
+│       ├── pages/               # 11 dashboard pages (all wired to real API)
 │       ├── components/          # Sidebar, Header, StatCard, BloomBadge
 │       ├── types/               # TypeScript entity types
 │       └── api/                 # Fetch client
 ├── backend/
-│   ├── main.py                  # FastAPI — 14 endpoints + SSE streaming
+│   ├── main.py                  # FastAPI — 20+ endpoints + SSE streaming
 │   └── requirements.txt
 ├── generation/
 │   ├── langgraph_pipeline.py    # 11-agent LangGraph pipeline + SQLite + SHA-256
 │   └── generator.py             # Legacy single-agent Ollama generator
 ├── evaluation/
+│   ├── unified_evaluator.py     # Unified evaluator: OCR (LLaVA), LLM grading, heuristic scoring
 │   ├── theory_evaluator.py      # Cosine similarity + keyword coverage + LLM grader
 │   ├── numerical_grader.py      # Step-level grader, 5-category error classifier
 │   └── drawing_evaluator.py     # OpenCV + YOLOv8 stub + LLaVA + IS/BIS engine
@@ -56,7 +59,8 @@ Exam_assessment/
 │   ├── pyqs/                    # Previous year question papers
 │   ├── db/                      # Pre-built ChromaDB vector stores
 │   ├── questions.db             # SQLite question bank (auto-created)
-│   └── uploads/                 # Drawing image uploads (auto-created)
+│   ├── uploads/                 # Student answer scripts & scheme PDFs (auto-created)
+│   └── demo_answer.pdf          # Demo student answer script for BDT CIE3 testing
 └── requirements.txt             # Python dependencies
 ```
 
@@ -109,16 +113,17 @@ streamlit run app/streamlit_app.py
 
 ## Dashboard Pages
 
-All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
+All 11 pages are wired to the real FastAPI backend with graceful fallbacks.
 
 | Route | Page | API Used | Description |
 |---|---|---|---|
 | `/` | Dashboard | `/api/stats` | Stat cards, Bloom distribution, CO attainment bars, activity feed |
 | `/generate` | Question Generator | `/api/questions/generate/stream` (SSE) | Live agent pipeline status, configure and generate questions |
 | `/questions` | Question Bank | `/api/questions` | Search/filter all SQLite-backed questions |
-| `/eval/theory` | Theory Evaluator | `/api/eval/theory` | Real keyword analysis, concept+detail scores, faculty override |
-| `/eval/numerical` | Numerical Grader | `/api/eval/numerical` | Step-by-step breakdown with 5-category error classification |
-| `/eval/drawing` | Drawing Evaluator | `/api/eval/drawing` | OpenCV pipeline, IS/BIS violation list, LLaVA JSON output |
+| `/evaluate` | Answer Evaluator | `/api/eval/unified`, `/api/eval/batch`, `/api/eval/parse-scheme` | Upload scheme PDF + student answers, single/batch mode, per-question breakdown |
+| `/evaluated-scripts` | Evaluated Scripts | `/api/eval/history` | Evaluation history with expandable details, faculty override, delete |
+| `/exams` | Exam Papers | `/api/exams` | Exam paper management |
+| `/data-sources` | Data Sources | `/api/data-sources` | Manage uploaded course materials |
 | `/analytics` | CO/PO Analytics | `/api/analytics/co` | Bar chart, radar, trend lines, CO–PO correlation matrix |
 | `/students` | Students | `/api/students` | Per-student CO attainment with At-Risk flagging |
 | `/override` | Faculty Override | `/api/submissions` + `/api/submissions/{id}/override` | Flagged submission queue, override score + reason |
@@ -142,6 +147,12 @@ All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
 | GET | `/api/analytics/co` | CO attainment data with Bloom coverage breakdown |
 | GET | `/api/exams` | List exam papers |
 | POST | `/api/exams` | Create an exam paper |
+| POST | `/api/eval/unified` | Unified evaluator — auto-detects multi-question schemes, returns per-question breakdown |
+| POST | `/api/eval/batch` | Batch evaluate multiple student scripts against parsed scheme questions |
+| POST | `/api/eval/parse-scheme` | Parse answer scheme PDF — extracts questions, marks, types, reference answers |
+| GET | `/api/eval/history` | Evaluation history with per-question results |
+| POST | `/api/eval/history/{id}/override` | Faculty score override with reason |
+| DELETE | `/api/eval/history/{id}` | Delete an evaluation record |
 | POST | `/api/eval/theory` | Grade a theory answer (keyword + cosine + LLM) |
 | POST | `/api/eval/numerical` | Grade a numerical solution step-by-step |
 | POST | `/api/eval/drawing` | Evaluate an engineering drawing (file upload) |
@@ -159,7 +170,25 @@ All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
 - [x] FastAPI SSE streaming — live agent status events to frontend
 - [x] Graceful fallback (LangGraph graph → manual agent loop → mock templates)
 
-### Module 2 — Theory Answer Evaluation Engine
+### Module 2 — Unified Answer Evaluation (End-to-End Grading Pipeline)
+- [x] Answer scheme PDF parsing — heuristic parser (primary) + LLM fallback for unstructured docs
+- [x] Handles exam formats: `Q1.1`, `1a`, `5`, table-based M/BT/CO marks, inline `[X marks]`, `Total X Marks`
+- [x] Multi-question evaluation — evaluates student answer against ALL parsed questions, not just one
+- [x] Parallel evaluation with ThreadPoolExecutor (up to 6 concurrent) for faster grading
+- [x] LLM-based comprehensive grading via Ollama — reads both scheme + student answer together
+- [x] 6 evaluation metrics: keyword coverage, conceptual accuracy, completeness, equation check, formula check, final answer check
+- [x] Heuristic fallback scoring: keyword coverage (40%) + semantic similarity (60%)
+- [x] OCR support via LLaVA vision model for handwritten answer papers (images)
+- [x] PDF student answers — auto-extracts text from uploaded PDF answer scripts
+- [x] Robust PDF extraction with 3 fallbacks: pypdf → PyMuPDF → PyPDF2
+- [x] Per-question score breakdown with total aggregation and batch results display
+- [x] Single mode + Batch mode — upload one or multiple student scripts against a scheme
+- [x] Evaluated Scripts history page with expandable per-question details
+- [x] Faculty score override with reason tracking and low OCR confidence warnings
+- [x] Filename sanitization for Windows compatibility
+- [x] Startup PDF dependency check with install instructions
+
+### Module 3 — Theory Answer Evaluation Engine (Legacy)
 - [x] Frontend UI: upload, results list, keyword found/missing analysis, score breakdown, override form
 - [x] Two-tier LLM scoring: concept score (0–5) + detail score (0–5) via Ollama
 - [x] ME keyword banks for Thermodynamics, SOM, Fluid Mechanics, Engineering Drawing
@@ -168,7 +197,7 @@ All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
 - [ ] ME rubric dataset (150+ Q&A pairs with keyword annotations — **needs ME team**)
 - [ ] Cohen's Kappa validation run against faculty scores
 
-### Module 3 — Numerical Step-Level Grader
+### Module 4 — Numerical Step-Level Grader
 - [x] Frontend UI: step-by-step breakdown, 5-category error badges, partial credit display
 - [x] LLM chain-of-thought step evaluator via Ollama
 - [x] 5-category error classifier: formula / substitution / unit / arithmetic / boundary condition
@@ -177,7 +206,7 @@ All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
 - [ ] ME numerical problem bank (100+ problems with step rubrics — **needs ME team**)
 - [ ] Step-level accuracy validation (target ≥ 90%)
 
-### Module 4 — Engineering Drawing Evaluator
+### Module 5 — Engineering Drawing Evaluator
 - [x] Frontend UI: element detection grid, IS clause violation list, LLaVA JSON panel, upload
 - [x] OpenCV preprocessing: CLAHE → Hough-line deskew → adaptive threshold → morphological denoise → 1024×768
 - [x] YOLOv8 heuristic stub (quadrant-based element detection until trained weights available)
@@ -187,9 +216,11 @@ All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
 - [ ] Annotated drawing dataset (100+ drawings — **needs ME team**)
 - [ ] YOLOv8 fine-tuning on annotated dataset (use Google Colab T4 GPU)
 
-### Module 5 — Unified Dashboard
+### Module 6 — Unified Dashboard
 - [x] React 18 + TypeScript + Vite + Tailwind CSS + Recharts frontend
-- [x] All 9 pages wired to real FastAPI backend with graceful fallbacks
+- [x] All 11 pages wired to real FastAPI backend with graceful fallbacks
+- [x] Answer Evaluator page — single/batch mode, scheme PDF upload, parsed questions preview, per-question score table
+- [x] Evaluated Scripts page — evaluation history, expandable question breakdown, faculty override modal
 - [x] CO/PO analytics: bar chart, radar chart, trend line chart, CO–PO correlation matrix
 - [x] Faculty override panel with confidence-based flagging and API-backed submission
 - [x] Real-time SSE streaming for question generation with live agent status
@@ -208,6 +239,7 @@ All 9 pages are wired to the real FastAPI backend with graceful fallbacks.
 | Vector DB | ChromaDB |
 | Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
 | Persistence | SQLite (`data/questions.db`) |
+| PDF Extraction | pypdf, PyMuPDF (fitz), LangChain PyPDFLoader — with multi-fallback |
 | Document Loading | LangChain (PyPDF, Docx2txt, Unstructured) |
 | Computer Vision | OpenCV (preprocessing), YOLOv8/Ultralytics (detection — stub) |
 | Compliance | Custom IS/BIS rule engine (IS 696, SP:46, IS 919, IS 3073) |
