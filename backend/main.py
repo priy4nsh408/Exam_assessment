@@ -1472,8 +1472,10 @@ Output ONLY valid JSON. No markdown or explanation."""
             pass
 
     result = _heuristic_parse_scheme(pdf_text)
-    print(f"[parse-scheme] Heuristic parser found {len(result)} questions: " +
-          ", ".join(f"Q{q['question_number']}({q['marks']}m)" for q in result))
+    total_m = sum(q['marks'] for q in result)
+    print(f"[parse-scheme] Heuristic parser found {len(result)} questions, total: {total_m} marks")
+    for q in result:
+        print(f"  Q{q['question_number']}: {q['marks']}m ({q['question_type']}) - {q['question_text'][:70]}")
     return result
 
 
@@ -1483,8 +1485,8 @@ def _heuristic_parse_scheme(text: str) -> list:
     questions = []
     lines = text.split('\n')
 
-    q_header_pattern = _re.compile(r'^(\d+(?:\.\d+|[a-e])?)\s+([A-Za-z].+)', _re.IGNORECASE)
-    q_number_only = _re.compile(r'^(\d+(?:\.\d+|[a-e]))\s*$')
+    q_header_pattern = _re.compile(r'^\s*(\d+(?:\.\d+|[a-e])?)\s+([A-Za-z].+)', _re.IGNORECASE)
+    q_number_only = _re.compile(r'^\s*(\d+(?:\.\d+|[a-e]))\s*$')
     marks_line_pattern = _re.compile(r'^(\d{1,2})\s+\d+\s+\d+\s*$')
     # Also match marks at end of a line: "...question text 6 3 2"
     trailing_marks = _re.compile(r'\s+(\d{1,2})\s+\d+\s+\d+\s*$')
@@ -1534,22 +1536,37 @@ def _heuristic_parse_scheme(text: str) -> list:
         marks = 0
         filtered = []
         for cl in content_lines:
-            m = marks_line_pattern.match(cl)
+            m = marks_line_pattern.match(cl.strip())
             if m:
                 marks = int(m.group(1))
             else:
                 filtered.append(cl)
 
+        # Look for "Total X Marks" in content
         if not marks:
-            tm = total_marks_line.search('\n'.join(filtered))
-            if tm:
-                marks = int(tm.group(1))
+            for cl in reversed(filtered):
+                tm = total_marks_line.search(cl)
+                if tm:
+                    marks = int(tm.group(1))
+                    break
+        # Look for inline marks like "[5 marks]" or "5 Marks"
         if not marks:
             for cl in filtered:
                 im = inline_marks.search(cl)
                 if im:
-                    marks = int(im.group(1))
-                    break
+                    candidate = int(im.group(1))
+                    if 1 <= candidate <= 20:
+                        marks = candidate
+                        break
+        # Last resort: look for the LAST standalone number line (M BT CO where only M is on a line)
+        if not marks:
+            for cl in reversed(content_lines):
+                stripped_cl = cl.strip()
+                if _re.match(r'^(\d{1,2})\s*$', stripped_cl):
+                    candidate = int(stripped_cl)
+                    if 1 <= candidate <= 20:
+                        marks = candidate
+                        break
         if not marks:
             marks = 10
 
@@ -1585,6 +1602,26 @@ def _heuristic_parse_scheme(text: str) -> list:
         })
 
     return questions
+
+
+@app.post("/api/eval/debug-pdf")
+async def debug_pdf(scheme_pdf: UploadFile = File(...)):
+    """Debug endpoint: returns raw extracted text from a PDF."""
+    upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in (scheme_pdf.filename or "debug.pdf"))
+    pdf_path = str(upload_dir / f"debug_{safe_name}")
+    content = await scheme_pdf.read()
+    with open(pdf_path, "wb") as f:
+        f.write(content)
+    pdf_text = _extract_text_from_pdf(pdf_path)
+    lines = pdf_text.split("\n")
+    return {
+        "text_length": len(pdf_text),
+        "line_count": len(lines),
+        "lines": [{"num": i, "text": line} for i, line in enumerate(lines)],
+        "raw_text": pdf_text,
+    }
 
 
 @app.post("/api/eval/parse-scheme")
