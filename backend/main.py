@@ -1344,6 +1344,253 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
 
+def _parse_answer_scheme(pdf_text: str) -> list:
+    """Use LLM to extract structured questions from answer scheme text.
+    Returns list of {question_number, question_text, reference_answer, marks, question_type, expected_formula, expected_final_answer}."""
+    if not pdf_text.strip():
+        return []
+
+    if OLLAMA_AVAILABLE:
+        try:
+            prompt = f"""You are parsing an exam answer scheme / marking scheme document.
+Extract EVERY question from the document. For each question determine:
+- question_number: the question number (1, 2, 3a, etc.)
+- question_text: the full question text
+- reference_answer: the model/expected answer or marking points
+- marks: the maximum marks for this question (integer)
+- question_type: "theory" or "numerical" or "drawing" based on content
+- expected_formula: any formula the student should use (or empty string)
+- expected_final_answer: the expected final numerical answer if applicable (or empty string)
+
+DOCUMENT:
+{pdf_text[:6000]}
+
+Respond ONLY in JSON format:
+{{
+  "questions": [
+    {{
+      "question_number": "1",
+      "question_text": "...",
+      "reference_answer": "...",
+      "marks": 10,
+      "question_type": "theory",
+      "expected_formula": "",
+      "expected_final_answer": ""
+    }}
+  ]
+}}
+Output ONLY valid JSON. No markdown or explanation."""
+
+            import ollama as _ollama
+            resp = _ollama.chat(
+                model=os.getenv("OLLAMA_MODEL", "mistral"),
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.1},
+            )
+            text = resp["message"]["content"].strip()
+            # Parse JSON from response
+            import re as _re
+            cleaned = _re.sub(r'```(?:json)?', '', text).strip()
+            start = cleaned.find('{')
+            if start != -1:
+                depth = 0
+                for i in range(start, len(cleaned)):
+                    if cleaned[i] == '{': depth += 1
+                    elif cleaned[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            parsed = json.loads(cleaned[start:i+1])
+                            return parsed.get("questions", [])
+        except Exception:
+            pass
+
+    return _heuristic_parse_scheme(pdf_text)
+
+
+def _heuristic_parse_scheme(text: str) -> list:
+    """Regex-based fallback to extract questions when LLM is unavailable."""
+    import re as _re
+    questions = []
+    pattern = _re.compile(
+        r'(?:Q(?:uestion)?\.?\s*)?(\d+[a-z]?)[.\s)]\s*(.+?)(?=(?:Q(?:uestion)?\.?\s*)?\d+[a-z]?[.\s)]|\Z)',
+        _re.DOTALL | _re.IGNORECASE
+    )
+    marks_pattern = _re.compile(r'\[?\s*(\d+)\s*(?:marks?|pts?|points?)\s*\]?', _re.IGNORECASE)
+
+    for match in pattern.finditer(text):
+        q_num = match.group(1)
+        content = match.group(2).strip()
+        marks_match = marks_pattern.search(content)
+        marks = int(marks_match.group(1)) if marks_match else 10
+
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        q_text = lines[0] if lines else content[:200]
+        ref_answer = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+
+        q_type = "theory"
+        q_lower = q_text.lower()
+        num_cues = ["calculate", "compute", "find the value", "determine", "solve", "numerical"]
+        draw_cues = ["draw", "sketch", "diagram", "orthographic", "isometric"]
+        if any(c in q_lower for c in num_cues):
+            q_type = "numerical"
+        elif any(c in q_lower for c in draw_cues):
+            q_type = "drawing"
+
+        questions.append({
+            "question_number": q_num,
+            "question_text": q_text,
+            "reference_answer": ref_answer,
+            "marks": marks,
+            "question_type": q_type,
+            "expected_formula": "",
+            "expected_final_answer": "",
+        })
+
+    if not questions and text.strip():
+        questions.append({
+            "question_number": "1",
+            "question_text": text[:200],
+            "reference_answer": text,
+            "marks": 10,
+            "question_type": "theory",
+            "expected_formula": "",
+            "expected_final_answer": "",
+        })
+
+    return questions
+
+
+@app.post("/api/eval/parse-scheme")
+async def parse_scheme_pdf(
+    scheme_pdf: UploadFile = File(...),
+):
+    """Parse an answer scheme PDF and return structured questions with marks and types."""
+    upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = str(upload_dir / f"scheme_{scheme_pdf.filename}")
+    with open(pdf_path, "wb") as f:
+        shutil.copyfileobj(scheme_pdf.file, f)
+    pdf_text = _extract_text_from_pdf(pdf_path)
+    if not pdf_text:
+        raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+    questions = _parse_answer_scheme(pdf_text)
+    return {"questions": questions, "raw_text": pdf_text[:2000], "total": len(questions)}
+
+
+@app.post("/api/eval/batch")
+async def eval_batch(
+    files: List[UploadFile] = File(...),
+    scheme_pdf: UploadFile = File(None),
+    questions_json: str = Form("[]"),
+    subject: str = Form(""),
+):
+    """Evaluate multiple student scripts against parsed answer scheme questions.
+    questions_json is a JSON array of question objects from parse-scheme."""
+    if not UNIFIED_EVAL_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Unified evaluator not available")
+
+    upload_dir = Path(__file__).parent.parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    parsed_questions = json.loads(questions_json) if questions_json else []
+
+    if not parsed_questions and scheme_pdf and scheme_pdf.filename:
+        pdf_path = str(upload_dir / f"scheme_{scheme_pdf.filename}")
+        with open(pdf_path, "wb") as f:
+            shutil.copyfileobj(scheme_pdf.file, f)
+        pdf_text = _extract_text_from_pdf(pdf_path)
+        parsed_questions = _parse_answer_scheme(pdf_text)
+
+    if not parsed_questions:
+        raise HTTPException(status_code=400, detail="No questions found in answer scheme")
+
+    all_results = []
+    for student_file in files:
+        if not student_file.filename:
+            continue
+        file_save_path = str(upload_dir / student_file.filename)
+        with open(file_save_path, "wb") as f:
+            shutil.copyfileobj(student_file.file, f)
+
+        student_text = ""
+        image_path = None
+        if student_file.filename.lower().endswith(".pdf"):
+            student_text = _extract_text_from_pdf(file_save_path)
+        else:
+            image_path = file_save_path
+
+        student_name = student_file.filename.rsplit(".", 1)[0]
+        question_results = []
+        total_score = 0
+        total_max = 0
+
+        for q in parsed_questions:
+            q_result = unified_evaluate(
+                question=q.get("question_text", ""),
+                student_answer=student_text,
+                answer_image_path=image_path,
+                reference_answer=q.get("reference_answer", ""),
+                max_marks=q.get("marks", 10),
+                subject=subject,
+                question_type=q.get("question_type", "auto"),
+                expected_formula=q.get("expected_formula", ""),
+                expected_final_answer=q.get("expected_final_answer", ""),
+            )
+            q_result["question_number"] = q.get("question_number", "")
+            q_result["question_text"] = q.get("question_text", "")
+            question_results.append(q_result)
+            total_score += q_result.get("ai_score", 0)
+            total_max += q_result.get("max_score", 0)
+
+        student_record = {
+            "student_name": student_name,
+            "script_file": student_file.filename,
+            "total_score": round(total_score, 1),
+            "total_max": total_max,
+            "question_results": question_results,
+            "ocr_used": any(r.get("ocr_used") for r in question_results),
+            "avg_confidence": round(sum(r.get("confidence", 0) for r in question_results) / max(len(question_results), 1), 2),
+        }
+
+        eval_id = f"EVAL-{str(uuid.uuid4())[:8].upper()}"
+        history_record = {
+            "id": eval_id,
+            "student_name": student_name,
+            "question": f"{len(parsed_questions)} questions from answer scheme",
+            "subject": subject,
+            "question_type": "mixed",
+            "ai_score": round(total_score, 1),
+            "max_score": total_max,
+            "confidence": student_record["avg_confidence"],
+            "ocr_used": student_record["ocr_used"],
+            "ocr_method": "llava" if student_record["ocr_used"] else "pdf",
+            "feedback": f"Evaluated against {len(parsed_questions)} questions. Total: {round(total_score, 1)}/{total_max}",
+            "explanation": "; ".join(
+                f"Q{r['question_number']}: {r.get('ai_score', 0)}/{r.get('max_score', 0)}"
+                for r in question_results
+            ),
+            "overridden": False,
+            "evaluated_at": datetime.utcnow().isoformat() + "Z",
+            "script_file": student_file.filename,
+            "question_results": question_results,
+        }
+        EVAL_HISTORY.insert(0, history_record)
+        student_record["eval_id"] = eval_id
+        all_results.append(student_record)
+
+    _log_activity_safe(
+        action=f"Batch evaluated {len(all_results)} scripts against {len(parsed_questions)} questions",
+        activity_type="grade", subject=subject,
+    )
+
+    return {
+        "results": all_results,
+        "total_students": len(all_results),
+        "total_questions": len(parsed_questions),
+        "questions": parsed_questions,
+    }
+
+
 @app.post("/api/eval/unified")
 async def eval_unified(
     file: UploadFile = File(None),
