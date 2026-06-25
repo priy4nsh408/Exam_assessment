@@ -1471,7 +1471,10 @@ Output ONLY valid JSON. No markdown or explanation."""
         except Exception:
             pass
 
-    return _heuristic_parse_scheme(pdf_text)
+    result = _heuristic_parse_scheme(pdf_text)
+    print(f"[parse-scheme] Heuristic parser found {len(result)} questions: " +
+          ", ".join(f"Q{q['question_number']}({q['marks']}m)" for q in result))
+    return result
 
 
 def _heuristic_parse_scheme(text: str) -> list:
@@ -1483,6 +1486,8 @@ def _heuristic_parse_scheme(text: str) -> list:
     q_header_pattern = _re.compile(r'^(\d+(?:\.\d+|[a-e])?)\s+([A-Za-z].+)', _re.IGNORECASE)
     q_number_only = _re.compile(r'^(\d+(?:\.\d+|[a-e]))\s*$')
     marks_line_pattern = _re.compile(r'^(\d{1,2})\s+\d+\s+\d+\s*$')
+    # Also match marks at end of a line: "...question text 6 3 2"
+    trailing_marks = _re.compile(r'\s+(\d{1,2})\s+\d+\s+\d+\s*$')
     inline_marks = _re.compile(r'\[?\s*(\d+)\s*(?:marks?|pts?|points?)\s*\]?', _re.IGNORECASE)
     total_marks_line = _re.compile(r'Total\s+(\d+)\s*Marks', _re.IGNORECASE)
     page_line = _re.compile(r'^\d+\s*\|\s*P\s*a\s*g\s*e')
@@ -1506,7 +1511,14 @@ def _heuristic_parse_scheme(text: str) -> list:
             if current_qnum:
                 segments.append((current_qnum, current_lines))
             current_qnum = header_match.group(1)
-            current_lines = [header_match.group(2).strip()] if header_match.group(2).strip() else []
+            q_text_part = header_match.group(2).strip()
+            # Strip trailing M BT CO marks from question text (some extractors put them on same line)
+            tm = trailing_marks.search(q_text_part)
+            if tm:
+                q_text_part = q_text_part[:tm.start()].strip()
+                current_lines = [q_text_part, stripped[tm.start():].strip()] if q_text_part else [stripped[tm.start():].strip()]
+            else:
+                current_lines = [q_text_part] if q_text_part else []
         elif numonly_match:
             if current_qnum:
                 segments.append((current_qnum, current_lines))
@@ -1657,12 +1669,10 @@ async def eval_batch(
             file_text = student_text
 
         student_name = student_file.filename.rsplit(".", 1)[0]
-        question_results = []
-        total_score = 0
-        total_max = 0
+        import concurrent.futures
 
-        for q in parsed_questions:
-            q_result = unified_evaluate(
+        def _eval_q(q):
+            return unified_evaluate(
                 question=q.get("question_text", ""),
                 student_answer=file_text,
                 answer_image_path=image_path,
@@ -1673,11 +1683,23 @@ async def eval_batch(
                 expected_formula=q.get("expected_formula", ""),
                 expected_final_answer=q.get("expected_final_answer", ""),
             )
-            q_result["question_number"] = q.get("question_number", "")
-            q_result["question_text"] = q.get("question_text", "")
-            question_results.append(q_result)
-            total_score += q_result.get("ai_score", 0)
-            total_max += q_result.get("max_score", 0)
+
+        question_results = []
+        total_score = 0
+        total_max = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(parsed_questions), 6)) as executor:
+            futures = {executor.submit(_eval_q, q): q for q in parsed_questions}
+            for future in concurrent.futures.as_completed(futures):
+                q = futures[future]
+                q_result = future.result()
+                q_result["question_number"] = q.get("question_number", "")
+                q_result["question_text"] = q.get("question_text", "")
+                question_results.append(q_result)
+                total_score += q_result.get("ai_score", 0)
+                total_max += q_result.get("max_score", 0)
+
+        question_results.sort(key=lambda r: r.get("question_number", ""))
 
         student_record = {
             "student_name": student_name,
@@ -1785,11 +1807,10 @@ async def eval_unified(
 
     # Multi-question scheme: evaluate each question and return batch-style results
     if len(parsed_questions) > 1:
-        question_results = []
-        total_score = 0
-        total_max = 0
-        for q in parsed_questions:
-            q_result = unified_evaluate(
+        import concurrent.futures
+
+        def _eval_one(q):
+            return unified_evaluate(
                 question=q.get("question_text", ""),
                 student_answer=student_answer,
                 answer_image_path=image_path,
@@ -1800,11 +1821,23 @@ async def eval_unified(
                 expected_formula=q.get("expected_formula", ""),
                 expected_final_answer=q.get("expected_final_answer", ""),
             )
-            q_result["question_number"] = q.get("question_number", "")
-            q_result["question_text"] = q.get("question_text", "")
-            question_results.append(q_result)
-            total_score += q_result.get("ai_score", 0)
-            total_max += q_result.get("max_score", 0)
+
+        question_results = []
+        total_score = 0
+        total_max = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(parsed_questions), 6)) as executor:
+            futures = {executor.submit(_eval_one, q): q for q in parsed_questions}
+            for future in concurrent.futures.as_completed(futures):
+                q = futures[future]
+                q_result = future.result()
+                q_result["question_number"] = q.get("question_number", "")
+                q_result["question_text"] = q.get("question_text", "")
+                question_results.append(q_result)
+                total_score += q_result.get("ai_score", 0)
+                total_max += q_result.get("max_score", 0)
+
+        question_results.sort(key=lambda r: r.get("question_number", ""))
 
         student_name_val = student_name or (file.filename.rsplit(".", 1)[0] if file and file.filename else "Unknown")
         student_record = {
