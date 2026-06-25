@@ -1866,17 +1866,19 @@ async def eval_batch(
 
         file_text = ""
         image_path = None
+        scanned_page_images = []
         if student_file.filename.lower().endswith(".pdf"):
             file_text = _extract_text_from_pdf(file_save_path)
             if not file_text:
-                file_text = _ocr_scanned_pdf(file_save_path, str(upload_dir))
+                scanned_page_images = _extract_images_from_pdf(file_save_path, str(upload_dir))
+                print(f"[batch] Scanned PDF detected: {len(scanned_page_images)} page images for vision grading")
         elif student_file.filename.lower().endswith(".txt"):
             with open(file_save_path, "r", encoding="utf-8", errors="ignore") as tf:
                 file_text = tf.read()
         else:
             image_path = file_save_path
 
-        if not file_text and student_text:
+        if not file_text and not scanned_page_images and student_text:
             file_text = student_text
 
         student_name = student_file.filename.rsplit(".", 1)[0]
@@ -1887,6 +1889,7 @@ async def eval_batch(
                 question=q.get("question_text", ""),
                 student_answer=file_text,
                 answer_image_path=image_path,
+                answer_image_paths=scanned_page_images if scanned_page_images else None,
                 reference_answer=q.get("reference_answer", ""),
                 max_marks=q.get("marks", 10),
                 subject=subject,
@@ -1900,16 +1903,26 @@ async def eval_batch(
         total_score = 0
         total_max = 0
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(parsed_questions), 6)) as executor:
-            futures = {executor.submit(_eval_q, q): q for q in parsed_questions}
-            for future in concurrent.futures.as_completed(futures):
-                q = futures[future]
-                q_result = future.result()
+        if scanned_page_images:
+            for q in parsed_questions:
+                q_result = _eval_q(q)
                 q_result["question_number"] = q.get("question_number", "")
                 q_result["question_text"] = q.get("question_text", "")
                 question_results.append(q_result)
                 total_score += q_result.get("ai_score", 0)
                 total_max += q_result.get("max_score", 0)
+                print(f"[batch] Q{q.get('question_number','?')}: {q_result.get('ai_score', 0)}/{q_result.get('max_score', 0)}")
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(parsed_questions), 6)) as executor:
+                futures = {executor.submit(_eval_q, q): q for q in parsed_questions}
+                for future in concurrent.futures.as_completed(futures):
+                    q = futures[future]
+                    q_result = future.result()
+                    q_result["question_number"] = q.get("question_number", "")
+                    q_result["question_text"] = q.get("question_text", "")
+                    question_results.append(q_result)
+                    total_score += q_result.get("ai_score", 0)
+                    total_max += q_result.get("max_score", 0)
 
         question_results.sort(key=lambda r: r.get("question_number", ""))
 
@@ -2004,6 +2017,7 @@ async def eval_unified(
                     question = lines[0]
 
     image_path = None
+    scanned_page_images = []
     if file and file.filename:
         safe_fn = "".join(c if c.isalnum() or c in "._-" else "_" for c in file.filename)
         file_save_path = str(upload_dir / safe_fn)
@@ -2015,9 +2029,8 @@ async def eval_unified(
             if pdf_text and not student_answer:
                 student_answer = pdf_text
             elif not pdf_text:
-                ocr_text = _ocr_scanned_pdf(file_save_path, str(upload_dir))
-                if ocr_text:
-                    student_answer = ocr_text
+                scanned_page_images = _extract_images_from_pdf(file_save_path, str(upload_dir))
+                print(f"[unified] Scanned PDF detected: {len(scanned_page_images)} page images for vision grading")
         else:
             image_path = file_save_path
 
@@ -2030,6 +2043,7 @@ async def eval_unified(
                 question=q.get("question_text", ""),
                 student_answer=student_answer,
                 answer_image_path=image_path,
+                answer_image_paths=scanned_page_images if scanned_page_images else None,
                 reference_answer=q.get("reference_answer", ""),
                 max_marks=q.get("marks", 10),
                 subject=subject,
@@ -2043,7 +2057,18 @@ async def eval_unified(
         total_score = 0
         total_max = 0
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(parsed_questions), 6)) as executor:
+        # Sequential for vision grading (Ollama processes one at a time), parallel for text
+        if scanned_page_images:
+            for q in parsed_questions:
+                q_result = _eval_one(q)
+                q_result["question_number"] = q.get("question_number", "")
+                q_result["question_text"] = q.get("question_text", "")
+                question_results.append(q_result)
+                total_score += q_result.get("ai_score", 0)
+                total_max += q_result.get("max_score", 0)
+                print(f"[unified] Q{q.get('question_number','?')}: {q_result.get('ai_score', 0)}/{q_result.get('max_score', 0)}")
+        else:
+          with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(parsed_questions), 6)) as executor:
             futures = {executor.submit(_eval_one, q): q for q in parsed_questions}
             for future in concurrent.futures.as_completed(futures):
                 q = futures[future]
@@ -2115,6 +2140,7 @@ async def eval_unified(
         question=ref["question_text"] or question,
         student_answer=student_answer,
         answer_image_path=image_path,
+        answer_image_paths=scanned_page_images if scanned_page_images else None,
         reference_answer=ref["reference_answer"] or reference_answer,
         max_marks=ref["max_marks"] or max_marks,
         subject=ref["subject"] or subject,

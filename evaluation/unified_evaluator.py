@@ -714,6 +714,93 @@ Output ONLY valid JSON. No markdown or explanation outside the JSON."""
     return None
 
 
+def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: List[str],
+                           max_marks: int, subject: str, question_type: str,
+                           expected_formula: str = "", expected_final_answer: str = "") -> Optional[dict]:
+    """Grade a student's answer by sending page images directly to LLaVA.
+    Used for scanned/handwritten PDFs where OCR fails."""
+    if not OLLAMA_AVAILABLE or not image_paths:
+        return None
+
+    images_b64 = []
+    for img_path in image_paths:
+        b64 = image_to_base64(img_path)
+        if b64:
+            images_b64.append(b64)
+    if not images_b64:
+        return None
+    print(f"[VLM-grade] Sending {len(images_b64)} page images to LLaVA for Q: {question[:50]}...")
+
+    formula_section = ""
+    if expected_formula:
+        formula_section = f"\nEXPECTED FORMULA: {expected_formula}"
+    if expected_final_answer:
+        formula_section += f"\nEXPECTED FINAL ANSWER: {expected_final_answer}"
+
+    prompt = f"""You are an expert {subject or 'engineering'} professor. The attached images are pages from a student's handwritten answer paper.
+
+QUESTION ({question_type}, {max_marks} marks):
+{question}
+
+MODEL ANSWER:
+{reference_answer[:2000]}
+{formula_section}
+
+Read the student's handwritten answer from the images. Find the part where the student answers this specific question. Then grade it.
+
+IMPORTANT: The student's paper may contain answers to multiple questions. Focus ONLY on the answer to the question above. Look for the question number, relevant formulas, diagrams, and calculations.
+
+Respond ONLY in JSON:
+{{
+  "score": <0 to {max_marks}>,
+  "student_wrote": "brief summary of what the student wrote for this question",
+  "keyword_analysis": {{"found": [], "missing": [], "coverage_percent": 0}},
+  "conceptual_accuracy": <0-100>,
+  "completeness": <0-100>,
+  "equation_present": true/false,
+  "formula_correct": true/false,
+  "final_answer_correct": true/false,
+  "feedback": "2-3 sentences explaining the score",
+  "confidence": <0.0-1.0>
+}}
+Output ONLY valid JSON."""
+
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_VISION_MODEL,
+            messages=[{"role": "user", "content": prompt, "images": images_b64}],
+            options={"temperature": 0.2, "num_predict": 512},
+        )
+        parsed = _parse_json(resp["message"]["content"].strip())
+        if parsed and "score" in parsed:
+            score = max(0.0, min(float(parsed["score"]), max_marks))
+            kw_analysis = parsed.get("keyword_analysis", {})
+            return {
+                "ai_score": round(score, 1),
+                "max_score": max_marks,
+                "confidence": min(0.95, max(0.3, float(parsed.get("confidence", 0.6)))),
+                "feedback": parsed.get("feedback", ""),
+                "explanation": parsed.get("student_wrote", ""),
+                "keywords": {
+                    "found": kw_analysis.get("found", []),
+                    "missing": kw_analysis.get("missing", []),
+                    "matched_count": len(kw_analysis.get("found", [])),
+                    "total_count": len(kw_analysis.get("found", [])) + len(kw_analysis.get("missing", [])),
+                    "coverage_ratio": (kw_analysis.get("coverage_percent", 50) or 50) / 100,
+                },
+                "conceptual_accuracy": parsed.get("conceptual_accuracy", 0),
+                "completeness": parsed.get("completeness", 0),
+                "formula_mentioned": parsed.get("formula_correct", True),
+                "final_answer_correct": parsed.get("final_answer_correct", True),
+                "equation_present": parsed.get("equation_present", True),
+                "llm_graded": True,
+                "vision_graded": True,
+            }
+    except Exception as e:
+        print(f"[VLM-grade] Error: {e}")
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN UNIFIED EVALUATOR
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -722,6 +809,7 @@ def evaluate(
     question: str,
     student_answer: str = "",
     answer_image_path: Optional[str] = None,
+    answer_image_paths: Optional[List[str]] = None,
     reference_answer: str = "",
     max_marks: int = 10,
     subject: str = "",
@@ -767,11 +855,21 @@ def evaluate(
     if question_type == "auto":
         question_type = detect_question_type(question, has_diagram)
 
-    # ── Step 3: LLM reads scheme + answer, then score ─────────────────
+    # ── Step 3: Grade ──────────────────────────────────────────────────
     result = None
 
-    # Try LLM-based comprehensive grading first (reads both documents)
-    if question_type != "drawing" and student_answer.strip():
+    # Vision-based grading: send page images directly to LLaVA (best for handwritten scanned PDFs)
+    if answer_image_paths and not student_answer.strip() and question_type != "drawing":
+        result = _vlm_grade_with_images(
+            question, reference_answer, answer_image_paths,
+            max_marks, subject, question_type, expected_formula, expected_final_answer,
+        )
+        if result:
+            result["ocr_used"] = True
+            result["ocr_method"] = "vlm_direct"
+
+    # Text-based LLM grading (reads both documents)
+    if result is None and question_type != "drawing" and student_answer.strip():
         result = _llm_grade_answer(
             question, student_answer, reference_answer, max_marks,
             subject, question_type, expected_formula, expected_final_answer,
