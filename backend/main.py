@@ -1335,13 +1335,40 @@ async def eval_numerical(body: NumericalEvalRequest):
 # ── Unified Evaluation Endpoint ──────────────────────────────────────────────
 
 def _extract_text_from_pdf(pdf_path: str) -> str:
+    # Try PyPDFLoader first
     try:
         from langchain_community.document_loaders import PyPDFLoader
         loader = PyPDFLoader(pdf_path)
         pages = loader.load()
-        return "\n".join(p.page_content for p in pages if p.page_content.strip())
-    except Exception:
-        return ""
+        text = "\n".join(p.page_content for p in pages if p.page_content.strip())
+        if text.strip():
+            return text
+    except Exception as e:
+        print(f"[PDF] PyPDFLoader failed for {pdf_path}: {e}")
+
+    # Fallback to PyPDF2/pypdf
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_path)
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if text.strip():
+            return text
+    except Exception as e:
+        print(f"[PDF] pypdf fallback failed for {pdf_path}: {e}")
+
+    # Fallback to PyMuPDF (fitz)
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        text = "\n".join(page.get_text() for page in doc)
+        doc.close()
+        if text.strip():
+            return text
+    except Exception as e:
+        print(f"[PDF] PyMuPDF fallback failed for {pdf_path}: {e}")
+
+    print(f"[PDF] All extractors failed for {pdf_path}")
+    return ""
 
 
 def _parse_answer_scheme(pdf_text: str) -> list:
@@ -1520,8 +1547,9 @@ async def parse_scheme_pdf(
         shutil.copyfileobj(scheme_pdf.file, f)
     pdf_text = _extract_text_from_pdf(pdf_path)
     if not pdf_text:
-        raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+        raise HTTPException(status_code=400, detail=f"Could not extract text from PDF. File saved at: {pdf_path}. Check server logs for details.")
     questions = _parse_answer_scheme(pdf_text)
+    print(f"[parse-scheme] Extracted {len(questions)} questions from {scheme_pdf.filename}, text length: {len(pdf_text)}")
     return {"questions": questions, "raw_text": pdf_text[:2000], "total": len(questions)}
 
 
