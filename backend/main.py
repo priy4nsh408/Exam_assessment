@@ -1770,9 +1770,8 @@ async def health_deps():
 @app.post("/api/training/upload")
 async def upload_training_reference(
     file: UploadFile = File(...),
-    subject: str = Form(""),          # optional — detected from scheme if blank
+    scheme_name: str = Form(""),   # user-provided name — used as subject hint
     description: str = Form(""),
-    default_marks: float = Form(10),  # fallback if scheme doesn't specify marks
 ):
     """
     Upload an answer scheme PDF/image.
@@ -1789,17 +1788,17 @@ async def upload_training_reference(
         shutil.copyfileobj(file.file, fp)
 
     # Parse the answer scheme
-    parsed_subject   = subject.strip()
+    parsed_subject   = scheme_name.strip()
     questions_list   = []
     parse_warnings   = []
-    marks_per_q      = default_marks
+    marks_per_q      = 10
 
     try:
         from evaluation.scheme_parser import parse_answer_scheme
         result = parse_answer_scheme(
             file_path=save_path,
             subject_hint=parsed_subject,
-            default_marks=int(default_marks),
+            original_filename=file.filename or "",
         )
         parsed_subject  = result["subject"]
         questions_list  = result["questions"]

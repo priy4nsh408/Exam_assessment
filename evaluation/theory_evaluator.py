@@ -23,7 +23,7 @@ always the deterministic keyword + semantic blend described above.
 import os
 import json
 import re
-from typing import Optional
+from typing import Optional, Dict
 from pathlib import Path
 
 try:
@@ -113,6 +113,73 @@ def keyword_coverage(student_text: str, reference_text: str, top_n: int = 15) ->
         "total_count": len(keywords),
         "coverage_ratio": len(found) / max(len(keywords), 1),
     }
+
+def evaluate_theory_llm(
+    question: str,
+    student_answer: str,
+    reference_answer: str,
+    subject: str = "",
+    max_marks: int = 10,
+    model: str = None,
+) -> Optional[dict]:
+    """
+    Primary LLM-based grading path. Evaluates like a faculty examiner:
+    reads question + reference answer + student answer and awards marks
+    based on conceptual understanding, not keyword counts.
+    Returns None if Ollama is unavailable (caller falls back to keyword+semantic).
+    """
+    if not OLLAMA_AVAILABLE:
+        return None
+
+    model = model or os.getenv("OLLAMA_MODEL", "mistral")
+    prompt = f"""You are an expert {subject or 'engineering'} professor grading a student's handwritten exam answer.
+The answer text was extracted via OCR and may contain minor spelling or formatting errors — evaluate based on conceptual understanding, not surface errors.
+
+QUESTION ({max_marks} marks total):
+{question or 'General question'}
+
+REFERENCE / EXPECTED ANSWER:
+{reference_answer or '(No reference answer provided)'}
+
+STUDENT'S ANSWER:
+{student_answer or '(No answer detected)'}
+
+Instructions:
+- Award marks proportional to how well the student covers the key concepts in the reference answer.
+- Partial credit is allowed — a partially correct answer should get partial marks.
+- Minor OCR errors in spelling do not deduct marks if the meaning is clear.
+- If the student answer is blank or completely off-topic, award 0.
+
+Respond with ONLY valid JSON (no explanation outside JSON):
+{{"score": <integer or decimal, 0 to {max_marks}>, "feedback": "<2-3 sentences of specific constructive feedback>", "covered": ["<key concept covered>"], "missing": ["<key concept missing>"]}}"""
+
+    try:
+        resp = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.1},
+        )
+        import json as _json
+        content = resp["message"]["content"].strip()
+        # extract JSON even if wrapped in markdown code block
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if not json_match:
+            return None
+        data = _json.loads(json_match.group())
+        score = float(data.get("score", 0))
+        score = max(0.0, min(float(max_marks), score))
+        return {
+            "ai_score":   round(score, 1),
+            "max_score":  max_marks,
+            "feedback":   data.get("feedback", ""),
+            "covered":    data.get("covered", []),
+            "missing":    data.get("missing", []),
+            "confidence": 0.85,
+            "method":     "llm",
+        }
+    except Exception:
+        return None
+
 
 def llm_feedback(question: str, reference_answer: str, student_answer: str,
                   kw: dict, similarity: float, subject: str = "",

@@ -193,6 +193,7 @@ def parse_answer_scheme(
     file_path: str,
     subject_hint: str = "",
     default_marks: int = 10,
+    original_filename: str = "",
 ) -> Dict:
     """
     Parse an answer scheme PDF or image.
@@ -206,7 +207,7 @@ def parse_answer_scheme(
       }
     """
     import os
-    filename = os.path.basename(file_path)
+    filename = original_filename or os.path.basename(file_path)
 
     # OCR
     if file_path.lower().endswith(".pdf"):

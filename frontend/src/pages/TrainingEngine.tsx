@@ -46,6 +46,7 @@ export default function TrainingEngine() {
   const [expandedRef, setExpandedRef] = useState<string | null>(null)
 
   const [file, setFile] = useState<File | null>(null)
+  const [schemeName, setSchemeName] = useState('')
   const [description, setDescription] = useState('')
 
   const fileRef = useRef<HTMLInputElement>(null)
@@ -66,13 +67,14 @@ export default function TrainingEngine() {
     setUploading(true); setError(''); setUploadResult(null)
     const fd = new FormData()
     fd.append('file', file)
+    fd.append('scheme_name', schemeName)
     fd.append('description', description)
     try {
       const res = await fetch('/api/training/upload', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
       const result: UploadResult = await res.json()
       setUploadResult(result)
-      setFile(null); setDescription('')
+      setFile(null); setSchemeName(''); setDescription('')
       loadRefs()
     } catch (e: any) {
       setError(e.message || 'Upload failed')
@@ -138,13 +140,26 @@ export default function TrainingEngine() {
                 </div>}
           </div>
 
-          <div>
-            <label className="text-xs font-medium text-gray-600 mb-1 block">Description (optional)</label>
-            <input
-              type="text" className="input-field w-full text-sm"
-              placeholder="e.g. Thermodynamics Unit 2 — VTU Dec 2023"
-              value={description} onChange={e => setDescription(e.target.value)}
-            />
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                Scheme Name / Subject <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="text" className="input-field w-full text-sm"
+                placeholder="e.g. Aerospace Structures, Thermodynamics Unit 2"
+                value={schemeName} onChange={e => setSchemeName(e.target.value)}
+              />
+              <p className="text-[10px] text-gray-400 mt-1">Used to identify this scheme when selecting it during evaluation</p>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Description (optional)</label>
+              <input
+                type="text" className="input-field w-full text-sm"
+                placeholder="e.g. VTU Dec 2023 — Mid Semester Exam"
+                value={description} onChange={e => setDescription(e.target.value)}
+              />
+            </div>
           </div>
 
           {error && (
@@ -161,8 +176,7 @@ export default function TrainingEngine() {
                   : <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />}
                 <div>
                   <p className="font-semibold">{uploadResult.message}</p>
-                  {uploadResult.subject && <p className="mt-0.5">Subject detected: <b>{uploadResult.subject}</b></p>}
-                  {uploadResult.marks_per_q > 0 && <p>Marks per question: <b>{uploadResult.marks_per_q}</b></p>}
+                  {uploadResult.subject && <p className="mt-0.5">Subject: <b>{uploadResult.subject}</b></p>}
                   {uploadResult.parse_warnings.map((w, i) => (
                     <p key={i} className="mt-1 text-amber-600">⚠ {w}</p>
                   ))}
@@ -205,7 +219,7 @@ export default function TrainingEngine() {
 
           <button
             onClick={upload}
-            disabled={!file || uploading}
+            disabled={!file || !schemeName.trim() || uploading}
             className="btn-primary flex items-center gap-2 disabled:opacity-50"
           >
             {uploading
@@ -244,7 +258,7 @@ export default function TrainingEngine() {
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-gray-800 truncate">{ref.filename}</p>
                         <p className="text-xs text-gray-400">
-                          {ref.subject} · {questions.length} question{questions.length !== 1 ? 's' : ''} · {ref.marks_per_q ?? 10}M each
+                          {ref.subject} · {questions.length} question{questions.length !== 1 ? 's' : ''}
                           {ref.description ? ` · ${ref.description}` : ''}
                         </p>
                         <p className="text-[10px] text-gray-300">{new Date(ref.created_at).toLocaleString()}</p>
