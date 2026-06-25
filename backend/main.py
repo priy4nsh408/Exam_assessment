@@ -1542,12 +1542,22 @@ async def parse_scheme_pdf(
     """Parse an answer scheme PDF and return structured questions with marks and types."""
     upload_dir = Path(__file__).parent.parent / "data" / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = str(upload_dir / f"scheme_{scheme_pdf.filename}")
+
+    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in (scheme_pdf.filename or "scheme.pdf"))
+    pdf_path = str(upload_dir / f"scheme_{safe_name}")
+
+    content = await scheme_pdf.read()
+    print(f"[parse-scheme] Received file: {scheme_pdf.filename}, size: {len(content)} bytes, saving to: {pdf_path}")
+    if len(content) < 100:
+        raise HTTPException(status_code=400, detail=f"PDF file too small ({len(content)} bytes). Upload may have failed.")
+
     with open(pdf_path, "wb") as f:
-        shutil.copyfileobj(scheme_pdf.file, f)
+        f.write(content)
+
     pdf_text = _extract_text_from_pdf(pdf_path)
     if not pdf_text:
-        raise HTTPException(status_code=400, detail=f"Could not extract text from PDF. File saved at: {pdf_path}. Check server logs for details.")
+        file_size = os.path.getsize(pdf_path)
+        raise HTTPException(status_code=400, detail=f"Could not extract text from PDF ({file_size} bytes on disk). All PDF extractors failed — check server logs.")
     questions = _parse_answer_scheme(pdf_text)
     print(f"[parse-scheme] Extracted {len(questions)} questions from {scheme_pdf.filename}, text length: {len(pdf_text)}")
     return {"questions": questions, "raw_text": pdf_text[:2000], "total": len(questions)}
@@ -1572,9 +1582,11 @@ async def eval_batch(
     parsed_questions = json.loads(questions_json) if questions_json else []
 
     if not parsed_questions and scheme_pdf and scheme_pdf.filename:
-        pdf_path = str(upload_dir / f"scheme_{scheme_pdf.filename}")
+        safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in scheme_pdf.filename)
+        pdf_path = str(upload_dir / f"scheme_{safe_name}")
+        content = await scheme_pdf.read()
         with open(pdf_path, "wb") as f:
-            shutil.copyfileobj(scheme_pdf.file, f)
+            f.write(content)
         pdf_text = _extract_text_from_pdf(pdf_path)
         parsed_questions = _parse_answer_scheme(pdf_text)
 
@@ -1585,9 +1597,11 @@ async def eval_batch(
     for student_file in files:
         if not student_file.filename:
             continue
-        file_save_path = str(upload_dir / student_file.filename)
+        safe_fn = "".join(c if c.isalnum() or c in "._-" else "_" for c in student_file.filename)
+        file_save_path = str(upload_dir / safe_fn)
+        file_content = await student_file.read()
         with open(file_save_path, "wb") as f:
-            shutil.copyfileobj(student_file.file, f)
+            f.write(file_content)
 
         file_text = ""
         image_path = None
@@ -1700,9 +1714,11 @@ async def eval_unified(
     # Parse answer scheme PDF if provided
     parsed_questions = []
     if scheme_pdf and scheme_pdf.filename:
-        pdf_path = str(upload_dir / f"scheme_{scheme_pdf.filename}")
+        safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in scheme_pdf.filename)
+        pdf_path = str(upload_dir / f"scheme_{safe_name}")
+        scheme_content = await scheme_pdf.read()
         with open(pdf_path, "wb") as f:
-            shutil.copyfileobj(scheme_pdf.file, f)
+            f.write(scheme_content)
         scheme_text = _extract_text_from_pdf(pdf_path)
         if scheme_text:
             parsed_questions = _parse_answer_scheme(scheme_text)
@@ -1715,9 +1731,11 @@ async def eval_unified(
 
     image_path = None
     if file and file.filename:
-        file_save_path = str(upload_dir / file.filename)
+        safe_fn = "".join(c if c.isalnum() or c in "._-" else "_" for c in file.filename)
+        file_save_path = str(upload_dir / safe_fn)
+        file_bytes = await file.read()
         with open(file_save_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+            f.write(file_bytes)
         if file.filename.lower().endswith(".pdf"):
             pdf_text = _extract_text_from_pdf(file_save_path)
             if pdf_text and not student_answer:
