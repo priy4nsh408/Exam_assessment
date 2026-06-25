@@ -718,19 +718,10 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
                            max_marks: int, subject: str, question_type: str,
                            expected_formula: str = "", expected_final_answer: str = "",
                            question_index: int = 0, total_questions: int = 1) -> Optional[dict]:
-    """Grade a student's answer by sending ALL page images to LLaVA with extended context.
-    Used for scanned/handwritten PDFs where OCR fails."""
+    """Grade a student's answer by trying each page image one at a time with LLaVA.
+    Sends 1 image per call (LLaVA handles single images reliably), keeps best score."""
     if not OLLAMA_AVAILABLE or not image_paths:
         return None
-
-    images_b64 = []
-    for img_path in image_paths:
-        b64 = image_to_base64(img_path)
-        if b64:
-            images_b64.append(b64)
-    if not images_b64:
-        return None
-    print(f"[VLM-grade] Sending all {len(images_b64)} page images to LLaVA for Q{question_index+1}: {question[:50]}...")
 
     formula_section = ""
     if expected_formula:
@@ -739,26 +730,101 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
         formula_section += f"\nEXPECTED FINAL ANSWER: {expected_final_answer}"
 
     ref_short = reference_answer[:800] if reference_answer else "Not provided"
-    prompt = f"""Grade this student's handwritten answer. Read ALL the images — the student may have written the answer on any page(s). Some questions may be skipped.
+
+    # Estimate likely pages for this question, but try all if needed
+    n_pages = len(image_paths)
+    pages_per_q = max(1, n_pages / max(total_questions, 1))
+    est_start = int(question_index * pages_per_q)
+    est_end = min(n_pages, int((question_index + 1) * pages_per_q) + 1)
+
+    # Try estimated pages first, then remaining pages
+    ordered_indices = list(range(est_start, est_end))
+    for i in range(n_pages):
+        if i not in ordered_indices:
+            ordered_indices.append(i)
+
+    best_result = None
+    best_score = 0.0
+
+    for page_idx in ordered_indices:
+        img_b64 = image_to_base64(image_paths[page_idx])
+        if not img_b64:
+            continue
+
+        prompt = f"""Look at this handwritten answer page. Does it contain an answer to this question?
 
 QUESTION ({max_marks} marks): {question}
 {formula_section}
-KEY POINTS FROM MODEL ANSWER: {ref_short}
+KEY POINTS: {ref_short}
 
-Find where the student answered THIS question. If the student did not answer this question, give 0.
-Grade out of {max_marks}. Reply ONLY in JSON:
-{{"score": <0-{max_marks}>, "student_wrote": "summary of what student wrote for this question", "feedback": "2 sentences", "confidence": 0.7}}
+If this page has the answer (or part of it), grade what you see out of {max_marks}.
+If this page does NOT contain an answer to this question, set score to -1.
+
+Reply ONLY in JSON:
+{{"score": <-1 or 0-{max_marks}>, "student_wrote": "what you see on this page", "feedback": "brief explanation", "confidence": 0.7}}
 Output ONLY valid JSON."""
 
-    # Use num_ctx=16384 to fit all page images
-    num_ctx = max(8192, len(images_b64) * 1500)
+        try:
+            resp = ollama.chat(
+                model=OLLAMA_VISION_MODEL,
+                messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
+                options={"temperature": 0.2, "num_predict": 200},
+            )
+            raw = resp["message"]["content"].strip()
+            parsed = _parse_json(raw)
 
-    try:
-        resp = ollama.chat(
-            model=OLLAMA_VISION_MODEL,
-            messages=[{"role": "user", "content": prompt, "images": images_b64}],
-            options={"temperature": 0.2, "num_predict": 256, "num_ctx": num_ctx},
-        )
+            if parsed and "score" in parsed:
+                score = float(parsed["score"])
+                if score < 0:
+                    print(f"[VLM-grade] Q{question_index+1} page {page_idx+1}: not relevant")
+                    continue
+                score = min(score, max_marks)
+                print(f"[VLM-grade] Q{question_index+1} page {page_idx+1}: {score}/{max_marks}")
+                if score > best_score:
+                    best_score = score
+                    best_result = {
+                        "ai_score": round(score, 1),
+                        "max_score": max_marks,
+                        "confidence": min(0.95, max(0.3, float(parsed.get("confidence", 0.6)))),
+                        "feedback": parsed.get("feedback", ""),
+                        "explanation": parsed.get("student_wrote", ""),
+                        "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
+                        "llm_graded": True,
+                        "vision_graded": True,
+                    }
+                # Found a good answer, stop searching
+                if score >= max_marks * 0.5:
+                    break
+            else:
+                # Try to find score in raw text
+                import re as _re
+                score_match = _re.search(r'"?score"?\s*:\s*(-?\d+(?:\.\d+)?)', raw)
+                if score_match:
+                    score = float(score_match.group(1))
+                    if score < 0:
+                        continue
+                    score = min(score, max_marks)
+                    if score > best_score:
+                        best_score = score
+                        best_result = {
+                            "ai_score": round(score, 1),
+                            "max_score": max_marks,
+                            "confidence": 0.5,
+                            "feedback": raw[:200],
+                            "explanation": "",
+                            "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
+                            "llm_graded": True,
+                            "vision_graded": True,
+                        }
+                    if score >= max_marks * 0.5:
+                        break
+        except Exception as e:
+            print(f"[VLM-grade] Q{question_index+1} page {page_idx+1} error: {e}")
+            continue
+
+    if best_result:
+        return best_result
+    return None
         raw = resp["message"]["content"].strip()
         parsed = _parse_json(raw)
         if parsed and "score" in parsed:
