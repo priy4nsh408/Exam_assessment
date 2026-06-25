@@ -112,6 +112,7 @@ def _pdf_to_images_pymupdf(pdf_path: str, dpi: int = 200) -> List[str]:
     """Render all PDF pages to PNGs using PyMuPDF. No poppler required."""
     if not PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF not installed — run: pip install pymupdf")
+
     doc = _fitz.open(pdf_path)
     tmp_dir = tempfile.mkdtemp(prefix="mechassess_ocr_")
     paths: List[str] = []
