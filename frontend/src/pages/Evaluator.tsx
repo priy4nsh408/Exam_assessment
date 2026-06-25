@@ -174,7 +174,32 @@ export default function Evaluator() {
       } catch (e: any) {
         setError(e.message || 'Network error')
       }
+    } else if (parsedQuestions.length > 0 && (answerImage || studentAnswer.trim())) {
+      // Single student, multiple questions from scheme — use batch endpoint
+      const formData = new FormData()
+      if (answerImage) {
+        formData.append('files', answerImage)
+      } else {
+        const textBlob = new Blob([studentAnswer], { type: 'text/plain' })
+        formData.append('files', textBlob, 'typed_answer.txt')
+      }
+      formData.append('questions_json', JSON.stringify(parsedQuestions))
+      formData.append('subject', subject)
+      formData.append('student_text', studentAnswer)
+
+      try {
+        const res = await fetch('/api/eval/batch', { method: 'POST', body: formData })
+        const data = await res.json()
+        if (!res.ok) {
+          setError(data.detail || 'Evaluation failed')
+        } else {
+          setBatchResults(data)
+        }
+      } catch (e: any) {
+        setError(e.message || 'Network error')
+      }
     } else {
+      // No parsed questions — single question, single answer
       const formData = new FormData()
       if (answerImage) formData.append('file', answerImage)
       if (schemePdf) formData.append('scheme_pdf', schemePdf)

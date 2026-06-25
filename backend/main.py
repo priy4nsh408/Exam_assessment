@@ -1483,6 +1483,7 @@ async def eval_batch(
     scheme_pdf: UploadFile = File(None),
     questions_json: str = Form("[]"),
     subject: str = Form(""),
+    student_text: str = Form(""),
 ):
     """Evaluate multiple student scripts against parsed answer scheme questions.
     questions_json is a JSON array of question objects from parse-scheme."""
@@ -1512,12 +1513,18 @@ async def eval_batch(
         with open(file_save_path, "wb") as f:
             shutil.copyfileobj(student_file.file, f)
 
-        student_text = ""
+        file_text = ""
         image_path = None
         if student_file.filename.lower().endswith(".pdf"):
-            student_text = _extract_text_from_pdf(file_save_path)
+            file_text = _extract_text_from_pdf(file_save_path)
+        elif student_file.filename.lower().endswith(".txt"):
+            with open(file_save_path, "r", encoding="utf-8", errors="ignore") as tf:
+                file_text = tf.read()
         else:
             image_path = file_save_path
+
+        if not file_text and student_text:
+            file_text = student_text
 
         student_name = student_file.filename.rsplit(".", 1)[0]
         question_results = []
@@ -1527,7 +1534,7 @@ async def eval_batch(
         for q in parsed_questions:
             q_result = unified_evaluate(
                 question=q.get("question_text", ""),
-                student_answer=student_text,
+                student_answer=file_text,
                 answer_image_path=image_path,
                 reference_answer=q.get("reference_answer", ""),
                 max_marks=q.get("marks", 10),
