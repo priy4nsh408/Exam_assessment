@@ -212,7 +212,83 @@ MOCK_SUBMISSIONS = _demo.DEMO_SUBMISSIONS if HAS_DEMO_DATA else []
 MOCK_EXAMS = _demo.DEMO_EXAMS if HAS_DEMO_DATA else []
 
 GRADE_RESULTS = {}
-EVAL_HISTORY: list = []
+
+# ── Evaluation history persistence (SQLite) ──────────────────────────────────
+
+_EVAL_DB_PATH = str(Path(__file__).parent.parent / "data" / "eval_history.db")
+
+def _init_eval_db():
+    """Create the evaluation history table if it doesn't exist."""
+    import sqlite3
+    (Path(__file__).parent.parent / "data").mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(_EVAL_DB_PATH)
+    conn.execute("""CREATE TABLE IF NOT EXISTS eval_history (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""")
+    conn.commit()
+    conn.close()
+
+def _load_eval_history() -> list:
+    """Load all evaluation history from SQLite."""
+    import sqlite3, json as _json
+    try:
+        _init_eval_db()
+        conn = sqlite3.connect(_EVAL_DB_PATH)
+        rows = conn.execute("SELECT data FROM eval_history ORDER BY created_at DESC").fetchall()
+        conn.close()
+        return [_json.loads(row[0]) for row in rows]
+    except Exception as e:
+        print(f"[eval-db] Load failed: {e}")
+        return []
+
+def _save_eval_record(record: dict):
+    """Insert or replace a single evaluation record in SQLite."""
+    import sqlite3, json as _json
+    try:
+        _init_eval_db()
+        conn = sqlite3.connect(_EVAL_DB_PATH)
+        conn.execute(
+            "INSERT OR REPLACE INTO eval_history (id, data, created_at) VALUES (?, ?, ?)",
+            (record["id"], _json.dumps(record), record.get("evaluated_at", "")),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[eval-db] Save failed: {e}")
+
+def _delete_eval_record(eval_id: str) -> bool:
+    """Delete a record from SQLite. Returns True if deleted."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(_EVAL_DB_PATH)
+        cur = conn.execute("DELETE FROM eval_history WHERE id = ?", (eval_id,))
+        conn.commit()
+        deleted = cur.rowcount > 0
+        conn.close()
+        return deleted
+    except Exception as e:
+        print(f"[eval-db] Delete failed: {e}")
+        return False
+
+def _update_eval_record(eval_id: str, updates: dict):
+    """Update fields in an existing eval record."""
+    import sqlite3, json as _json
+    try:
+        conn = sqlite3.connect(_EVAL_DB_PATH)
+        row = conn.execute("SELECT data FROM eval_history WHERE id = ?", (eval_id,)).fetchone()
+        if row:
+            record = _json.loads(row[0])
+            record.update(updates)
+            conn.execute("UPDATE eval_history SET data = ? WHERE id = ?", (_json.dumps(record), eval_id))
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[eval-db] Update failed: {e}")
+
+EVAL_HISTORY: list = _load_eval_history()
+print(f"[startup] Loaded {len(EVAL_HISTORY)} evaluation records from database")
 
 # ── SSE agent sequence ────────────────────────────────────────────────────────
 
@@ -1963,6 +2039,7 @@ async def eval_batch(
             "question_results": question_results,
         }
         EVAL_HISTORY.insert(0, history_record)
+        _save_eval_record(history_record)
         student_record["eval_id"] = eval_id
         all_results.append(student_record)
 
@@ -2123,6 +2200,7 @@ async def eval_unified(
             "question_results": question_results,
         }
         EVAL_HISTORY.insert(0, history_record)
+        _save_eval_record(history_record)
         student_record["eval_id"] = eval_id
 
         _log_activity_safe(
@@ -2182,6 +2260,7 @@ async def eval_unified(
             "script_file": file.filename if file and file.filename else None,
         }
         EVAL_HISTORY.insert(0, record)
+        _save_eval_record(record)
         result["eval_id"] = eval_id
 
     _log_activity_safe(
@@ -2208,6 +2287,7 @@ async def override_eval(eval_id: str, body: OverrideRequest):
     rec["override_reason"] = body.reason
     rec["overridden_by"] = "faculty"
     rec["overridden_at"] = datetime.utcnow().isoformat() + "Z"
+    _save_eval_record(rec)
     _log_activity_safe(
         action=f"Faculty override on {eval_id} ({rec['ai_score']} → {body.score})",
         activity_type="override", subject=rec.get("subject", ""), detail=body.reason,
@@ -2222,6 +2302,7 @@ async def delete_eval(eval_id: str):
     EVAL_HISTORY = [r for r in EVAL_HISTORY if r["id"] != eval_id]
     if len(EVAL_HISTORY) == before:
         raise HTTPException(status_code=404, detail="Evaluation record not found")
+    _delete_eval_record(eval_id)
     return {"success": True, "id": eval_id}
 
 

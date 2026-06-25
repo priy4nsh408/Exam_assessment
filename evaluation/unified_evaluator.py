@@ -718,28 +718,19 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
                            max_marks: int, subject: str, question_type: str,
                            expected_formula: str = "", expected_final_answer: str = "",
                            question_index: int = 0, total_questions: int = 1) -> Optional[dict]:
-    """Grade a student's answer by sending page images directly to LLaVA.
-    Used for scanned/handwritten PDFs where OCR fails.
-    Selects ~2-3 pages per question based on estimated position."""
+    """Grade a student's answer by sending ALL page images to LLaVA with extended context.
+    Used for scanned/handwritten PDFs where OCR fails."""
     if not OLLAMA_AVAILABLE or not image_paths:
         return None
 
-    # Estimate which pages belong to this question
-    n_pages = len(image_paths)
-    pages_per_q = max(1, n_pages / max(total_questions, 1))
-    start_page = int(question_index * pages_per_q)
-    end_page = min(n_pages, int((question_index + 1) * pages_per_q) + 1)
-    # Take at most 2 pages to stay within LLaVA's context
-    selected = image_paths[start_page:end_page][:2]
-
     images_b64 = []
-    for img_path in selected:
+    for img_path in image_paths:
         b64 = image_to_base64(img_path)
         if b64:
             images_b64.append(b64)
     if not images_b64:
         return None
-    print(f"[VLM-grade] Q{question_index+1}: sending pages {start_page+1}-{start_page+len(selected)} of {n_pages} to LLaVA")
+    print(f"[VLM-grade] Sending all {len(images_b64)} page images to LLaVA for Q{question_index+1}: {question[:50]}...")
 
     formula_section = ""
     if expected_formula:
@@ -748,21 +739,25 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
         formula_section += f"\nEXPECTED FINAL ANSWER: {expected_final_answer}"
 
     ref_short = reference_answer[:800] if reference_answer else "Not provided"
-    prompt = f"""Grade this student's handwritten answer. Read the images carefully.
+    prompt = f"""Grade this student's handwritten answer. Read ALL the images — the student may have written the answer on any page(s). Some questions may be skipped.
 
 QUESTION ({max_marks} marks): {question}
 {formula_section}
 KEY POINTS FROM MODEL ANSWER: {ref_short}
 
+Find where the student answered THIS question. If the student did not answer this question, give 0.
 Grade out of {max_marks}. Reply ONLY in JSON:
-{{"score": <0-{max_marks}>, "student_wrote": "summary", "feedback": "2 sentences", "confidence": 0.7}}
+{{"score": <0-{max_marks}>, "student_wrote": "summary of what student wrote for this question", "feedback": "2 sentences", "confidence": 0.7}}
 Output ONLY valid JSON."""
+
+    # Use num_ctx=16384 to fit all page images
+    num_ctx = max(8192, len(images_b64) * 1500)
 
     try:
         resp = ollama.chat(
             model=OLLAMA_VISION_MODEL,
             messages=[{"role": "user", "content": prompt, "images": images_b64}],
-            options={"temperature": 0.2, "num_predict": 256},
+            options={"temperature": 0.2, "num_predict": 256, "num_ctx": num_ctx},
         )
         raw = resp["message"]["content"].strip()
         parsed = _parse_json(raw)
