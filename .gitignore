@@ -4,3 +4,5 @@ __pycache__/
 data/questions.db
 data/demo_grades_cache.json
 backend/__pycache__/
+data/eval_results.db
+data/uploads/
