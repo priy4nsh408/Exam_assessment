@@ -93,6 +93,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Evaluation Engine v2 API (exams, overrides, reports) ─────────────────────
+try:
+    from eval_api import router as _eval_router
+    app.include_router(_eval_router)
+except Exception as _e:
+    print(f"[warn] eval_api router not loaded: {_e}")
+
 # ── SQLite override persistence ───────────────────────────────────────────────
 _OVERRIDE_DB = Path(__file__).parent.parent / "data" / "overrides.db"
 
@@ -2020,8 +2027,8 @@ async def batch_results_csv(subject: str = ""):
 async def health_deps():
     """Return availability of optional ML dependencies (OCR, etc.)."""
     try:
-        from evaluation.ocr_engine import get_dependency_status
-        ocr_deps = get_dependency_status()
+        from evaluation.engine.ocr import dependency_status
+        ocr_deps = dependency_status()
     except Exception as e:
         ocr_deps = {"ready": False, "error": str(e)}
 
@@ -2031,7 +2038,8 @@ async def health_deps():
         "numerical_evaluator": NUMERICAL_EVAL_AVAILABLE,
         "drawing_evaluator":  DRAWING_EVAL_AVAILABLE,
         "install_instructions": {
-            "ocr": "pip install easyocr pdf2image Pillow && apt-get install -y poppler-utils",
+            "ocr": "pip install pymupdf pytesseract Pillow (plus the tesseract-ocr system package); "
+                   "set GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY for handwriting-grade OCR",
         }
     }
 

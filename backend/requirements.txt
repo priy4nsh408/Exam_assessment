@@ -15,5 +15,6 @@ opencv-python-headless==4.10.0.84
 # Answer-script OCR pipeline
 # easyocr and pdf2image replaced by Tesseract (faster, no GPU, no poppler)
 pytesseract>=0.3.10
+requests>=2.31.0
 Pillow>=10.0.0
 pymupdf>=1.23.0
