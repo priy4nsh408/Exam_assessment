@@ -16,11 +16,34 @@ from pathlib import Path
 
 # Load API keys from a .env file at the repo root (if present) so users can
 # put GEMINI_API_KEY=... in Exam_assessment/.env instead of setting env vars.
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-except ImportError:
-    pass
+# Works even if python-dotenv isn't installed (manual fallback parser), so a
+# key in .env is never silently ignored.
+def _load_env_file() -> None:
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    try:
+        from dotenv import load_dotenv
+        if load_dotenv(env_path):
+            return
+    except ImportError:
+        pass
+    # Manual fallback — no python-dotenv needed
+    try:
+        if not env_path.exists():
+            return
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except Exception:
+        pass
+
+
+_load_env_file()
 
 
 @dataclass
