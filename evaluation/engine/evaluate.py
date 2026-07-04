@@ -223,15 +223,32 @@ def _grade_fallback(q_type, question, student_answer, reference_answer, max_mark
     stu_kw = set(_keywords(student_answer))
     kw_cov = len(ref_kw & stu_kw) / len(ref_kw) if ref_kw else 0.0
 
+    # Rescale so a genuinely correct answer maps to high marks. MiniLM cosine
+    # for a correct-but-reworded answer sits around 0.5-0.75, and 60% keyword
+    # coverage already means the key concepts are present — both should score high.
+    def _clamp(x):
+        return max(0.0, min(1.0, x))
+
+    sem_scaled = _clamp((sem - 0.20) / 0.50)   # 0.20→0, 0.70→full
+    kw_scaled  = _clamp(kw_cov / 0.60)          # 60% coverage → full
+
     # numericals: reward visible formula/units/steps
     step_bonus = 0.0
     if q_type in ("numerical", "derivation"):
         has_eq = bool(re.search(r"=", student_answer))
         has_units = bool(re.search(r"\d\s*(MPa|kPa|kN|N|mm|m/s|rpm|W|J|K|°C|m)\b", student_answer))
         n_steps = len(re.findall(r"=", student_answer))
-        step_bonus = 0.1 * has_eq + 0.1 * has_units + min(0.1, 0.02 * n_steps)
+        step_bonus = 0.15 * has_eq + 0.10 * has_units + min(0.15, 0.03 * n_steps)
 
-    score_frac = max(0.0, min(1.0, 0.45 * sem + 0.45 * kw_cov + step_bonus))
+    # Lean on whichever signal is stronger, temper with the average.
+    base = 0.65 * max(sem_scaled, kw_scaled) + 0.35 * ((sem_scaled + kw_scaled) / 2)
+    score_frac = _clamp(base + step_bonus)
+
+    # A real attempt (there is content and at least some topical match) should
+    # never score 0 — the answer scheme is the master, faculty override refines.
+    if len(student_answer.strip()) >= 40 and (sem >= 0.25 or kw_cov >= 0.10):
+        score_frac = max(score_frac, 0.35)
+
     awarded = round(score_frac * float(max_marks), 1)
 
     covered = sorted(ref_kw & stu_kw)[:8]
@@ -242,8 +259,9 @@ def _grade_fallback(q_type, question, student_answer, reference_answer, max_mark
                             "awarded": round(score_frac * r["marks"], 1),
                             "reason": f"Proportional to semantic match ({sem:.0%}) and concept coverage ({kw_cov:.0%})"}
                            for r in rubric],
-        "feedback": (f"Graded without LLM (semantic similarity {sem:.0%}, concept coverage {kw_cov:.0%}). "
-                     f"Faculty verification recommended."),
+        "feedback": (f"Graded against the answer scheme by concept matching — "
+                     f"{kw_cov:.0%} of the key points are present (semantic match {sem:.0%}). "
+                     f"For sharper marking, enable an LLM (set an API key or run Ollama)."),
         "covered": covered, "missing": missing,
         "strengths": [f"Mentions: {', '.join(covered[:4])}"] if covered else [],
         "weaknesses": [f"Missing concepts: {', '.join(missing[:4])}"] if missing else [],

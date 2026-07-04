@@ -249,10 +249,11 @@ function AnswerCard({ ans, resultId, onUpdate }: {
       {open && (
         <div className="border-t border-gray-100 px-5 py-4 space-y-3">
           {ans.illegible && (
-            <div className="flex items-start gap-2 text-xs bg-red-50 border border-red-200 rounded p-2">
-              <AlertTriangle className="w-3.5 h-3.5 text-red-500 mt-0.5 shrink-0" />
-              <span className="text-red-700">
-                Handwriting could not be read reliably — no marks auto-assigned. Please read the script and set marks manually below.
+            <div className="flex items-start gap-2 text-xs bg-amber-50 border border-amber-200 rounded p-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+              <span className="text-amber-700">
+                Handwriting was hard to read (low OCR confidence). Marks are still awarded from what was
+                read against the scheme — check the OCR Text tab and adjust below if needed.
               </span>
             </div>
           )}
