@@ -45,17 +45,25 @@ def evaluate_script(
     # 2+3. Detect + segment + semantic match to scheme
     segments = segment_script(pages, scheme_questions=scheme or None)
 
-    q_map = {int(q.get("q_number", 0)): q for q in scheme}
+    def _qn(q) -> int:
+        try:
+            return int(q.get("q_number") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    q_map = {_qn(q): q for q in scheme}
 
     # 4. Evaluate every segment
     answers: List[Dict] = []
     for seg in segments:
-        q_meta = q_map.get(seg["q_number"], {})
-        q_text = q_meta.get("question", "") or f"Question {seg['q_number']}"
-        ref = q_meta.get("reference_answer", "")
-        marks = float(q_meta.get("max_marks", max_marks_per_q) or max_marks_per_q)
-        q_type = classify_question_type(q_text, seg["text"], declared=q_meta.get("type", ""))
-        instructions = " ".join(x for x in (global_instructions, q_meta.get("marking_instructions", "")) if x).strip()
+        q_meta = q_map.get(seg["q_number"], {}) or {}
+        q_text = (q_meta.get("question") or "") or f"Question {seg['q_number']}"
+        ref = q_meta.get("reference_answer") or ""
+        marks = float(q_meta.get("max_marks") or max_marks_per_q)
+        q_type = classify_question_type(q_text, seg["text"], declared=q_meta.get("type") or "")
+        instructions = " ".join(
+            x for x in (global_instructions or "", q_meta.get("marking_instructions") or "") if x
+        ).strip()
 
         graded = evaluate_answer(
             q_number=seg["q_number"], q_type=q_type, question=q_text,
@@ -85,10 +93,10 @@ def evaluate_script(
     answered_qs = {a["q_number"] for a in answers}
     unanswered = []
     for q in scheme:
-        qn = int(q.get("q_number", 0))
+        qn = _qn(q)
         if qn and qn not in answered_qs:
             unanswered.append({
-                "q_number": qn, "question": q.get("question", ""),
+                "q_number": qn, "question": q.get("question") or "",
                 "max_marks": float(q.get("max_marks", max_marks_per_q)),
             })
 

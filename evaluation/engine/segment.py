@@ -30,6 +30,14 @@ _MATH_RX = re.compile(
 _DIAGRAM_RX = re.compile(r"\[(DIAGRAM|GRAPH|FLOWCHART|TABLE)[^\]]*\]", re.I)
 
 
+def _qn(q) -> int:
+    """None-safe question-number int extraction."""
+    try:
+        return int(q.get("q_number") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _extract_features(text: str) -> Dict:
     return {
         "math_expressions": _MATH_RX.findall(text)[:20],
@@ -54,7 +62,7 @@ def segment_script(pages: List[Dict], scheme_questions: Optional[List[Dict]] = N
         offsets.append((len(full_text), p["page"], p["image_path"], p.get("confidence", 1.0)))
         full_text += p["text"] + "\n\n"
 
-    max_q = max((int(q.get("q_number", 0)) for q in scheme_questions), default=20) if scheme_questions else 20
+    max_q = max((_qn(q) for q in scheme_questions), default=20) if scheme_questions else 20
     markers = find_question_markers(full_text, max_q=max(max_q, 20))
 
     def _page_info(offset: int):
@@ -115,9 +123,9 @@ def match_to_scheme(segments: List[Dict], scheme: List[Dict]) -> List[Dict]:
     Handles: shuffled answers, missing numbers, duplicate claims.
     """
     cfg = get_config()
-    scheme_by_q = {int(q["q_number"]): q for q in scheme if q.get("q_number")}
+    scheme_by_q = {_qn(q): q for q in scheme if _qn(q)}
     scheme_texts = [
-        f"{q.get('question','')} {q.get('reference_answer','')[:800]}" for q in scheme
+        f"{q.get('question') or ''} {(q.get('reference_answer') or '')[:800]}" for q in scheme
     ]
     seg_texts = [s["text"][:1500] for s in segments]
     sims = similarity_matrix(seg_texts, scheme_texts) if segments and scheme else []
@@ -127,7 +135,7 @@ def match_to_scheme(segments: List[Dict], scheme: List[Dict]) -> List[Dict]:
     def _best_free_match(si: int) -> Optional[int]:
         ranked = sorted(range(len(scheme)), key=lambda j: -sims[si][j])
         for j in ranked:
-            qn = int(scheme[j].get("q_number", 0))
+            qn = _qn(scheme[j])
             if qn and qn not in taken and sims[si][j] >= cfg.semantic_match_threshold:
                 return qn
         return None
@@ -139,7 +147,7 @@ def match_to_scheme(segments: List[Dict], scheme: List[Dict]) -> List[Dict]:
             if cq in taken:
                 # conflict: keep the semantically closer segment
                 other = taken[cq]
-                j = next((k for k, q in enumerate(scheme) if int(q.get("q_number", 0)) == cq), None)
+                j = next((k for k, q in enumerate(scheme) if _qn(q) == cq), None)
                 if j is not None and sims and sims[i][j] > sims[other][j]:
                     segments[other]["claimed_q"] = None
                     segments[other]["matched_by"] = "conflict_rematched"
@@ -165,7 +173,7 @@ def match_to_scheme(segments: List[Dict], scheme: List[Dict]) -> List[Dict]:
     # Finalize q_number + attach similarity score
     for qn, si in taken.items():
         segments[si]["q_number"] = qn
-        j = next((k for k, q in enumerate(scheme) if int(q.get("q_number", 0)) == qn), None)
+        j = next((k for k, q in enumerate(scheme) if _qn(q) == qn), None)
         segments[si]["match_similarity"] = round(sims[si][j], 3) if (sims and j is not None) else None
 
     # Drop segments that matched nothing and look like rough work

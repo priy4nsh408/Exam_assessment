@@ -78,12 +78,16 @@ _SIGNALS = {
 }
 
 
-def classify_question_type(question_text: str, answer_text: str = "", declared: str = "") -> str:
-    """Detect question type. Faculty-declared type always wins."""
-    if declared and declared.lower() in _SIGNALS or declared.lower() in ("theory", "numerical", "diagram", "derivation", "flowchart", "graph", "mixed"):
-        return declared.lower()
+_VALID_TYPES = ("theory", "numerical", "diagram", "derivation", "flowchart", "graph", "mixed")
 
-    text = f"{question_text}\n{answer_text}"
+
+def classify_question_type(question_text: str = "", answer_text: str = "", declared: str = "") -> str:
+    """Detect question type. Faculty-declared type always wins."""
+    declared = (declared or "").strip().lower()
+    if declared in _VALID_TYPES:
+        return declared
+
+    text = f"{question_text or ''}\n{answer_text or ''}"
     scores = {t: len(rx.findall(text)) for t, rx in _SIGNALS.items()}
     top = sorted(scores.items(), key=lambda kv: -kv[1])
     if top[0][1] == 0:
