@@ -15,203 +15,82 @@
 
 ## What This Is
 
-MechAssess is a closed-loop AI assessment platform for Mechanical Engineering education. It covers the complete assessment lifecycle — from AI-generated exam papers to automated answer-script grading with human-in-the-loop faculty override.
+Students write exams on paper. The handwritten scripts are scanned and uploaded as PDFs. Faculty uploads the answer scheme, rubrics and marks. The AI evaluates every answer against the marking scheme and produces marks **with explanations** — question by question — while faculty can review and override anything. The goal: drastically reduce evaluation workload without losing quality.
 
-### Core capabilities
+### The evaluation engine (rebuilt — `evaluation/engine/`)
 
-| Module | What it does |
+| Stage | What happens |
 |---|---|
-| **Question Generation** | 11-agent LangGraph RAG pipeline generates syllabus-aligned questions tagged with Bloom level, CO/PO, difficulty, and marks. SHA-256 deduplication prevents repeats. |
-| **Answer Scheme Upload** | Upload an answer scheme PDF — system OCRs it and extracts subject, questions, expected answers, and marks per question automatically |
-| **Answer Script Evaluation** | Upload student PDF → select answer scheme → OCR → auto-segment by question → auto-classify (theory/numerical/drawing) → AI score → report |
-| **Theory Evaluator** | sentence-transformers cosine similarity + ME keyword bank (40% keyword / 60% semantic blend) |
-| **Numerical Grader** | Step-level LLM chain-of-thought with 5-category error classification; heuristic fallback works without Ollama |
-| **Drawing Evaluator** | OpenCV preprocessing → EasyOCR extracts text labels & dimensions → matches expected parts → deducts for missing; always flags for faculty visual review |
-| **CO/PO Analytics** | Course Outcome and Program Outcome attainment charts per batch |
-| **Faculty Override** | SQLite-persisted grade overrides survive restarts; Cohen's Kappa tracks AI–faculty agreement (target κ ≥ 0.75) |
-| **Batch Evaluation** | Upload multiple student scripts or a ZIP → class summary + per-student drill-down + CSV export |
+| **1. OCR** | Blank pages auto-detected and skipped (never penalised). Typed PDFs read instantly. Handwriting read by a cloud vision model (Gemini/GPT/Claude) if an API key is set, otherwise Tesseract. Diagrams, graphs and tables are captured as `[DIAGRAM: ...]` descriptions. OCR confidence stored per page. |
+| **2. Question detection** | Understands `Q1`, `Q.1`, `Question 1`, `Ans 1`, `1.` and handwritten variations. Stray numbers (marks tables, page numbers) are filtered out. |
+| **3. Segmentation** | The script is split into individual answers, each carrying its text, page images, math expressions, diagram references and OCR confidence. |
+| **4. Semantic matching** | Answers are matched to the answer scheme **semantically, not positionally** — students can answer Q5, then Q1, then Q8. Un-numbered answers are matched by meaning using embeddings. |
+| **5. Rubric evaluation** | Question type auto-detected (theory / numerical / diagram / derivation / flowchart / graph / mixed). Each type has its own examiner logic: numericals are graded step-wise (formula → substitution → calculation → answer → units), theory by concepts not exact words, diagrams by components and labels not pixels. Partial marks everywhere. |
+| **6. Confidence engine** | Weighted score from OCR quality + grader certainty + rubric coverage + match certainty + completeness. **Below 80% → sent to faculty review automatically. Illegible handwriting → no marks auto-assigned at all.** |
+| **7. Faculty override** | Approve / reject / adjust marks / rewrite feedback per question. Every override is logged in an audit trail and totals recomputed. |
+| **8. Reports** | Student report (question-wise marks + feedback + strengths/weaknesses), faculty report (review queue, common mistakes, most-missed concepts), class analytics (average, distribution, question difficulty). |
+
+### Fairness rules (built into every grading prompt)
+- Never exact string matching — synonyms and equivalent definitions accepted
+- Alternate methods accepted if mathematically correct
+- Method marks awarded even when the final answer is wrong
+- No deductions that aren't grounded in the rubric (no hallucinated mistakes)
 
 ---
 
-## How Evaluation Works (End-to-End Flow)
+## ❓ Do I need an API key?
 
-```
-1. Faculty uploads Answer Scheme PDF  →  Answer Schemes page
-        │
-        │  OCR + parse
-        ▼
-   Extracted: subject · Q1 question + expected answer + marks
-              Q2 question + expected answer + marks  ...
-        │
-        │  stored in SQLite
-        ▼
+**No — it works without one.** But here is the honest difference:
 
-2. Faculty uploads Student Answer Script PDF  →  Evaluate Scripts page
-        │  (selects the answer scheme uploaded above)
-        │
-        ▼
-   EasyOCR  ──────────────────  per-page confidence score
-        │
-        ▼
-   Segment by Q-number  ──────  regex: "Q1", "1.", "Answer 1", etc.
-        │
-        ▼
-   Classify each answer automatically
-    ├─ theory    →  sentence-transformers (keyword + semantic vs. expected answer)
-    ├─ numerical →  LLM step-grader / heuristic fallback
-    └─ drawing   →  OCR label match + faculty review flag
-        │
-        ▼
-   Aggregate Report
-   total_score / max_total / percentage / per-question detail
-        │
-        ▼
-   Faculty Override  ──  persisted in overrides.db
-        │
-        ▼
-   Cohen's Kappa  ─────  κ ≥ 0.75 target
+| | Without any API key (free, offline) | With an API key |
+|---|---|---|
+| Typed / digital PDFs | ✅ Perfect | ✅ Perfect |
+| **Handwritten scripts** | ⚠️ Weak — Tesseract is a print-OCR engine, it struggles with handwriting | ✅ Excellent — cloud vision models read handwriting, equations and diagrams |
+| Grading quality | ⚠️ Approximate — keyword + semantic similarity scoring (clearly labelled, flagged for faculty review) | ✅ Real examiner-style rubric grading with explanations |
+| Ollama installed locally? | Adds proper LLM grading (Mistral) but still weak handwriting OCR | Not needed |
+
+**Recommendation:** get a **free Gemini API key** (no credit card needed) from https://aistudio.google.com/apikey — the free tier is enough for this project. Then before starting the backend:
+
+```powershell
+# Windows PowerShell (once — persists across restarts)
+setx GEMINI_API_KEY "your-key-here"
+# then close and reopen the terminal
 ```
 
-### What the answer scheme provides
-When a scheme is selected during evaluation, the system automatically uses:
-- **Subject** — for selecting the right keyword bank in theory grading
-- **Expected answer per question** — compared against student's text for scoring accuracy
-- **Marks per question** — determines score out of X for each answer
+That single key upgrades **both** handwriting OCR **and** grading quality. No code changes needed — the engine detects it automatically.
 
-Nothing needs to be typed manually during evaluation.
+If you truly can't use any key: the system still runs end-to-end, results are just approximate for handwriting and everything low-confidence goes to the faculty review queue. For demos, use the seeded results (`POST /api/eval/seed-demo`).
 
 ---
 
-## Tech Stack
+## Setup (Simple Steps)
 
-### Backend
-- **FastAPI** — REST API server
-- **SQLite** — four databases: `questions.db`, `overrides.db`, `training_meta.db`, `eval_results.db`
-- **LangGraph + LangChain** — 11-agent question generation pipeline
-- **ChromaDB** — vector store for RAG
-- **sentence-transformers** (`all-MiniLM-L6-v2`) — semantic similarity for theory grading
-- **PyMuPDF** (`fitz`) — direct text extraction from typed/digital PDFs (no poppler needed)
-- **EasyOCR** — deep-learning OCR for handwritten answer scripts, drawing labels, and scheme parsing
-- **OpenCV** (`opencv-python-headless`) — image preprocessing (adaptive threshold) before OCR
-- **pdf2image + poppler** — PDF → image conversion for scanned/handwritten scripts (optional; PyMuPDF used first)
-- **Ollama** (optional) — local LLM for numerical step grading; heuristic fallback used if unavailable
+### First time only
 
-### Frontend
-- **React 18 + TypeScript + Vite**
-- **Tailwind CSS**
-- **lucide-react** — icons
-- **react-router-dom** — client-side routing
+```powershell
+cd C:\Users\sriva\OneDrive\Desktop\IDP6SEMEL
 
----
-
-## Project Structure
-
-```
-Exam_assessment/
-├── backend/
-│   ├── main.py              # FastAPI app — all REST endpoints
-│   └── requirements.txt
-├── evaluation/
-│   ├── scheme_parser.py     # OCR + parse answer scheme PDFs → structured Q&A
-│   ├── ocr_engine.py        # EasyOCR + pdf2image pipeline
-│   ├── script_pipeline.py   # PDF → OCR → segment → classify → evaluate → report
-│   ├── theory_evaluator.py  # sentence-transformers keyword+semantic grader
-│   ├── numerical_grader.py  # LLM step-level grader with heuristic fallback
-│   └── drawing_evaluator.py # OCR-based label/dimension checker
-├── generation/
-│   └── pipeline.py          # LangGraph 11-agent question generation
-├── frontend/
-│   └── src/
-│       ├── App.tsx
-│       └── pages/
-│           ├── Dashboard.tsx
-│           ├── QuestionGenerator.tsx
-│           ├── QuestionBank.tsx
-│           ├── ExamPapers.tsx
-│           ├── DataSource.tsx
-│           ├── AnswerScriptEvaluator.tsx  # single hub: upload script + select scheme
-│           ├── TrainingEngine.tsx         # upload + preview answer schemes
-│           ├── ValidationMetrics.tsx      # Cohen's Kappa
-│           ├── COPOAnalytics.tsx
-│           ├── Students.tsx
-│           └── FacultyOverride.tsx
-├── data/
-│   ├── questions.db
-│   ├── overrides.db
-│   ├── training_meta.db     # scheme metadata + parsed questions JSON
-│   ├── eval_results.db      # all evaluation results (persists across restarts)
-│   └── training_refs/       # uploaded scheme PDFs
-└── ingestion/               # syllabus/PYQ ingestion scripts
-```
-
----
-
-## Setup
-
-### 1. Python environment
-
-```bash
-cd Exam_assessment
-python -m venv venv
-
-# Windows (PowerShell)
+# 1. Allow scripts (once per machine)
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-.\venv\Scripts\Activate.ps1
 
-# macOS / Linux
-source venv/bin/activate
+# 2. Python packages
+.\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
 
-pip install -r backend/requirements.txt
-```
-
-Key Python packages:
-- `pymupdf>=1.23.0` — direct PDF text extraction, **no system dependencies**
-- `easyocr>=1.7.1` — OCR engine for handwritten scripts (downloads ~100 MB model on first run)
-- `pdf2image>=1.17.0` — fallback for scanned PDFs (requires poppler — see below)
-- `opencv-python-headless==4.10.0.84` — image preprocessing
-- `sentence-transformers==3.2.1` — theory semantic scoring
-- `fastapi==0.115.0` + `uvicorn[standard]==0.31.0`
-
-### 2. (Optional) Poppler — only needed for scanned/handwritten PDFs
-
-Answer schemes are typed PDFs — PyMuPDF handles them with no extra install.
-Poppler is only needed if student scripts are scanned PDFs (not digital).
-
-```bash
-# Ubuntu / Debian
-sudo apt-get install -y poppler-utils
-
-# macOS
-brew install poppler
-
-# Windows: download from https://github.com/oschwartz10612/poppler-windows/releases
-# Unzip and add the Library\bin folder to your system PATH, then restart VS Code
-```
-
-### 3. Frontend
-
-```bash
+# 3. Frontend packages
 cd frontend
 npm install
+cd ..
+
+# 4. (Optional, for offline handwriting OCR) install Tesseract:
+#    https://github.com/UB-Mannheim/tesseract/wiki  → run installer, keep default path
+
+# 5. (Optional but recommended) free Gemini key — see section above
 ```
-
-### 4. (Optional) Ollama for numerical grading LLM feedback
-
-```bash
-# Install from https://ollama.ai
-ollama pull mistral
-```
-
-If Ollama is not running, numerical grading uses a heuristic fallback that still works.
-
----
-
-## Running
 
 ### Every time you start
 
 **Terminal 1 — Backend**
-
 ```powershell
 cd C:\Users\sriva\OneDrive\Desktop\IDP6SEMEL
 git pull origin claude/practical-goldberg-12yy6e
@@ -220,13 +99,7 @@ cd backend
 uvicorn main:app --reload --port 8000
 ```
 
-Wait until you see:
-```
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-**Terminal 2 — Frontend** (new terminal window)
-
+**Terminal 2 — Frontend** (new terminal)
 ```powershell
 cd C:\Users\sriva\OneDrive\Desktop\IDP6SEMEL\frontend
 npm run dev
@@ -236,138 +109,84 @@ Open **http://localhost:5173**
 
 ---
 
-### First-time setup only
+## How To Use (Faculty Workflow)
 
-```powershell
-cd C:\Users\sriva\OneDrive\Desktop\IDP6SEMEL
+**Step 1 — Create the exam / upload answer scheme**
+Go to **Answer Schemes**, upload the answer scheme PDF (subject, questions, expected answers and marks are extracted automatically). Or create a full exam with rubrics via `POST /api/eval/exams` (subject, semester, exam name, max marks, per-question rubric, numerical/diagram marking instructions).
 
-# Allow scripts to run (once per machine)
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+**Step 2 — Upload student scripts**
+Go to **Evaluate Scripts**, upload the handwritten PDF, pick the scheme, click **Evaluate**. Multiple pages, blank pages, rough work, shuffled question order — all handled automatically.
 
-# Activate venv and install backend packages
-.\.venv\Scripts\Activate.ps1
-cd backend
-pip install -r requirements.txt
-cd ..
+**Step 3 — Review**
+Every answer shows: the OCR text, awarded marks, rubric breakdown, why marks were given, what was missing, and a confidence score. Anything under 80% confidence lands in the review queue. Use **Faculty Override** to adjust — every change is logged.
 
-# Install frontend packages
-cd frontend
-npm install
-cd ..
+**Step 4 — Reports**
+**Student Results** shows all evaluated scripts. Class analytics and faculty reports are available at `/api/eval/reports/class` and `/api/eval/reports/faculty`.
+
+---
+
+## Tech Stack
+
+- **Backend:** FastAPI + SQLite (`questions.db`, `overrides.db`, `training_meta.db`, `eval_results.db`)
+- **Evaluation engine:** `evaluation/engine/` — modular pipeline (OCR → detect → segment → match → grade → confidence → reports)
+- **OCR:** PyMuPDF (typed PDFs, page rendering) → cloud VLM (handwriting, optional) → Tesseract (offline fallback)
+- **Grading LLM ladder:** Claude → OpenAI → Gemini → local Ollama Mistral (first available wins, hard timeouts — nothing ever hangs)
+- **Embeddings:** sentence-transformers `all-MiniLM-L6-v2` (local, free) for answer↔scheme semantic matching
+- **Question generation:** LangGraph 11-agent RAG pipeline + ChromaDB
+- **Frontend:** React 18 + TypeScript + Vite + Tailwind
+
+Full model comparison and recommendations per stage: see **[MODELS.md](MODELS.md)**.
+
+## Project Structure
+
+```
+Exam_assessment/
+├── backend/
+│   ├── main.py              # FastAPI app — core endpoints
+│   ├── eval_api.py          # Evaluation v2: exams, overrides, reports
+│   └── requirements.txt
+├── evaluation/
+│   ├── engine/              # ★ the evaluation engine
+│   │   ├── ocr.py           #   blank detection, PyMuPDF, VLM, Tesseract
+│   │   ├── detect.py        #   question-number + type detection
+│   │   ├── segment.py       #   segmentation + semantic scheme matching
+│   │   ├── evaluate.py      #   rubric-based grading per question type
+│   │   ├── confidence.py    #   confidence engine + review routing
+│   │   ├── reports.py       #   student / faculty / class reports
+│   │   ├── llm.py           #   provider ladder with timeouts
+│   │   ├── embeddings.py    #   MiniLM similarity
+│   │   └── pipeline.py      #   orchestrator
+│   ├── scheme_parser.py     # answer scheme PDF → structured Q&A
+│   └── script_pipeline.py   # compatibility adapter → engine
+├── generation/              # LangGraph question generation
+├── frontend/src/pages/      # React pages
+└── data/                    # SQLite DBs + uploads (not committed)
 ```
 
 ---
 
-## How to Evaluate Answer Scripts (Step-by-Step)
-
-### Step 1 — Upload answer scheme
-
-Go to **Answer Schemes** in the sidebar.
-
-- Add an optional description (e.g. "Aerospace Structures VTU Dec 2023")
-- Upload your answer scheme PDF
-- The system OCRs it and extracts each question, expected answer, and marks automatically
-- A preview shows every parsed question — verify it looks correct
-
-**Tips for best parsing:**
-- Number questions clearly: `Q1.` or `1.` or `Question 1` at the start of a line
-- Write marks as `[10M]` or `(5 marks)` near each question
-- Write expected answers immediately after the question or after `Ans:` / `Answer:`
-- Typed/digital PDFs parse better than scanned ones
-
-### Step 2 — Evaluate student scripts
-
-Go to **Evaluate Scripts** in the sidebar.
-
-- Upload the student's handwritten answer PDF
-- Select your answer scheme from the dropdown (subject + marks loaded automatically)
-- Optionally enter student name and USN
-- Click **Evaluate Script**
-
-The system automatically:
-- OCRs the handwriting (EasyOCR for scanned; PyMuPDF for typed)
-- Applies an OCR confidence penalty — low-confidence text scores lower to avoid inflation
-- Segments answers by question number
-- Classifies each as theory, numerical, or drawing
-- Scores against the expected answers from your scheme
-- Saves the result permanently — visible in **Student Results** after any refresh
-
-### Step 3 — Faculty review and override
-
-- Drawing questions are always flagged for visual review
-- Questions without a reference answer are flagged and given 0 pending faculty review
-- Low OCR confidence pages are highlighted with a warning
-- Use **Faculty Override** to adjust any score; saved permanently in SQLite
-
----
-
-## API Reference
+## API Reference (evaluation)
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/health` | Liveness check |
-| `GET` | `/api/health/deps` | OCR dependency status |
-| `POST` | `/api/training/upload` | Upload and parse an answer scheme PDF |
-| `GET` | `/api/training/references` | List uploaded schemes with parsed questions |
-| `DELETE` | `/api/training/references/{id}` | Delete a scheme |
-| `POST` | `/api/eval/script` | Evaluate single answer script (saves to eval_results.db) |
-| `POST` | `/api/eval/script/batch` | Evaluate multiple scripts or ZIP (saves each to eval_results.db) |
-| `GET` | `/api/eval/results` | List all saved evaluation results |
-| `GET` | `/api/eval/results/{id}` | Full report for one evaluation |
-| `DELETE` | `/api/eval/results/{id}` | Delete an evaluation result |
-| `POST` | `/api/submissions/{id}/override` | Submit faculty grade override (SQLite persistent) |
-| `GET` | `/api/submissions/overrides` | List all grade overrides (audit trail) |
-| `GET` | `/api/eval/validate/kappa` | Cohen's Kappa AI vs faculty agreement report |
-| `POST` | `/api/questions/generate` | Generate questions via LangGraph pipeline |
-| `GET` | `/api/questions` | List all questions in the question bank |
-| `GET` | `/api/analytics/co` | CO attainment data |
-| `GET` | `/api/analytics/co-trend` | CO coverage trend across published exams |
-| `GET` | `/api/students/export/csv` | Download student grades CSV |
+| `POST` | `/api/eval/exams` | Create exam (scheme, rubrics, marking instructions) |
+| `GET` | `/api/eval/exams` | List exams |
+| `POST` | `/api/eval/exams/{id}/evaluate` | Upload script PDF → full AI report |
+| `POST` | `/api/eval/script` | Evaluate script against an uploaded answer scheme |
+| `POST` | `/api/eval/script/batch` | Batch evaluate (multiple PDFs / ZIP) |
+| `GET` | `/api/eval/results` | List saved results |
+| `GET` | `/api/eval/results/{id}` | Full report for one result |
+| `POST` | `/api/eval/results/{id}/override` | Faculty override (approve/reject/adjust/rewrite) — logged |
+| `GET` | `/api/eval/results/{id}/overrides` | Override audit trail |
+| `GET` | `/api/eval/reports/faculty` | Review queue, common mistakes, missed concepts |
+| `GET` | `/api/eval/reports/class` | Class average, distribution, question difficulty |
+| `GET` | `/api/eval/validate/kappa` | Cohen's Kappa (AI vs faculty agreement, target κ ≥ 0.75) |
+| `GET` | `/api/health/deps` | Which OCR/LLM capabilities are available right now |
 
 ---
 
-## Feature Status
+## Known Limitations
 
-### Working
-- [x] LangGraph 11-agent question generation with RAG
-- [x] Question Bank with filters, CO/PO tags, export
-- [x] Exam paper generation and management
-- [x] Answer scheme upload → OCR (PyMuPDF / EasyOCR) → extract questions/answers/marks
-- [x] Answer script OCR pipeline (PDF + image, typed + handwritten)
-- [x] OCR confidence penalty — low-quality scans score lower, preventing inflation
-- [x] Auto-classification (theory / numerical / drawing) — no manual selection needed
-- [x] Theory evaluator (keyword + semantic similarity vs. expected answer)
-- [x] Numerical grader with heuristic fallback (no Ollama required)
-- [x] Drawing evaluator (OCR label matching + faculty review flag)
-- [x] Questions without reference answer flagged for faculty review (score = 0)
-- [x] Evaluation results persisted in `eval_results.db` — survive restarts and navigation
-- [x] Batch evaluation with class summary — results saved to DB automatically
-- [x] Student Results page — real data, search, CSV export, per-question drill-down
-- [x] At-risk student flag (below 40%)
-- [x] Faculty grade override (SQLite persistent, audit trail)
-- [x] Cohen's Kappa validation dashboard
-- [x] CO/PO analytics
-
-### Requires Faculty Action (by design)
-- [ ] Drawing line-work review — AI checks labels only, not actual shapes
-- [ ] Low OCR confidence pages (< 60%) flagged for manual re-check
-- [ ] Numerical problems with novel notation may need score override
-
-### Known Limitations
-- EasyOCR accuracy on very light pencil or smudged handwriting is ~70–80%. Scan at ≥300 DPI for best results.
-- Numerical LLM grading requires Ollama running locally; heuristic fallback gives approximate scores.
-- First OCR run downloads ~100 MB model weights (one-time, cached after).
-- Answer scheme parsing works best when questions are clearly numbered and answers follow immediately.
-
----
-
-## Cohen's Kappa Target
-
-| κ range | Interpretation |
-|---|---|
-| < 0.40 | Poor agreement — retrain needed |
-| 0.40–0.60 | Moderate |
-| 0.60–0.75 | Substantial |
-| **≥ 0.75** | **Target — excellent agreement** |
-
-The `/eval/validate` page shows live κ per question type and triggers a warning if any category falls below threshold.
+- **Handwriting OCR without an API key is approximate.** Tesseract was built for print. Scan at ≥300 DPI, write clearly, or set a (free) Gemini key.
+- Diagram grading is concept-based (from the OCR/VLM description), so it always flags for faculty visual confirmation.
+- Grading without any LLM (no key + no Ollama) falls back to keyword + semantic similarity — clearly labelled `keyword_semantic` in the report and routed to faculty review.
