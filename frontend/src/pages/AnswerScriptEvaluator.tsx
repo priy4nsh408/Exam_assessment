@@ -66,6 +66,7 @@ interface ScriptReport {
   needs_review_questions?: number[]
   unanswered_questions?: UnansweredQ[]
   ocr_methods?: string[]
+  grading_path?: string
   ocr_warning: boolean
   answers: AnswerResult[]
   deps?: Record<string, any>
@@ -436,8 +437,10 @@ function SingleReport({ report, resultId, onUpdate }: {
           <span>·</span>
           <span>OCR confidence: {Math.round(report.avg_ocr_confidence * 100)}%</span>
           {report.subject && <><span>·</span><span>{report.subject}</span></>}
-          {report.ocr_methods && report.ocr_methods.length > 0 &&
-            <><span>·</span><span>OCR: {report.ocr_methods.join(', ')}</span></>}
+          {report.grading_path === 'vision'
+            ? <><span>·</span><span className="text-emerald-600 font-medium">Graded by vision AI</span></>
+            : report.ocr_methods && report.ocr_methods.length > 0 &&
+              <><span>·</span><span>via {report.ocr_methods.join(', ')}</span></>}
         </div>
       </div>
 

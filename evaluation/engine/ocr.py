@@ -225,6 +225,32 @@ def _tesseract_ocr(image_path: str) -> Tuple[str, float]:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
+def page_images(file_path: str) -> List[Dict]:
+    """
+    Render pages to images WITHOUT running OCR — used by the vision-grading
+    path, which sends the images straight to a vision model.
+    Returns [{page, image_path, blank}]. Blank pages are flagged.
+    """
+    cfg = get_config()
+    out: List[Dict] = []
+    if file_path.lower().endswith(".pdf"):
+        if not PYMUPDF_AVAILABLE:
+            raise RuntimeError("PyMuPDF is required — pip install pymupdf")
+        doc = _fitz.open(file_path)
+        tmp_dir = tempfile.mkdtemp(prefix="mechassess_img_")
+        for i, page in enumerate(doc, start=1):
+            embedded = page.get_text("text").strip()
+            img_path = os.path.join(tmp_dir, f"page_{i:03d}.png")
+            _render_page(page, img_path, dpi=cfg.ocr_dpi)
+            out.append({"page": i, "image_path": img_path,
+                        "blank": is_blank_page(img_path, embedded)})
+        doc.close()
+    else:
+        out.append({"page": 1, "image_path": file_path,
+                    "blank": is_blank_page(file_path, "")})
+    return out
+
+
 def ocr_document(file_path: str) -> List[Dict]:
     """
     OCR a PDF or image into page records:

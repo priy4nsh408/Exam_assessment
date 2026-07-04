@@ -32,8 +32,8 @@ def score_confidence(answer: Dict) -> Dict:
     )
 
     match_sim = answer.get("match_similarity")
-    if answer.get("matched_by") == "detected_number":
-        match_cert = 1.0
+    if answer.get("matched_by") in ("detected_number", "vision"):
+        match_cert = 1.0            # the model / an explicit number matched it
     elif match_sim is not None:
         match_cert = float(match_sim)
     else:
@@ -51,6 +51,11 @@ def score_confidence(answer: Dict) -> Dict:
     # It does NOT withhold marks — the grade against the scheme stands.
     hard_to_read = ocr < cfg.illegible_ocr_threshold and text_len < 40
 
+    # Review is a genuine "the grader was unsure" signal, not a default. Flag
+    # only when the model itself is not confident, or the reading was poor —
+    # NOT just because an answer is short. Marks always stand regardless.
+    needs_review = hard_to_read or model < 0.55 or ocr < 0.45
+
     answer.update({
         "confidence": overall,
         "confidence_breakdown": {
@@ -61,6 +66,6 @@ def score_confidence(answer: Dict) -> Dict:
             "completeness": round(completeness, 3),
         },
         "illegible": hard_to_read,
-        "requires_faculty_review": overall < cfg.review_confidence_threshold,
+        "requires_faculty_review": needs_review,
     })
     return answer
