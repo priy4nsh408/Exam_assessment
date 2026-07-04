@@ -79,6 +79,62 @@ def _run_vision(file_path: str, exam: Dict):
     return answers, imgs, "vision"
 
 
+# ── Path 3: typed / pasted text (always works, no OCR, no API) ────────────────
+
+def evaluate_typed(
+    exam: Dict,
+    typed_answers: List[Dict],   # [{q_number, text}]
+    student_name: str = "",
+    student_usn: str = "",
+    max_marks_per_q: int = 10,
+) -> Dict:
+    """
+    Grade answers whose text is provided directly (pasted by faculty, or a
+    typed PDF). No OCR, no vision — guaranteed to produce marks against the
+    scheme. Uses the LLM grader if reachable, else the semantic fallback.
+    """
+    scheme = exam.get("questions") or []
+    subject = exam.get("subject") or "Mechanical Engineering"
+    global_instructions = exam.get("marking_instructions", "")
+    q_map = {_qn(q): q for q in scheme}
+
+    answers: List[Dict] = []
+    for ta in typed_answers:
+        try:
+            qn = int(ta.get("q_number"))
+        except (TypeError, ValueError):
+            continue
+        text = (ta.get("text") or "").strip()
+        if not text:
+            continue
+        meta = q_map.get(qn, {}) or {}
+        q_text = (meta.get("question") or "") or f"Question {qn}"
+        ref = meta.get("reference_answer") or ""
+        marks = float(meta.get("max_marks") or max_marks_per_q)
+        q_type = classify_question_type(q_text, text, declared=meta.get("type") or "")
+        instructions = " ".join(
+            x for x in (global_instructions or "", meta.get("marking_instructions") or "") if x
+        ).strip()
+
+        graded = evaluate_answer(
+            q_number=qn, q_type=q_type, question=q_text,
+            student_answer=text, reference_answer=ref,
+            max_marks=marks, rubric=meta.get("rubric"),
+            subject=subject, marking_instructions=instructions,
+        )
+        record = {
+            "q_number": qn, "q_type": q_type, "question": q_text,
+            "ocr_text": text, "ocr_confidence": 1.0, "low_confidence": False,
+            "image_paths": [], "page_start": 1,
+            "matched_by": "manual", "match_similarity": None,
+            **graded,
+        }
+        answers.append(score_confidence(record))
+
+    return _assemble(answers, [], "manual", exam, scheme,
+                     subject, max_marks_per_q, student_name, student_usn)
+
+
 # ── Path 2: OCR fallback ──────────────────────────────────────────────────────
 
 def _run_ocr(file_path: str, exam: Dict, subject: str, max_marks_per_q: int):

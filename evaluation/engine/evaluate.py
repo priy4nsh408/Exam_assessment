@@ -268,5 +268,6 @@ def _grade_fallback(q_type, question, student_answer, reference_answer, max_mark
         "suggestions": ["Include the missing concepts listed above."] if missing else [],
         "expected_answer": reference_answer[:1200],
         "grading_method": "keyword_semantic",
-        "model_confidence": 0.5,
+        # scale confidence with match strength so strong answers aren't flagged
+        "model_confidence": round(0.45 + 0.45 * score_frac, 2),
     }

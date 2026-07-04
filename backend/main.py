@@ -1600,6 +1600,64 @@ async def eval_answer_script(
     return report
 
 
+@app.get("/api/eval/selftest")
+async def eval_selftest():
+    """Make a REAL test call to the configured vision/LLM providers and report
+    the actual result or error — the honest 'is my API key working?' check."""
+    try:
+        from evaluation.engine.vision_eval import selftest, vision_available
+        return {"vision_available": vision_available(), **selftest()}
+    except Exception as e:
+        return {"vision_available": False, "error": str(e)}
+
+
+@app.post("/api/eval/script/text")
+async def eval_script_text(body: dict):
+    """
+    Grade answers whose TEXT is provided directly — no OCR, no vision.
+    Always produces marks against the scheme. Body:
+      { reference_id?: str, subject?: str, student_name?: str,
+        answers: [{q_number:int, text:str}, ...] }
+    """
+    import json as _json
+    from evaluation.script_pipeline import evaluate_answer_script  # noqa: F401
+    from evaluation.engine.pipeline import evaluate_typed
+
+    answers = body.get("answers") or []
+    if not answers:
+        raise HTTPException(status_code=400, detail="Provide answers: [{q_number, text}, ...]")
+
+    subject = body.get("subject") or "General"
+    exam_questions = None
+    reference_id = (body.get("reference_id") or "").strip()
+    if reference_id:
+        conn = _get_training_conn()
+        ref_row = conn.execute(
+            "SELECT subject, marks_per_q, questions_json FROM training_refs WHERE id=?",
+            (reference_id,)
+        ).fetchone()
+        conn.close()
+        if ref_row:
+            subject = ref_row["subject"] or subject
+            try:
+                exam_questions = _json.loads(ref_row["questions_json"] or "[]") or None
+            except Exception:
+                exam_questions = None
+
+    exam = {"subject": subject, "questions": exam_questions or []}
+    report = evaluate_typed(
+        exam=exam, typed_answers=answers,
+        student_name=body.get("student_name", ""),
+    )
+    result_id = _save_eval_result(report)
+    report["result_id"] = result_id
+    _log_activity_safe(
+        action=f"Graded pasted answers: {report['total_score']}/{report['max_total']}",
+        activity_type="grade", subject=subject,
+    )
+    return report
+
+
 @app.get("/api/eval/results")
 async def list_eval_results():
     """List all saved evaluation results (summary only, no full report JSON)."""

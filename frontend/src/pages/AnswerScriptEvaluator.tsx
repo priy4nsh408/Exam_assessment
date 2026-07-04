@@ -14,7 +14,10 @@ interface RefEntry {
   filename: string
   description: string
   marks_per_q: number
+  questions_json?: string
 }
+
+interface SchemeQ { q_number: number; question?: string; max_marks?: number; type?: string }
 
 interface RubricRow { criterion: string; max: number; awarded: number; reason: string }
 
@@ -563,7 +566,7 @@ function BatchSummary({ batch, onSelect }: { batch: BatchResult; onSelect: (r: S
   )
 }
 
-type Mode = 'single' | 'batch'
+type Mode = 'single' | 'batch' | 'paste'
 
 export default function AnswerScriptEvaluator() {
   const [mode, setMode] = useState<Mode>('single')
@@ -581,6 +584,14 @@ export default function AnswerScriptEvaluator() {
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState('')
   const [error, setError] = useState('')
+
+  // Paste mode
+  const [pasteTexts, setPasteTexts] = useState<Record<number, string>>({})
+  const [studentName, setStudentName] = useState('')
+
+  // API self-test
+  const [selftest, setSelftest] = useState<any>(null)
+  const [testing, setTesting] = useState(false)
 
   const [deps, setDeps] = useState<DepStatus | null>(null)
   const [history, setHistory] = useState<EvalSummary[]>([])
@@ -657,6 +668,38 @@ export default function AnswerScriptEvaluator() {
     finally { clearInterval(t); setLoading(false); setProgress('') }
   }
 
+  const selectedRef = refs.find(r => r.id === referenceId)
+  const schemeQs: SchemeQ[] = (() => {
+    if (!selectedRef?.questions_json) return []
+    try { return JSON.parse(selectedRef.questions_json) } catch { return [] }
+  })()
+
+  const runSelftest = async () => {
+    setTesting(true); setSelftest(null)
+    try {
+      const r = await fetch('/api/eval/selftest'); setSelftest(await r.json())
+    } catch (e: any) { setSelftest({ error: e.message }) }
+    finally { setTesting(false) }
+  }
+
+  const gradePaste = async () => {
+    const answers = Object.entries(pasteTexts)
+      .filter(([, t]) => (t as string).trim())
+      .map(([q, t]) => ({ q_number: Number(q), text: t }))
+    if (!answers.length) { setError('Type at least one answer to grade.'); return }
+    setLoading(true); setError(''); setReport(null)
+    try {
+      const res = await fetch('/api/eval/script/text', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reference_id: referenceId, student_name: studentName, answers }),
+      })
+      if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
+      setReport(await res.json())
+      loadHistory()
+    } catch (e: any) { setError(e.message || 'Grading failed') }
+    finally { setLoading(false) }
+  }
+
   const evaluateBatch = async () => {
     if (!batchFiles.length) return
     setLoading(true); setError(''); setBatchResult(null); setSelectedReport(null)
@@ -684,22 +727,47 @@ export default function AnswerScriptEvaluator() {
         {deps && deps.ready && <OcrModeNote deps={deps} />}
 
         {/* Mode toggle */}
-        <div className="flex gap-2">
-          {(['single', 'batch'] as const).map(m => (
+        <div className="flex gap-2 flex-wrap items-center">
+          {(['single', 'batch', 'paste'] as const).map(m => (
             <button
               key={m}
               onClick={() => { setMode(m); setError(''); setReport(null); setBatchResult(null) }}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${mode === m ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
             >
-              {m === 'single' ? <FileText className="w-4 h-4" /> : <Users className="w-4 h-4" />}
-              {m === 'single' ? 'Single Script' : 'Batch (Class)'}
+              {m === 'single' ? <FileText className="w-4 h-4" /> : m === 'batch' ? <Users className="w-4 h-4" /> : <Pencil className="w-4 h-4" />}
+              {m === 'single' ? 'Single Script' : m === 'batch' ? 'Batch (Class)' : 'Paste Answers'}
             </button>
           ))}
+          <button onClick={runSelftest} disabled={testing}
+            className="ml-auto btn-secondary text-xs px-3 py-2 flex items-center gap-1">
+            {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle className="w-3 h-3" />} Test API key
+          </button>
         </div>
+
+        {/* Self-test result */}
+        {selftest && (
+          <div className={`card p-3 text-xs ${selftest.any_working ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+            {selftest.any_working
+              ? <p className="text-emerald-700 font-medium">✓ API key works — vision grading is available.</p>
+              : <p className="text-red-700 font-medium">✗ No working API key — will use offline grading. Details:</p>}
+            {selftest.providers && Object.entries(selftest.providers).map(([name, p]: any) => (
+              <p key={name} className={`mt-1 ${p.ok ? 'text-emerald-600' : 'text-red-500'}`}>
+                <b>{name}</b>{p.model ? ` (${p.model})` : ''}: {p.ok ? 'OK' : (p.error || `HTTP ${p.status}`)}
+              </p>
+            ))}
+            {selftest.error && <p className="text-red-500 mt-1">{selftest.error}</p>}
+          </div>
+        )}
 
         {/* Upload card */}
         <div className="card p-5 space-y-4">
-          {mode === 'single' ? (
+          {mode === 'paste' ? (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 text-xs text-indigo-700">
+              <b>Guaranteed grading — no OCR, no API key needed.</b> Pick your answer scheme below,
+              type or paste what the student wrote for each question, and grade. Marks are computed
+              against the scheme every time.
+            </div>
+          ) : mode === 'single' ? (
             <div
               onDrop={onDrop}
               onDragOver={e => { e.preventDefault(); setDragging(true) }}
@@ -781,31 +849,68 @@ export default function AnswerScriptEvaluator() {
                 ))}
               </select>
             )}
-            {!referenceId && refs.length > 0 && (
+            {!referenceId && refs.length > 0 && mode !== 'paste' && (
               <p className="text-[10px] text-gray-400 mt-1">Without a scheme, answers are graded on general correctness and everything is flagged for faculty review.</p>
             )}
           </div>
 
-          <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500 space-y-1">
-            <p className="font-medium text-gray-600">The engine automatically:</p>
-            <div className="flex flex-wrap gap-x-6 gap-y-1">
-              <span className="flex items-center gap-1"><Eye className="w-3 h-3 text-sky-500" /> Skips blank pages, reads handwriting</span>
-              <span className="flex items-center gap-1"><GitBranch className="w-3 h-3 text-fuchsia-500" /> Matches shuffled answers to questions</span>
-              <span className="flex items-center gap-1"><Brain className="w-3 h-3 text-indigo-500" /> Grades each type against its rubric</span>
-              <span className="flex items-center gap-1"><AlertCircle className="w-3 h-3 text-violet-500" /> Flags &lt;80% confidence for review</span>
+          {/* Paste-per-question inputs */}
+          {mode === 'paste' && (
+            <div className="space-y-3">
+              <input
+                type="text" placeholder="Student name / roll no (optional)"
+                value={studentName} onChange={e => setStudentName(e.target.value)}
+                className="input-field w-full text-sm"
+              />
+              {schemeQs.length === 0 ? (
+                <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded p-2">
+                  Select an answer scheme above to load its questions here.
+                </p>
+              ) : (
+                schemeQs.map(q => (
+                  <div key={q.q_number}>
+                    <label className="text-xs font-medium text-gray-600 mb-1 flex items-center gap-2">
+                      <span className="badge bg-indigo-50 text-indigo-700 text-[10px]">Q{q.q_number}</span>
+                      <span className="truncate">{q.question || `Question ${q.q_number}`}</span>
+                      <span className="text-gray-400 ml-auto shrink-0">{q.max_marks ?? 10} marks</span>
+                    </label>
+                    <textarea
+                      rows={3}
+                      placeholder={`Type or paste the student's answer for Q${q.q_number}…`}
+                      value={pasteTexts[q.q_number] || ''}
+                      onChange={e => setPasteTexts(prev => ({ ...prev, [q.q_number]: e.target.value }))}
+                      className="input-field w-full text-sm font-mono"
+                    />
+                  </div>
+                ))
+              )}
             </div>
-          </div>
+          )}
+
+          {mode !== 'paste' && (
+            <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500 space-y-1">
+              <p className="font-medium text-gray-600">The engine automatically:</p>
+              <div className="flex flex-wrap gap-x-6 gap-y-1">
+                <span className="flex items-center gap-1"><Eye className="w-3 h-3 text-sky-500" /> Skips blank pages, reads handwriting</span>
+                <span className="flex items-center gap-1"><GitBranch className="w-3 h-3 text-fuchsia-500" /> Matches shuffled answers to questions</span>
+                <span className="flex items-center gap-1"><Brain className="w-3 h-3 text-indigo-500" /> Grades each type against its rubric</span>
+                <span className="flex items-center gap-1"><AlertCircle className="w-3 h-3 text-violet-500" /> Flags low-confidence answers for review</span>
+              </div>
+            </div>
+          )}
 
           <button
-            onClick={mode === 'single' ? evaluate : evaluateBatch}
-            disabled={loading || (mode === 'single' ? !file : batchFiles.length === 0)}
+            onClick={mode === 'single' ? evaluate : mode === 'batch' ? evaluateBatch : gradePaste}
+            disabled={loading || (mode === 'single' ? !file : mode === 'batch' ? batchFiles.length === 0 : Object.values(pasteTexts).every(t => !t.trim()))}
             className="btn-primary w-full flex items-center justify-center gap-2 py-3 disabled:opacity-50"
           >
             {loading
-              ? <><Loader2 className="w-4 h-4 animate-spin" />{progress}</>
+              ? <><Loader2 className="w-4 h-4 animate-spin" />{progress || 'Grading…'}</>
               : mode === 'single'
                 ? <><Brain className="w-4 h-4" />Evaluate Script</>
-                : <><Users className="w-4 h-4" />Evaluate {batchFiles.length} Script{batchFiles.length !== 1 ? 's' : ''}</>}
+                : mode === 'batch'
+                  ? <><Users className="w-4 h-4" />Evaluate {batchFiles.length} Script{batchFiles.length !== 1 ? 's' : ''}</>
+                  : <><Pencil className="w-4 h-4" />Grade Answers</>}
           </button>
         </div>
 

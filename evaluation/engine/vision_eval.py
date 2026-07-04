@@ -39,6 +39,73 @@ def vision_available() -> bool:
     )
 
 
+# Records the real reason the last vision attempt failed, so it can be surfaced
+# instead of silently falling back to OCR.
+LAST_ERROR: str = ""
+
+
+def selftest() -> Dict:
+    """
+    Make a REAL minimal API call to every configured provider and report the
+    actual result/error. This is the honest 'is my key working?' check.
+    """
+    cfg = get_config()
+    out: Dict = {"requests_installed": REQUESTS_AVAILABLE, "providers": {}}
+    if not REQUESTS_AVAILABLE:
+        out["error"] = "python 'requests' package not installed (pip install requests)"
+        return out
+
+    if cfg.gemini_api_key:
+        try:
+            r = _requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.gemini_model}:generateContent",
+                params={"key": cfg.gemini_api_key},
+                json={"contents": [{"parts": [{"text": "Reply with the single word OK"}]}]},
+                timeout=30,
+            )
+            if r.status_code == 200:
+                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                out["providers"]["gemini"] = {"ok": True, "model": cfg.gemini_model, "reply": txt[:40]}
+            else:
+                out["providers"]["gemini"] = {
+                    "ok": False, "model": cfg.gemini_model,
+                    "status": r.status_code, "error": r.text[:400],
+                }
+        except Exception as e:
+            out["providers"]["gemini"] = {"ok": False, "model": cfg.gemini_model, "error": str(e)[:400]}
+    else:
+        out["providers"]["gemini"] = {"ok": False, "error": "no GEMINI_API_KEY set"}
+
+    if cfg.openai_api_key:
+        try:
+            r = _requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {cfg.openai_api_key}"},
+                json={"model": cfg.openai_model, "messages": [{"role": "user", "content": "Reply OK"}], "max_tokens": 5},
+                timeout=30,
+            )
+            out["providers"]["openai"] = {"ok": r.status_code == 200, "model": cfg.openai_model,
+                                          "status": r.status_code, "error": "" if r.status_code == 200 else r.text[:400]}
+        except Exception as e:
+            out["providers"]["openai"] = {"ok": False, "error": str(e)[:400]}
+
+    if cfg.anthropic_api_key:
+        try:
+            r = _requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": cfg.anthropic_api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={"model": cfg.anthropic_model, "max_tokens": 5, "messages": [{"role": "user", "content": "Reply OK"}]},
+                timeout=30,
+            )
+            out["providers"]["anthropic"] = {"ok": r.status_code == 200, "model": cfg.anthropic_model,
+                                             "status": r.status_code, "error": "" if r.status_code == 200 else r.text[:400]}
+        except Exception as e:
+            out["providers"]["anthropic"] = {"ok": False, "error": str(e)[:400]}
+
+    out["any_working"] = any(p.get("ok") for p in out["providers"].values())
+    return out
+
+
 def _b64(path: str) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
@@ -215,6 +282,8 @@ def grade_script_vision(image_paths: List[str], exam: Dict) -> Optional[List[Dic
     if cfg.anthropic_api_key:
         providers.append(("anthropic", _anthropic))
 
+    global LAST_ERROR
+    LAST_ERROR = ""
     raw = None
     used = ""
     for name, fn in providers:
@@ -223,13 +292,15 @@ def grade_script_vision(image_paths: List[str], exam: Dict) -> Optional[List[Dic
             if raw:
                 used = name
                 break
-        except Exception:
+        except Exception as e:
+            LAST_ERROR = f"{name}: {e}"
             raw = None
     if not raw:
         return None
 
     parsed = _extract_json(raw)
     if not parsed or "answers" not in parsed:
+        LAST_ERROR = f"{used}: response was not valid JSON with an 'answers' array"
         return None
 
     q_map = {int(q["q_number"]): q for q in (exam.get("questions") or []) if q.get("q_number")}
