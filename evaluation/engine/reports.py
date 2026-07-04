@@ -85,7 +85,8 @@ def class_analytics(reports: List[Dict]) -> Dict:
     pcts = [r.get("percentage", 0) for r in valid]
     dist = Counter()
     for p in pcts:
-        bucket = f"{int(p // 10) * 10}-{int(p // 10) * 10 + 9}"
+        lo = min(90, int(max(0, p) // 10) * 10)   # 100% folds into the 90-100 bucket
+        bucket = "90-100" if lo == 90 else f"{lo}-{lo + 9}"
         dist[bucket] += 1
 
     q_perf: Dict[int, List[float]] = defaultdict(list)

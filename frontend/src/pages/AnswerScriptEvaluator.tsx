@@ -4,7 +4,7 @@ import {
   Upload, FileText, ChevronDown, ChevronRight,
   CheckCircle, AlertCircle, Brain, Calculator, PenTool,
   Loader2, BarChart3, Eye, AlertTriangle, Download,
-  Users, X,
+  Users, X, Sigma, GitBranch, LineChart, Layers, Check, Pencil,
 } from 'lucide-react'
 
 interface RefEntry {
@@ -16,9 +16,11 @@ interface RefEntry {
   marks_per_q: number
 }
 
+interface RubricRow { criterion: string; max: number; awarded: number; reason: string }
+
 interface AnswerResult {
   q_number: number
-  q_type: 'theory' | 'numerical' | 'drawing'
+  q_type: string
   question: string
   ocr_text: string
   ai_score: number
@@ -26,13 +28,30 @@ interface AnswerResult {
   confidence: number
   ocr_confidence: number
   low_confidence: boolean
+  illegible?: boolean
   feedback: string
   page_start: number
   requires_faculty_review?: boolean
-  detail: Record<string, any>
+  grading_method?: string
+  matched_by?: string
+  match_similarity?: number | null
+  rubric_mapping?: RubricRow[]
+  covered?: string[]
+  missing?: string[]
+  strengths?: string[]
+  weaknesses?: string[]
+  suggestions?: string[]
+  expected_answer?: string
+  confidence_breakdown?: Record<string, number>
+  overridden?: boolean
+  faculty_approved?: boolean
+  detail?: Record<string, any>
 }
 
+interface UnansweredQ { q_number: number; question: string; max_marks: number }
+
 interface ScriptReport {
+  result_id?: string
   student_name: string
   student_usn: string
   total_score: number
@@ -43,6 +62,10 @@ interface ScriptReport {
   ocr_pages: number
   avg_ocr_confidence: number
   low_confidence_pages: number[]
+  blank_pages?: number[]
+  needs_review_questions?: number[]
+  unanswered_questions?: UnansweredQ[]
+  ocr_methods?: string[]
   ocr_warning: boolean
   answers: AnswerResult[]
   deps?: Record<string, any>
@@ -56,7 +79,6 @@ interface EvalSummary {
   subject: string
   total_score: number
   max_total: number
-  percentage: number
   questions_evaluated: number
   evaluated_at: string
 }
@@ -73,25 +95,39 @@ interface BatchResult {
 interface DepStatus {
   pymupdf:   { available: boolean; error: string }
   tesseract: { available: boolean; error: string }
+  cloud_vlm?:{ available: boolean; error: string }
   pillow:    { available: boolean; error: string }
   ready:     boolean
 }
 
 const TYPE_ICON: Record<string, React.ReactNode> = {
-  theory:   <Brain className="w-3.5 h-3.5" />,
-  numerical:<Calculator className="w-3.5 h-3.5" />,
-  drawing:  <PenTool className="w-3.5 h-3.5" />,
+  theory:     <Brain className="w-3.5 h-3.5" />,
+  numerical:  <Calculator className="w-3.5 h-3.5" />,
+  diagram:    <PenTool className="w-3.5 h-3.5" />,
+  drawing:    <PenTool className="w-3.5 h-3.5" />,
+  derivation: <Sigma className="w-3.5 h-3.5" />,
+  flowchart:  <GitBranch className="w-3.5 h-3.5" />,
+  graph:      <LineChart className="w-3.5 h-3.5" />,
+  mixed:      <Layers className="w-3.5 h-3.5" />,
 }
 const TYPE_COLOR: Record<string, string> = {
-  theory:   'bg-indigo-50 text-indigo-700',
-  numerical:'bg-amber-50 text-amber-700',
-  drawing:  'bg-emerald-50 text-emerald-700',
+  theory:     'bg-indigo-50 text-indigo-700',
+  numerical:  'bg-amber-50 text-amber-700',
+  diagram:    'bg-emerald-50 text-emerald-700',
+  drawing:    'bg-emerald-50 text-emerald-700',
+  derivation: 'bg-sky-50 text-sky-700',
+  flowchart:  'bg-fuchsia-50 text-fuchsia-700',
+  graph:      'bg-rose-50 text-rose-700',
+  mixed:      'bg-violet-50 text-violet-700',
 }
+const typeColor = (t: string) => TYPE_COLOR[t] || 'bg-gray-100 text-gray-600'
+const typeIcon  = (t: string) => TYPE_ICON[t] || <FileText className="w-3.5 h-3.5" />
+const ALL_TYPES = ['theory', 'numerical', 'diagram', 'derivation', 'flowchart', 'graph', 'mixed']
 
 function ScorePill({ score, max }: { score: number; max: number }) {
   const pct = max > 0 ? (score / max) * 100 : 0
   const color = pct >= 70 ? 'text-emerald-600' : pct >= 40 ? 'text-amber-600' : 'text-red-500'
-  return <span className={`font-bold text-base ${color}`}>{score}<span className="text-xs text-gray-400 ml-0.5">marks</span></span>
+  return <span className={`font-bold text-base ${color}`}>{score}<span className="text-xs text-gray-400 ml-0.5">/ {max}</span></span>
 }
 
 function DepBanner({ deps }: { deps: DepStatus }) {
@@ -109,26 +145,77 @@ function DepBanner({ deps }: { deps: DepStatus }) {
         <p className="text-xs text-amber-700 mt-0.5">
           Missing: <code className="bg-amber-100 px-1 rounded">{missing.join(', ')}</code>
         </p>
-        <p className="text-xs text-amber-600 mt-1 font-mono bg-amber-100 px-2 py-1 rounded mt-2">
+        <p className="text-xs text-amber-600 mt-2 font-mono bg-amber-100 px-2 py-1 rounded">
           pip install pymupdf pytesseract Pillow
-        </p>
-        <p className="text-xs text-amber-600 mt-1">
-          Also install Tesseract binary on Windows: <code className="bg-amber-100 px-1 rounded">winget install UB-Mannheim.TesseractOCR</code>
         </p>
       </div>
     </div>
   )
 }
 
-function AnswerCard({ ans }: { ans: AnswerResult }) {
-  const [open, setOpen] = useState(false)
-  const [tab, setTab]   = useState<'feedback' | 'ocr' | 'detail'>('feedback')
+/* Small note when no cloud vision key is set — explains why handwriting may be weak */
+function OcrModeNote({ deps }: { deps: DepStatus }) {
+  if (deps.cloud_vlm?.available) {
+    return (
+      <div className="card p-3 bg-emerald-50 border-emerald-200 flex items-center gap-2">
+        <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+        <p className="text-xs text-emerald-700">
+          Cloud vision OCR is active — handwriting, equations and diagrams are read by a vision model.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div className="card p-3 bg-sky-50 border-sky-200 flex items-start gap-2">
+      <AlertCircle className="w-4 h-4 text-sky-600 mt-0.5 shrink-0" />
+      <p className="text-xs text-sky-700">
+        No vision API key set — handwriting is read by Tesseract (weaker) and grading uses the
+        semantic fallback. Add <code className="bg-sky-100 px-1 rounded">GEMINI_API_KEY</code> to a{' '}
+        <code className="bg-sky-100 px-1 rounded">.env</code> file at the project root and restart the
+        backend for accurate results.
+      </p>
+    </div>
+  )
+}
 
-  const keywords  = ans.detail?.matched_keywords ?? []
-  const missing   = ans.detail?.missing_keywords ?? []
-  const steps     = ans.detail?.steps ?? []
-  const errors    = ans.detail?.error_summary ?? {}
-  const violations = ans.detail?.violations ?? []
+function chip(label: string, cls: string, key: string | number) {
+  return <span key={key} className={`badge text-[10px] ${cls}`}>{label}</span>
+}
+
+function AnswerCard({ ans, resultId, onUpdate }: {
+  ans: AnswerResult
+  resultId?: string
+  onUpdate?: () => void
+}) {
+  const [open, setOpen]   = useState(false)
+  const [tab, setTab]     = useState<'reasoning' | 'ocr' | 'expected'>('reasoning')
+  const [editMarks, setEditMarks] = useState(false)
+  const [markVal, setMarkVal]     = useState(String(ans.ai_score))
+  const [fbEdit, setFbEdit]       = useState(false)
+  const [fbVal, setFbVal]         = useState(ans.feedback || '')
+  const [saving, setSaving]       = useState(false)
+
+  const rubric   = ans.rubric_mapping ?? []
+  const covered  = ans.covered ?? ans.detail?.matched_keywords ?? []
+  const missing  = ans.missing ?? ans.detail?.missing_keywords ?? []
+  const strengths   = ans.strengths ?? []
+  const weaknesses  = ans.weaknesses ?? []
+  const suggestions = ans.suggestions ?? []
+  const cb = ans.confidence_breakdown ?? {}
+
+  const override = async (action: string, extra: Record<string, any> = {}) => {
+    if (!resultId) return
+    setSaving(true)
+    try {
+      await fetch(`/api/eval/results/${resultId}/override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q_number: ans.q_number, action, faculty: 'faculty', ...extra }),
+      })
+      onUpdate?.()
+    } catch { /* ignore */ }
+    finally { setSaving(false); setEditMarks(false); setFbEdit(false) }
+  }
 
   return (
     <div className="card overflow-hidden">
@@ -138,25 +225,22 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
       >
         <div className="flex items-center gap-3 min-w-0">
           <span className="text-sm font-semibold text-gray-700 w-6 shrink-0">Q{ans.q_number}</span>
-          <span className={`flex items-center gap-1 badge text-xs shrink-0 ${TYPE_COLOR[ans.q_type]}`}>
-            {TYPE_ICON[ans.q_type]} {ans.q_type}
+          <span className={`flex items-center gap-1 badge text-xs shrink-0 ${typeColor(ans.q_type)}`}>
+            {typeIcon(ans.q_type)} {ans.q_type}
           </span>
-          {ans.low_confidence && (
-            <span className="badge bg-amber-50 text-amber-600 text-[10px] shrink-0">
-              ⚠ Low OCR ({Math.round(ans.ocr_confidence * 100)}%)
-            </span>
-          )}
-          {ans.requires_faculty_review && (
-            <span className="badge bg-violet-50 text-violet-600 text-[10px] shrink-0">
-              Faculty review needed
-            </span>
-          )}
+          {ans.overridden && chip('✎ overridden', 'bg-blue-50 text-blue-600', 'ov')}
+          {ans.faculty_approved && chip('✓ approved', 'bg-emerald-50 text-emerald-700', 'ap')}
+          {ans.illegible && chip('illegible', 'bg-red-50 text-red-600', 'il')}
+          {ans.low_confidence && !ans.illegible &&
+            chip(`⚠ Low OCR ${Math.round(ans.ocr_confidence * 100)}%`, 'bg-amber-50 text-amber-600', 'lc')}
+          {ans.requires_faculty_review && !ans.faculty_approved &&
+            chip('review needed', 'bg-violet-50 text-violet-600', 'rv')}
           <span className="text-xs text-gray-400 truncate hidden sm:block">{ans.question}</span>
         </div>
         <div className="flex items-center gap-4 shrink-0 ml-2">
           <div className="text-right">
             <ScorePill score={ans.ai_score} max={ans.max_score} />
-            <p className="text-[10px] text-gray-400">{Math.round(ans.confidence * 100)}% conf</p>
+            <p className="text-[10px] text-gray-400">{Math.round(ans.confidence * 100)}% confidence</p>
           </div>
           {open ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
         </div>
@@ -164,74 +248,91 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
 
       {open && (
         <div className="border-t border-gray-100 px-5 py-4 space-y-3">
-          {ans.low_confidence && (
-            <div className="flex items-start gap-2 text-xs bg-amber-50 border border-amber-200 rounded p-2">
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
-              <span className="text-amber-700">
-                OCR confidence is low ({Math.round(ans.ocr_confidence * 100)}%) — handwriting may be unclear.
-                Review the OCR text tab and consider manual correction.
-              </span>
-            </div>
-          )}
-          {ans.requires_faculty_review && (
-            <div className="flex items-start gap-2 text-xs bg-violet-50 border border-violet-200 rounded p-2">
-              <AlertCircle className="w-3.5 h-3.5 text-violet-500 mt-0.5 shrink-0" />
-              <span className="text-violet-700">
-                Drawing score is based on text labels/annotations found via OCR. Faculty should verify
-                actual line work, proportions, and drawing quality.
+          {ans.illegible && (
+            <div className="flex items-start gap-2 text-xs bg-red-50 border border-red-200 rounded p-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-red-500 mt-0.5 shrink-0" />
+              <span className="text-red-700">
+                Handwriting could not be read reliably — no marks auto-assigned. Please read the script and set marks manually below.
               </span>
             </div>
           )}
 
           <p className="text-sm text-gray-700 font-medium">{ans.question}</p>
 
+          {/* how this answer was matched to the scheme */}
+          {ans.matched_by && (
+            <p className="text-[10px] text-gray-400">
+              Matched to Q{ans.q_number} by{' '}
+              {ans.matched_by === 'detected_number' ? 'detected question number'
+                : ans.matched_by === 'semantic' ? `semantic similarity${ans.match_similarity != null ? ` (${Math.round(ans.match_similarity * 100)}%)` : ''}`
+                : ans.matched_by}
+              {ans.grading_method && <> · graded via {ans.grading_method.replace(/_/g, ' ')}</>}
+            </p>
+          )}
+
+          {/* Rubric breakdown */}
+          {rubric.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-semibold text-gray-600">Rubric</p>
+              {rubric.map((r, i) => (
+                <div key={i} className="text-xs bg-gray-50 rounded px-3 py-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-600">{r.criterion}</span>
+                    <span className={`font-semibold ${r.awarded >= r.max ? 'text-emerald-600' : r.awarded > 0 ? 'text-amber-600' : 'text-red-500'}`}>
+                      {r.awarded} / {r.max}
+                    </span>
+                  </div>
+                  {r.reason && <p className="text-[11px] text-gray-400 mt-0.5">{r.reason}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex gap-1 border-b border-gray-100 pb-1">
-            {(['feedback', 'ocr', 'detail'] as const).map(t => (
+            {(['reasoning', 'ocr', 'expected'] as const).map(t => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
                 className={`px-3 py-1 rounded text-xs capitalize transition-colors ${tab === t ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:text-gray-700'}`}
               >
-                {t === 'ocr' ? 'OCR Text' : t === 'detail' ? 'Detail' : 'Feedback'}
+                {t === 'ocr' ? 'OCR Text' : t === 'expected' ? 'Expected Answer' : 'AI Reasoning'}
               </button>
             ))}
           </div>
 
-          {tab === 'feedback' && (
+          {tab === 'reasoning' && (
             <div className="space-y-2">
               <p className="text-sm text-gray-600">{ans.feedback}</p>
-              {ans.detail?.explanation && (
-                <p className="text-xs text-gray-400 italic">{ans.detail.explanation}</p>
-              )}
-              {keywords.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {keywords.map((k: string) => (
-                    <span key={k} className="badge bg-emerald-50 text-emerald-700 text-[10px]">✓ {k}</span>
-                  ))}
-                  {missing.map((k: string) => (
-                    <span key={k} className="badge bg-red-50 text-red-600 text-[10px]">✗ {k}</span>
-                  ))}
+              {(covered.length > 0 || missing.length > 0) && (
+                <div className="flex flex-wrap gap-1">
+                  {covered.map((k: string, i: number) => chip(`✓ ${k}`, 'bg-emerald-50 text-emerald-700', `c${i}`))}
+                  {missing.map((k: string, i: number) => chip(`✗ ${k}`, 'bg-red-50 text-red-600', `m${i}`))}
                 </div>
               )}
-              {steps.length > 0 && (
-                <div className="space-y-1 mt-2">
-                  {steps.map((s: any, i: number) => (
-                    <div key={i} className="flex items-center justify-between text-xs bg-gray-50 rounded px-3 py-1.5">
-                      <span className="text-gray-600">{s.step_name || `Step ${i + 1}`}</span>
-                      <span className={`font-medium ${(s.earned ?? 0) > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
-                        {s.earned ?? 0}/{s.max ?? 0}
-                      </span>
-                    </div>
-                  ))}
+              {strengths.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold text-emerald-700 mt-1">Strengths</p>
+                  <ul className="list-disc list-inside text-xs text-gray-500">{strengths.map((s, i) => <li key={i}>{s}</li>)}</ul>
                 </div>
               )}
-              {violations.length > 0 && (
-                <div className="space-y-1 mt-2">
-                  {violations.map((v: any, i: number) => (
-                    <div key={i} className="flex items-center gap-2 text-xs text-red-600 bg-red-50 rounded px-3 py-1">
-                      <AlertCircle className="w-3 h-3 shrink-0" />
-                      {v.rule}: {v.description} (−{v.deduction} marks)
-                    </div>
+              {weaknesses.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold text-red-600 mt-1">Weaknesses</p>
+                  <ul className="list-disc list-inside text-xs text-gray-500">{weaknesses.map((s, i) => <li key={i}>{s}</li>)}</ul>
+                </div>
+              )}
+              {suggestions.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold text-indigo-600 mt-1">Suggestions</p>
+                  <ul className="list-disc list-inside text-xs text-gray-500">{suggestions.map((s, i) => <li key={i}>{s}</li>)}</ul>
+                </div>
+              )}
+              {Object.keys(cb).length > 0 && (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {Object.entries(cb).map(([k, v]) => (
+                    <span key={k} className="text-[10px] text-gray-400">
+                      {k.replace(/_/g, ' ')}: <b className="text-gray-500">{Math.round((v as number) * 100)}%</b>
+                    </span>
                   ))}
                 </div>
               )}
@@ -241,8 +342,7 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
           {tab === 'ocr' && (
             <div>
               <p className="text-[10px] text-gray-400 mb-1 flex items-center gap-1">
-                <Eye className="w-3 h-3" />
-                OCR-extracted text · confidence {Math.round(ans.ocr_confidence * 100)}%
+                <Eye className="w-3 h-3" /> OCR-extracted text · confidence {Math.round(ans.ocr_confidence * 100)}%
               </p>
               <pre className="text-xs text-gray-700 bg-gray-50 rounded p-3 whitespace-pre-wrap max-h-60 overflow-y-auto font-mono leading-relaxed">
                 {ans.ocr_text || '(no text detected on this page)'}
@@ -250,59 +350,52 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
             </div>
           )}
 
-          {tab === 'detail' && (
-            <div className="text-xs space-y-2">
-              {ans.q_type === 'theory' && (
-                <div className="flex gap-6">
-                  <span>Keyword score: <b>{((ans.detail?.keyword_score ?? 0) * 100).toFixed(0)}%</b></span>
-                  <span>Semantic score: <b>{((ans.detail?.semantic_score ?? 0) * 100).toFixed(0)}%</b></span>
-                </div>
+          {tab === 'expected' && (
+            <pre className="text-xs text-gray-600 bg-gray-50 rounded p-3 whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
+              {ans.expected_answer || '(no reference answer provided in the scheme)'}
+            </pre>
+          )}
+
+          {/* Faculty override controls */}
+          {resultId && (
+            <div className="border-t border-gray-100 pt-3 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold text-gray-500">Faculty:</span>
+              {editMarks ? (
+                <span className="flex items-center gap-1">
+                  <input
+                    type="number" step="0.5" min="0" max={ans.max_score}
+                    value={markVal} onChange={e => setMarkVal(e.target.value)}
+                    className="input-field w-20 text-xs py-1"
+                  />
+                  <button disabled={saving} onClick={() => override('adjust_marks', { new_marks: parseFloat(markVal) })}
+                    className="btn-primary text-[11px] px-2 py-1 flex items-center gap-1">
+                    {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} Save
+                  </button>
+                  <button onClick={() => setEditMarks(false)} className="text-[11px] text-gray-400">Cancel</button>
+                </span>
+              ) : (
+                <button onClick={() => { setMarkVal(String(ans.ai_score)); setEditMarks(true) }}
+                  className="btn-secondary text-[11px] px-2 py-1 flex items-center gap-1">
+                  <Pencil className="w-3 h-3" /> Adjust marks
+                </button>
               )}
-              {ans.q_type === 'numerical' && Object.keys(errors).length > 0 && (
-                <div className="bg-amber-50 rounded p-2">
-                  <p className="font-medium text-amber-700 mb-1">Error types:</p>
-                  {Object.entries(errors).map(([k, v]: any) => (
-                    <div key={k} className="flex justify-between text-amber-600">
-                      <span>{k.replace(/_/g, ' ')}</span><span>{v} error(s)</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {ans.q_type === 'drawing' && (
-                <div className="space-y-2">
-                  <div>
-                    <p className="font-medium text-gray-600 mb-1">Labels found in drawing (OCR):</p>
-                    <div className="flex flex-wrap gap-1">
-                      {(ans.detail?.matched_parts ?? []).length === 0 && (ans.detail?.matched_dimensions ?? []).length === 0
-                        ? <span className="text-gray-400">No expected labels detected via OCR</span>
-                        : <>
-                          {(ans.detail?.matched_parts ?? []).map((el: string, i: number) => (
-                            <span key={i} className="badge bg-emerald-50 text-emerald-700">✓ {el}</span>
-                          ))}
-                          {(ans.detail?.matched_dimensions ?? []).map((el: string, i: number) => (
-                            <span key={`d${i}`} className="badge bg-blue-50 text-blue-700">✓ {el}</span>
-                          ))}
-                        </>
-                      }
-                    </div>
-                  </div>
-                  {((ans.detail?.missing_parts ?? []).length > 0 || (ans.detail?.missing_dimensions ?? []).length > 0) && (
-                    <div>
-                      <p className="font-medium text-red-600 mb-1">Missing labels/dimensions:</p>
-                      <div className="flex flex-wrap gap-1">
-                        {(ans.detail?.missing_parts ?? []).map((el: string, i: number) => (
-                          <span key={i} className="badge bg-red-50 text-red-600">✗ {el}</span>
-                        ))}
-                        {(ans.detail?.missing_dimensions ?? []).map((el: string, i: number) => (
-                          <span key={`d${i}`} className="badge bg-red-50 text-red-600">✗ {el}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  <p className="text-gray-400 italic">
-                    Line quality, proportions, and drawing correctness require faculty visual review.
-                  </p>
-                </div>
+              <button disabled={saving} onClick={() => override('approve')}
+                className="btn-secondary text-[11px] px-2 py-1 flex items-center gap-1 text-emerald-700">
+                <Check className="w-3 h-3" /> Approve
+              </button>
+              {fbEdit ? (
+                <span className="flex items-center gap-1 w-full mt-1">
+                  <input value={fbVal} onChange={e => setFbVal(e.target.value)}
+                    className="input-field flex-1 text-xs py-1" placeholder="Rewrite feedback…" />
+                  <button disabled={saving} onClick={() => override('rewrite_feedback', { new_feedback: fbVal })}
+                    className="btn-primary text-[11px] px-2 py-1">Save</button>
+                  <button onClick={() => setFbEdit(false)} className="text-[11px] text-gray-400">Cancel</button>
+                </span>
+              ) : (
+                <button onClick={() => { setFbVal(ans.feedback || ''); setFbEdit(true) }}
+                  className="btn-secondary text-[11px] px-2 py-1 flex items-center gap-1">
+                  <Pencil className="w-3 h-3" /> Rewrite feedback
+                </button>
               )}
             </div>
           )}
@@ -312,14 +405,20 @@ function AnswerCard({ ans }: { ans: AnswerResult }) {
   )
 }
 
-function SingleReport({ report }: { report: ScriptReport }) {
+function SingleReport({ report, resultId, onUpdate }: {
+  report: ScriptReport
+  resultId?: string
+  onUpdate?: () => void
+}) {
+  const rid = resultId ?? report.result_id
+  const reviewCount = report.needs_review_questions?.length ?? report.answers.filter(a => a.requires_faculty_review).length
   return (
     <div className="space-y-4">
-      {report.ocr_warning && (
+      {report.ocr_warning && report.low_confidence_pages?.length > 0 && (
         <div className="card p-3 bg-amber-50 border-amber-200 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
           <p className="text-xs text-amber-700">
-            Low OCR confidence on page(s): {report.low_confidence_pages.join(', ')} — handwriting may be unclear. Review OCR text per question.
+            Low OCR confidence on page(s): {report.low_confidence_pages.join(', ')} — handwriting may be unclear.
           </p>
         </div>
       )}
@@ -336,26 +435,41 @@ function SingleReport({ report }: { report: ScriptReport }) {
           <span>·</span>
           <span>OCR confidence: {Math.round(report.avg_ocr_confidence * 100)}%</span>
           {report.subject && <><span>·</span><span>{report.subject}</span></>}
+          {report.ocr_methods && report.ocr_methods.length > 0 &&
+            <><span>·</span><span>OCR: {report.ocr_methods.join(', ')}</span></>}
         </div>
       </div>
 
-      <div className="flex gap-3 flex-wrap text-xs text-gray-500 items-center">
+      {/* Status strip: review / blank / unanswered */}
+      <div className="flex gap-3 flex-wrap text-xs items-center">
         <BarChart3 className="w-4 h-4 text-indigo-400" />
-        {(['theory', 'numerical', 'drawing'] as const).map(t => {
+        {ALL_TYPES.map(t => {
           const count = report.answers.filter(a => a.q_type === t).length
           return count > 0 ? (
-            <span key={t} className={`flex items-center gap-1 badge ${TYPE_COLOR[t]}`}>
-              {TYPE_ICON[t]} {count} {t}
+            <span key={t} className={`flex items-center gap-1 badge ${typeColor(t)}`}>
+              {typeIcon(t)} {count} {t}
             </span>
           ) : null
         })}
-        {report.answers.some(a => a.q_type === 'drawing') && (
-          <span className="badge bg-violet-50 text-violet-600">Drawing: faculty review needed</span>
-        )}
+        {reviewCount > 0 && chip(`${reviewCount} need faculty review`, 'bg-violet-50 text-violet-600', 'rc')}
+        {report.blank_pages && report.blank_pages.length > 0 &&
+          chip(`${report.blank_pages.length} blank page(s) skipped`, 'bg-gray-100 text-gray-500', 'bp')}
       </div>
 
+      {report.unanswered_questions && report.unanswered_questions.length > 0 && (
+        <div className="card p-3 bg-gray-50 border-gray-200">
+          <p className="text-xs font-semibold text-gray-600 mb-1">Not attempted (0 marks)</p>
+          <div className="flex flex-wrap gap-1">
+            {report.unanswered_questions.map(u =>
+              chip(`Q${u.q_number} · ${u.max_marks}m`, 'bg-red-50 text-red-500', u.q_number))}
+          </div>
+        </div>
+      )}
+
       <div className="space-y-2">
-        {report.answers.map(ans => <AnswerCard key={ans.q_number} ans={ans} />)}
+        {report.answers.map(ans => (
+          <AnswerCard key={ans.q_number} ans={ans} resultId={rid} onUpdate={onUpdate} />
+        ))}
       </div>
     </div>
   )
@@ -363,27 +477,25 @@ function SingleReport({ report }: { report: ScriptReport }) {
 
 function BatchSummary({ batch, onSelect }: { batch: BatchResult; onSelect: (r: ScriptReport) => void }) {
   const exportCSV = () => {
-    const lines = ['Name,USN,Score,Max,Percentage,Grade,OCR_Confidence,Questions']
+    const lines = ['Name,USN,Marks,MaxMarks,OCR_Confidence,Questions,NeedsReview']
     batch.reports.forEach(r => {
-      const pct = r.percentage
-      const g = pct >= 90 ? 'O' : pct >= 80 ? 'A+' : pct >= 70 ? 'A' : pct >= 60 ? 'B+' : pct >= 50 ? 'B' : pct >= 40 ? 'C' : 'F'
+      const review = (r.needs_review_questions?.length ?? 0)
       lines.push(
-        `"${r.student_name}","${r.student_usn}",${r.total_score},${r.max_total},${r.percentage},${g},${Math.round((r.avg_ocr_confidence ?? 1) * 100)}%,${r.questions_evaluated}`
+        `"${r.student_name}","${r.student_usn}",${r.total_score},${r.max_total},${Math.round((r.avg_ocr_confidence ?? 1) * 100)}%,${r.questions_evaluated},${review}`
       )
     })
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
-    a.download = `batch_grades_${batch.subject.replace(/\s+/g, '_')}.csv`; a.click()
+    a.download = `batch_marks_${batch.subject.replace(/\s+/g, '_')}.csv`; a.click()
   }
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         {[
           { label: 'Class Average', value: `${batch.class_avg}%`, color: 'text-indigo-600' },
-          { label: 'Total Students', value: String(batch.total_students), color: 'text-gray-800' },
-          { label: 'Pass', value: String(batch.pass_count), color: 'text-emerald-600' },
-          { label: 'Fail', value: String(batch.fail_count), color: 'text-red-500' },
+          { label: 'Total Scripts', value: String(batch.total_students), color: 'text-gray-800' },
+          { label: 'Need Review', value: String(batch.reports.reduce((n, r) => n + (r.needs_review_questions?.length ?? 0), 0)), color: 'text-violet-600' },
         ].map(s => (
           <div key={s.label} className="card p-4">
             <p className="text-xs text-gray-500 mb-1">{s.label}</p>
@@ -402,38 +514,33 @@ function BatchSummary({ batch, onSelect }: { batch: BatchResult; onSelect: (r: S
         <table className="w-full text-xs">
           <thead className="bg-gray-50 border-b border-gray-100">
             <tr>
-              <th className="text-left px-4 py-2.5 font-medium text-gray-500">Student</th>
-              <th className="text-right px-4 py-2.5 font-medium text-gray-500">Score</th>
-              <th className="text-right px-4 py-2.5 font-medium text-gray-500">%</th>
-              <th className="text-center px-4 py-2.5 font-medium text-gray-500">Grade</th>
+              <th className="text-left px-4 py-2.5 font-medium text-gray-500">Student / File</th>
+              <th className="text-right px-4 py-2.5 font-medium text-gray-500">Marks</th>
               <th className="text-center px-4 py-2.5 font-medium text-gray-500">OCR Conf</th>
-              <th className="text-center px-4 py-2.5 font-medium text-gray-500">Result</th>
+              <th className="text-center px-4 py-2.5 font-medium text-gray-500">Review</th>
               <th className="px-4 py-2.5"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
             {batch.reports.map((r, i) => {
-              const pct = r.percentage
-              const g = pct >= 90 ? 'O' : pct >= 80 ? 'A+' : pct >= 70 ? 'A' : pct >= 60 ? 'B+' : pct >= 50 ? 'B' : pct >= 40 ? 'C' : 'F'
+              const review = r.needs_review_questions?.length ?? 0
               return (
                 <tr key={i} className="hover:bg-gray-50">
                   <td className="px-4 py-2.5">
-                    <p className="font-medium text-gray-800">{r.student_name || `Student ${i + 1}`}</p>
+                    <p className="font-medium text-gray-800">{r.student_name || `Script ${i + 1}`}</p>
                     {r.student_usn && <p className="text-gray-400">{r.student_usn}</p>}
                     {r.error && <p className="text-red-500 text-[10px]">{r.error}</p>}
                   </td>
-                  <td className="px-4 py-2.5 text-right font-medium text-gray-700">{r.total_score}/{r.max_total}</td>
-                  <td className={`px-4 py-2.5 text-right font-bold ${pct >= 70 ? 'text-emerald-600' : pct >= 40 ? 'text-amber-600' : 'text-red-500'}`}>{pct}%</td>
-                  <td className="px-4 py-2.5 text-center font-bold text-indigo-600">{g}</td>
+                  <td className="px-4 py-2.5 text-right font-semibold text-gray-700">{r.total_score} / {r.max_total}</td>
                   <td className="px-4 py-2.5 text-center">
                     <span className={`badge text-[10px] ${(r.avg_ocr_confidence ?? 1) >= 0.7 ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-600'}`}>
                       {Math.round((r.avg_ocr_confidence ?? 1) * 100)}%
                     </span>
                   </td>
                   <td className="px-4 py-2.5 text-center">
-                    {r.error ? <span className="badge bg-red-50 text-red-600">Error</span>
-                      : pct >= 40 ? <span className="badge bg-emerald-50 text-emerald-700">Pass</span>
-                        : <span className="badge bg-red-50 text-red-600">Fail</span>}
+                    {review > 0
+                      ? <span className="badge bg-violet-50 text-violet-600 text-[10px]">{review}</span>
+                      : <span className="text-gray-300">—</span>}
                   </td>
                   <td className="px-4 py-2.5">
                     {!r.error && (
@@ -459,12 +566,10 @@ export default function AnswerScriptEvaluator() {
   const [referenceId, setReferenceId] = useState('')
   const [refs, setRefs] = useState<RefEntry[]>([])
 
-  // Single mode
   const [file, setFile] = useState<File | null>(null)
   const [dragging, setDragging] = useState(false)
   const [report, setReport] = useState<ScriptReport | null>(null)
 
-  // Batch mode
   const [batchFiles, setBatchFiles] = useState<File[]>([])
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
   const [selectedReport, setSelectedReport] = useState<ScriptReport | null>(null)
@@ -476,6 +581,7 @@ export default function AnswerScriptEvaluator() {
   const [deps, setDeps] = useState<DepStatus | null>(null)
   const [history, setHistory] = useState<EvalSummary[]>([])
   const [historyReport, setHistoryReport] = useState<ScriptReport | null>(null)
+  const [historyId, setHistoryId] = useState('')
   const fileRef    = useRef<HTMLInputElement>(null)
   const batchRef   = useRef<HTMLInputElement>(null)
 
@@ -498,6 +604,9 @@ export default function AnswerScriptEvaluator() {
     loadHistory()
   }, [])
 
+  const reload = (id: string, setter: (r: ScriptReport) => void) =>
+    fetch(`/api/eval/results/${id}`).then(r => r.json()).then(setter).catch(() => {})
+
   const acceptFile = useCallback((f: File) => {
     setFile(f); setReport(null); setError('')
   }, [])
@@ -510,12 +619,12 @@ export default function AnswerScriptEvaluator() {
 
   const progressSteps = [
     'Uploading PDF…',
-    'Converting pages to images…',
+    'Detecting blank pages…',
     'Running OCR on handwriting…',
-    'Detecting question boundaries…',
-    'Classifying answer types…',
-    'Running AI evaluation engines…',
-    'Computing scores…',
+    'Detecting question numbers…',
+    'Matching answers to the scheme…',
+    'Grading against the rubric…',
+    'Scoring confidence…',
   ]
 
   const startProgress = () => {
@@ -563,11 +672,12 @@ export default function AnswerScriptEvaluator() {
     <div>
       <Header
         title="Evaluate Answer Scripts"
-        subtitle="Upload handwritten answer PDFs — OCR + Theory + Numerical + Drawing engines evaluate automatically"
+        subtitle="Upload handwritten answer PDFs — OCR → detect → match → rubric grading → confidence, with faculty override"
       />
       <div className="p-6 space-y-5 max-w-4xl">
 
         {deps && !deps.ready && <DepBanner deps={deps} />}
+        {deps && deps.ready && <OcrModeNote deps={deps} />}
 
         {/* Mode toggle */}
         <div className="flex gap-2">
@@ -603,7 +713,7 @@ export default function AnswerScriptEvaluator() {
               ) : (
                 <div className="text-center">
                   <p className="text-sm text-gray-500">Drop handwritten answer PDF here</p>
-                  <p className="text-xs text-gray-400 mt-1">or click to browse · PDF, PNG, JPG</p>
+                  <p className="text-xs text-gray-400 mt-1">or click to browse · PDF, PNG, JPG · multi-page, shuffled order OK</p>
                 </div>
               )}
             </div>
@@ -650,7 +760,7 @@ export default function AnswerScriptEvaluator() {
                 <p className="text-xs text-amber-700">
                   No reference schemes uploaded yet.{' '}
                   <a href="/eval/train" className="underline font-medium">Upload one in Train Engine</a>{' '}
-                  to provide subject and marks automatically.
+                  to provide questions, expected answers and marks automatically.
                 </p>
               </div>
             ) : (
@@ -667,27 +777,19 @@ export default function AnswerScriptEvaluator() {
                 ))}
               </select>
             )}
-            {referenceId && (() => {
-              const ref = refs.find(r => r.id === referenceId)
-              return ref ? (
-                <p className="text-[10px] text-gray-400 mt-1">
-                  Subject: <b>{ref.subject}</b> · Marks per question: <b>{ref.marks_per_q ?? 10}</b>
-                </p>
-              ) : null
-            })()}
             {!referenceId && refs.length > 0 && (
-              <p className="text-[10px] text-gray-400 mt-1">Without a reference, subject defaults to "General" and marks default to 10 per question.</p>
+              <p className="text-[10px] text-gray-400 mt-1">Without a scheme, answers are graded on general correctness and everything is flagged for faculty review.</p>
             )}
           </div>
 
           <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500 space-y-1">
-            <p className="font-medium text-gray-600">How evaluation works:</p>
+            <p className="font-medium text-gray-600">The engine automatically:</p>
             <div className="flex flex-wrap gap-x-6 gap-y-1">
-              <span className="flex items-center gap-1"><Brain className="w-3 h-3 text-indigo-500" /> Theory — keyword + semantic similarity scoring</span>
-              <span className="flex items-center gap-1"><Calculator className="w-3 h-3 text-amber-500" /> Numerical — step-level grading + error detection</span>
-              <span className="flex items-center gap-1"><PenTool className="w-3 h-3 text-emerald-500" /> Drawing — OCR label matching + faculty review flag</span>
+              <span className="flex items-center gap-1"><Eye className="w-3 h-3 text-sky-500" /> Skips blank pages, reads handwriting</span>
+              <span className="flex items-center gap-1"><GitBranch className="w-3 h-3 text-fuchsia-500" /> Matches shuffled answers to questions</span>
+              <span className="flex items-center gap-1"><Brain className="w-3 h-3 text-indigo-500" /> Grades each type against its rubric</span>
+              <span className="flex items-center gap-1"><AlertCircle className="w-3 h-3 text-violet-500" /> Flags &lt;80% confidence for review</span>
             </div>
-            <p className="text-gray-400 mt-1">Question type is auto-detected from the OCR text. Add "Q1." / "1." markers in the script for best segmentation.</p>
           </div>
 
           <button
@@ -709,17 +811,18 @@ export default function AnswerScriptEvaluator() {
             <div>
               <p className="text-sm font-semibold text-red-700">Evaluation failed</p>
               <p className="text-xs text-red-600 mt-1">{error}</p>
-              {error.toLowerCase().includes('easyocr') || error.toLowerCase().includes('pdf2image') ? (
-                <p className="text-xs text-red-500 font-mono mt-2 bg-red-100 rounded px-2 py-1">
-                  pip install easyocr pdf2image Pillow &amp;&amp; apt-get install -y poppler-utils
-                </p>
-              ) : null}
             </div>
           </div>
         )}
 
         {/* Single result */}
-        {report && mode === 'single' && <SingleReport report={report} />}
+        {report && mode === 'single' && (
+          <SingleReport
+            report={report}
+            resultId={report.result_id}
+            onUpdate={() => report.result_id && reload(report.result_id, setReport)}
+          />
+        )}
 
         {/* Batch result */}
         {batchResult && mode === 'batch' && !selectedReport && (
@@ -736,7 +839,11 @@ export default function AnswerScriptEvaluator() {
             <p className="text-sm font-semibold text-gray-800">
               {selectedReport.student_name} {selectedReport.student_usn && `· ${selectedReport.student_usn}`}
             </p>
-            <SingleReport report={selectedReport} />
+            <SingleReport
+              report={selectedReport}
+              resultId={selectedReport.result_id}
+              onUpdate={() => selectedReport.result_id && reload(selectedReport.result_id, setSelectedReport)}
+            />
           </div>
         )}
 
@@ -751,39 +858,29 @@ export default function AnswerScriptEvaluator() {
                     <th className="text-left px-4 py-2.5 font-medium text-gray-500">Student / File</th>
                     <th className="text-left px-4 py-2.5 font-medium text-gray-500">Subject</th>
                     <th className="text-right px-4 py-2.5 font-medium text-gray-500">Marks</th>
-                    <th className="text-right px-4 py-2.5 font-medium text-gray-500">%</th>
-                    <th className="text-center px-4 py-2.5 font-medium text-gray-500">Grade</th>
+                    <th className="text-center px-4 py-2.5 font-medium text-gray-500">Questions</th>
                     <th className="text-right px-4 py-2.5 font-medium text-gray-500">Date</th>
                     <th className="px-4 py-2.5"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {history.map(h => {
-                    const pct = h.percentage
-                    const g = pct >= 90 ? 'O' : pct >= 80 ? 'A+' : pct >= 70 ? 'A' : pct >= 60 ? 'B+' : pct >= 50 ? 'B' : pct >= 40 ? 'C' : 'F'
-                    return (
-                      <tr key={h.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-2.5 font-medium text-gray-800">{h.student_name || '(unnamed)'}</td>
-                        <td className="px-4 py-2.5 text-gray-500">{h.subject}</td>
-                        <td className="px-4 py-2.5 text-right font-semibold text-gray-700">{h.total_score}/{h.max_total}</td>
-                        <td className={`px-4 py-2.5 text-right font-bold ${pct >= 70 ? 'text-emerald-600' : pct >= 40 ? 'text-amber-600' : 'text-red-500'}`}>{pct}%</td>
-                        <td className="px-4 py-2.5 text-center font-bold text-indigo-600">{g}</td>
-                        <td className="px-4 py-2.5 text-right text-gray-400">{new Date(h.evaluated_at).toLocaleDateString()}</td>
-                        <td className="px-4 py-2.5">
-                          <button
-                            className="text-indigo-600 hover:underline"
-                            onClick={() =>
-                              fetch(`/api/eval/results/${h.id}`)
-                                .then(r => r.json())
-                                .then(d => setHistoryReport(d))
-                            }
-                          >
-                            View →
-                          </button>
-                        </td>
-                      </tr>
-                    )
-                  })}
+                  {history.map(h => (
+                    <tr key={h.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-2.5 font-medium text-gray-800">{h.student_name || '(unnamed)'}</td>
+                      <td className="px-4 py-2.5 text-gray-500">{h.subject}</td>
+                      <td className="px-4 py-2.5 text-right font-semibold text-gray-700">{h.total_score} / {h.max_total}</td>
+                      <td className="px-4 py-2.5 text-center text-gray-500">{h.questions_evaluated}</td>
+                      <td className="px-4 py-2.5 text-right text-gray-400">{new Date(h.evaluated_at).toLocaleDateString()}</td>
+                      <td className="px-4 py-2.5">
+                        <button
+                          className="text-indigo-600 hover:underline"
+                          onClick={() => { setHistoryId(h.id); reload(h.id, setHistoryReport) }}
+                        >
+                          View →
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -794,13 +891,17 @@ export default function AnswerScriptEvaluator() {
         {historyReport && (
           <div className="space-y-3">
             <button
-              onClick={() => setHistoryReport(null)}
+              onClick={() => { setHistoryReport(null); setHistoryId('') }}
               className="flex items-center gap-2 text-sm text-indigo-600 hover:underline"
             >
               ← Back to history
             </button>
             <p className="text-sm font-semibold text-gray-800">{historyReport.student_name}</p>
-            <SingleReport report={historyReport} />
+            <SingleReport
+              report={historyReport}
+              resultId={historyId}
+              onUpdate={() => { reload(historyId, setHistoryReport); loadHistory() }}
+            />
           </div>
         )}
       </div>
