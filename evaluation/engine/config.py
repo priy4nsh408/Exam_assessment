@@ -12,6 +12,15 @@ Recommended stack (see MODELS.md at repo root for the full comparison):
 from __future__ import annotations
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+# Load API keys from a .env file at the repo root (if present) so users can
+# put GEMINI_API_KEY=... in Exam_assessment/.env instead of setting env vars.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+except ImportError:
+    pass
 
 
 @dataclass
