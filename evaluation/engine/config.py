@@ -51,6 +51,13 @@ class EngineConfig:
     # ── LLM grading ──────────────────────────────────────────────
     ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "mistral"))
     ollama_timeout: int = int(os.getenv("OLLAMA_TIMEOUT", "30"))
+    ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+    # Local vision model for reading + grading handwriting with NO API key and
+    # NO internet (after the one-time `ollama pull`). Needs a vision-capable
+    # model: llava (best quality/size balance), llama3.2-vision, or moondream
+    # (tiny, fastest, lower quality). Runs entirely on your machine.
+    ollama_vision_model: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "llava"))
+    ollama_vision_timeout: int = int(os.getenv("OLLAMA_VISION_TIMEOUT", "180"))
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))

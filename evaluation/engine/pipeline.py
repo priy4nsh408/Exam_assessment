@@ -69,10 +69,12 @@ def evaluate_script(
         answers, pages_meta, method = _run_ocr(file_path, exam, subject, max_marks_per_q)
         if not note:
             if not has_key:
-                note = ("Handwriting could not be read: no working vision API key was detected, so "
-                        "Tesseract OCR was used — it cannot read handwriting reliably. Set GEMINI_API_KEY "
-                        "in a .env file at the project root and restart the backend, or use the "
-                        "'Paste Answers' tab to grade typed/pasted text.")
+                note = ("Handwriting could not be read: no vision AI was detected (no API key, and no "
+                        "local Ollama vision model running), so Tesseract OCR was used — it cannot read "
+                        "handwriting reliably. Fix options: set GEMINI_API_KEY in a .env file at the "
+                        "project root, OR install Ollama and run 'ollama pull llava' for a fully offline, "
+                        "no-API-key option — restart the backend after either. Or use the 'Paste Answers' "
+                        "tab to grade typed/pasted text right now.")
             elif not scheme:
                 note = ("No answer scheme was selected, so there was nothing to grade against. "
                         "Pick a reference scheme and re-run.")

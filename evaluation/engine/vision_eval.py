@@ -32,11 +32,28 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 
+def ollama_vision_ready() -> bool:
+    """Quick check: is Ollama running locally with the configured vision model pulled?"""
+    if not REQUESTS_AVAILABLE:
+        return False
+    cfg = get_config()
+    try:
+        r = _requests.get(f"{cfg.ollama_host}/api/tags", timeout=2)
+        if r.status_code != 200:
+            return False
+        names = [m.get("name", "").split(":")[0] for m in r.json().get("models", [])]
+        return cfg.ollama_vision_model in names
+    except Exception:
+        return False
+
+
 def vision_available() -> bool:
     cfg = get_config()
-    return REQUESTS_AVAILABLE and bool(
-        cfg.gemini_api_key or cfg.openai_api_key or cfg.anthropic_api_key
-    )
+    if not REQUESTS_AVAILABLE:
+        return False
+    if cfg.gemini_api_key or cfg.openai_api_key or cfg.anthropic_api_key:
+        return True
+    return ollama_vision_ready()
 
 
 # Records the real reason the last vision attempt failed, so it can be surfaced
@@ -129,6 +146,33 @@ def selftest() -> Dict:
                                              "status": r.status_code, "error": "" if r.status_code == 200 else r.text[:400]}
         except Exception as e:
             out["providers"]["anthropic"] = {"ok": False, "error": str(e)[:400]}
+
+    # Local Ollama vision — no key needed, just checks the daemon + model.
+    try:
+        r = _requests.get(f"{cfg.ollama_host}/api/tags", timeout=3)
+        if r.status_code != 200:
+            out["providers"]["ollama_vision"] = {
+                "ok": False, "error": f"Ollama not responding at {cfg.ollama_host} (HTTP {r.status_code}). Is `ollama serve` running?"
+            }
+        else:
+            names = [m.get("name", "").split(":")[0] for m in r.json().get("models", [])]
+            if cfg.ollama_vision_model in names:
+                out["providers"]["ollama_vision"] = {
+                    "ok": True, "model": cfg.ollama_vision_model,
+                    "note": "Local vision model ready — works with no API key and no internet.",
+                }
+            else:
+                out["providers"]["ollama_vision"] = {
+                    "ok": False,
+                    "error": f"Ollama is running but '{cfg.ollama_vision_model}' isn't pulled. "
+                            f"Run: ollama pull {cfg.ollama_vision_model}  (models found: {names or 'none'})",
+                }
+    except Exception as e:
+        out["providers"]["ollama_vision"] = {
+            "ok": False,
+            "error": f"Could not reach Ollama at {cfg.ollama_host} ({e}). Install from https://ollama.ai, "
+                    f"then run: ollama pull {cfg.ollama_vision_model}",
+        }
 
     out["any_working"] = any(p.get("ok") for p in out["providers"].values())
     return out
@@ -292,6 +336,31 @@ def _anthropic(image_paths: List[str], prompt: str, timeout: int) -> Optional[st
     return r.json()["content"][0]["text"]
 
 
+def _ollama_vision(image_paths: List[str], prompt: str, timeout: int) -> Optional[str]:
+    """
+    Local vision grading via Ollama — NO API key, NO internet needed after
+    the one-time model download. Requires a vision-capable model pulled
+    locally, e.g.:  ollama pull llava   (or llama3.2-vision / moondream)
+    """
+    cfg = get_config()
+    images_b64 = [_b64(p) for p in image_paths]
+    r = _requests.post(
+        f"{cfg.ollama_host}/api/chat",
+        json={
+            "model": cfg.ollama_vision_model,
+            "messages": [
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": prompt, "images": images_b64},
+            ],
+            "stream": False,
+            "format": "json",
+        },
+        timeout=max(timeout, cfg.ollama_vision_timeout),
+    )
+    r.raise_for_status()
+    return r.json()["message"]["content"]
+
+
 def _extract_json(text: str) -> Optional[Dict]:
     if not text:
         return None
@@ -332,6 +401,9 @@ def grade_script_vision(image_paths: List[str], exam: Dict) -> Optional[List[Dic
         providers.append(("openai", _openai))
     if cfg.anthropic_api_key:
         providers.append(("anthropic", _anthropic))
+    # Local Ollama vision model — always tried last (free, no key, no quota).
+    # Works even with zero cloud keys configured, as long as the model is pulled.
+    providers.append(("ollama_vision", _ollama_vision))
 
     global LAST_ERROR
     LAST_ERROR = ""

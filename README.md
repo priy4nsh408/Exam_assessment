@@ -40,26 +40,35 @@ Students write exams on paper. The handwritten scripts are scanned and uploaded 
 
 ## ❓ Do I need an API key?
 
-**No — it works without one.** But here is the honest difference:
+**No.** There are three ways to get real marks, pick whichever fits:
 
-| | Without any API key (free, offline) | With an API key |
+| Option | Setup | Quality |
 |---|---|---|
-| Typed / digital PDFs | ✅ Perfect | ✅ Perfect |
-| **Handwritten scripts** | ⚠️ Weak — Tesseract is a print-OCR engine, it struggles with handwriting | ✅ Excellent — cloud vision models read handwriting, equations and diagrams |
-| Grading quality | ⚠️ Approximate — keyword + semantic similarity scoring (clearly labelled, flagged for faculty review) | ✅ Real examiner-style rubric grading with explanations |
-| Ollama installed locally? | Adds proper LLM grading (Mistral) but still weak handwriting OCR | Not needed |
+| **A. Cloud vision (Gemini)** | Free API key, no credit card: https://aistudio.google.com/apikey | Best — reads handwriting, equations, diagrams |
+| **B. Local vision (Ollama)** | Install [Ollama](https://ollama.ai), run `ollama pull llava` | Good, fully offline, no key, no quota limits |
+| **C. Paste Answers tab** | Nothing to install | Type/paste the answer text yourself — always works |
+| *(fallback if none set up)* | Tesseract OCR | Weak — cannot read handwriting reliably |
 
-**Recommendation:** get a **free Gemini API key** (no credit card needed) from https://aistudio.google.com/apikey — the free tier is enough for this project. Then before starting the backend:
-
+### Option A — Gemini (free, cloud)
 ```powershell
-# Windows PowerShell (once — persists across restarts)
-setx GEMINI_API_KEY "your-key-here"
-# then close and reopen the terminal
+# Create a file named .env in the project root (next to this README) containing:
+GEMINI_API_KEY=your-key-here
+# then restart the backend
 ```
 
-That single key upgrades **both** handwriting OCR **and** grading quality. No code changes needed — the engine detects it automatically.
+### Option B — Ollama (free, fully offline, no API key at all)
+```powershell
+# 1. Install Ollama: https://ollama.ai
+# 2. Pull a vision model (one-time download, then works with no internet):
+ollama pull llava
+# 3. Make sure Ollama is running, then restart the backend
+```
+The engine automatically detects a running Ollama with `llava` pulled and uses it — no config needed. Set `OLLAMA_VISION_MODEL=llama3.2-vision` in `.env` for a stronger (larger) model if your machine can run it.
 
-If you truly can't use any key: the system still runs end-to-end, results are just approximate for handwriting and everything low-confidence goes to the faculty review queue. For demos, use the seeded results (`POST /api/eval/seed-demo`).
+### Checking what's active
+Click **Test API key** on the Evaluate Scripts page — it makes a real test call to every provider (Gemini, OpenAI, Anthropic, Ollama) and reports the actual result, so you always know exactly which one is working.
+
+If none are set up: the system still runs end-to-end via Tesseract, results are just approximate for handwriting and flagged for faculty review — or use **Paste Answers** to grade typed text directly, which never depends on OCR or any key. For demos, the seeded results (`POST /api/eval/seed-demo`) work regardless.
 
 ---
 

@@ -46,11 +46,22 @@ except ImportError:
 
 def dependency_status() -> Dict:
     cfg = get_config()
-    cloud_vlm = bool(cfg.gemini_api_key or cfg.openai_api_key or cfg.anthropic_api_key)
+    cloud_key = bool(cfg.gemini_api_key or cfg.openai_api_key or cfg.anthropic_api_key)
+    try:
+        from evaluation.engine.vision_eval import ollama_vision_ready
+        local_vision = ollama_vision_ready()
+    except Exception:
+        local_vision = False
+    cloud_vlm = cloud_key or local_vision
+    if cloud_vlm:
+        err = ""
+    else:
+        err = (f"No cloud API key set and no local Ollama vision model detected — set "
+               f"GEMINI_API_KEY (free) or run: ollama pull {cfg.ollama_vision_model}")
     return {
         "pymupdf":   {"available": PYMUPDF_AVAILABLE, "error": "" if PYMUPDF_AVAILABLE else "pip install pymupdf"},
         "tesseract": {"available": TESSERACT_AVAILABLE, "error": "" if TESSERACT_AVAILABLE else "install tesseract-ocr + pip install pytesseract"},
-        "cloud_vlm": {"available": cloud_vlm, "error": "" if cloud_vlm else "set GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY for handwriting OCR"},
+        "cloud_vlm": {"available": cloud_vlm, "error": err, "via": "cloud" if cloud_key else ("ollama" if local_vision else "")},
         "pillow":    {"available": True, "error": ""},
         # legacy keys so old health-check UI doesn't break
         "pdf2image": {"available": True, "error": ""},

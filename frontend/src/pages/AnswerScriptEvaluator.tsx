@@ -101,7 +101,7 @@ interface BatchResult {
 interface DepStatus {
   pymupdf:   { available: boolean; error: string }
   tesseract: { available: boolean; error: string }
-  cloud_vlm?:{ available: boolean; error: string }
+  cloud_vlm?:{ available: boolean; error: string; via?: string }
   pillow:    { available: boolean; error: string }
   ready:     boolean
 }
@@ -162,11 +162,14 @@ function DepBanner({ deps }: { deps: DepStatus }) {
 /* Small note when no cloud vision key is set — explains why handwriting may be weak */
 function OcrModeNote({ deps }: { deps: DepStatus }) {
   if (deps.cloud_vlm?.available) {
+    const viaOllama = deps.cloud_vlm.via === 'ollama'
     return (
       <div className="card p-3 bg-emerald-50 border-emerald-200 flex items-center gap-2">
         <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
         <p className="text-xs text-emerald-700">
-          Cloud vision OCR is active — handwriting, equations and diagrams are read by a vision model.
+          {viaOllama
+            ? 'Local Ollama vision model is active — handwriting is read fully on this machine, no API key or internet needed.'
+            : 'Cloud vision AI is active — handwriting, equations and diagrams are read by a vision model.'}
         </p>
       </div>
     )
@@ -174,12 +177,21 @@ function OcrModeNote({ deps }: { deps: DepStatus }) {
   return (
     <div className="card p-3 bg-sky-50 border-sky-200 flex items-start gap-2">
       <AlertCircle className="w-4 h-4 text-sky-600 mt-0.5 shrink-0" />
-      <p className="text-xs text-sky-700">
-        No vision API key set — handwriting is read by Tesseract (weaker) and grading uses the
-        semantic fallback. Add <code className="bg-sky-100 px-1 rounded">GEMINI_API_KEY</code> to a{' '}
-        <code className="bg-sky-100 px-1 rounded">.env</code> file at the project root and restart the
-        backend for accurate results.
-      </p>
+      <div className="text-xs text-sky-700 space-y-1">
+        <p>
+          No vision AI detected — handwriting is read by Tesseract (weak) and grading uses the semantic
+          fallback. Two ways to fix this, pick one:
+        </p>
+        <p>
+          <b>Free, cloud-based:</b> add <code className="bg-sky-100 px-1 rounded">GEMINI_API_KEY</code> to a{' '}
+          <code className="bg-sky-100 px-1 rounded">.env</code> file at the project root and restart the backend.
+        </p>
+        <p>
+          <b>Fully offline, no API key at all:</b> install{' '}
+          <a href="https://ollama.ai" target="_blank" rel="noreferrer" className="underline">Ollama</a>, then run{' '}
+          <code className="bg-sky-100 px-1 rounded">ollama pull llava</code> and restart the backend.
+        </p>
+      </div>
     </div>
   )
 }
