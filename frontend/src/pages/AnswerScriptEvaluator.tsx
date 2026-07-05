@@ -70,6 +70,8 @@ interface ScriptReport {
   unanswered_questions?: UnansweredQ[]
   ocr_methods?: string[]
   grading_path?: string
+  grading_note?: string
+  vision_key_detected?: boolean
   ocr_warning: boolean
   answers: AnswerResult[]
   deps?: Record<string, any>
@@ -419,7 +421,16 @@ function SingleReport({ report, resultId, onUpdate }: {
   const reviewCount = report.needs_review_questions?.length ?? report.answers.filter(a => a.requires_faculty_review).length
   return (
     <div className="space-y-4">
-      {report.ocr_warning && report.low_confidence_pages?.length > 0 && (
+      {report.grading_note && (
+        <div className="card p-4 bg-red-50 border-red-300 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-red-700">Why this scored low / 0</p>
+            <p className="text-xs text-red-600 mt-1">{report.grading_note}</p>
+          </div>
+        </div>
+      )}
+      {report.ocr_warning && !report.grading_note && report.low_confidence_pages?.length > 0 && (
         <div className="card p-3 bg-amber-50 border-amber-200 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
           <p className="text-xs text-amber-700">

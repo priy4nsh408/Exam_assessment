@@ -47,23 +47,41 @@ def evaluate_script(
     student_usn: str = "",
     max_marks_per_q: int = 10,
 ) -> Dict:
+    import evaluation.engine.vision_eval as _ve
+
     exam = exam or {}
     subject = exam.get("subject") or "Mechanical Engineering"
     scheme: List[Dict] = exam.get("questions") or []
 
     # Choose path: vision when a key is set AND we have a scheme to grade against.
-    use_vision = vision_available() and bool(scheme)
+    has_key = _ve.vision_available()
+    use_vision = has_key and bool(scheme)
+    note = ""
 
     if use_vision:
         answers, pages_meta, method = _run_vision(file_path, exam)
         if answers is None:            # vision failed at runtime → fall back
             use_vision = False
+            note = (f"Vision grading failed and fell back to OCR. Reason: "
+                    f"{_ve.LAST_ERROR or 'unknown error'}. Click 'Test API key' to diagnose.")
 
     if not use_vision:
         answers, pages_meta, method = _run_ocr(file_path, exam, subject, max_marks_per_q)
+        if not note:
+            if not has_key:
+                note = ("Handwriting could not be read: no working vision API key was detected, so "
+                        "Tesseract OCR was used — it cannot read handwriting reliably. Set GEMINI_API_KEY "
+                        "in a .env file at the project root and restart the backend, or use the "
+                        "'Paste Answers' tab to grade typed/pasted text.")
+            elif not scheme:
+                note = ("No answer scheme was selected, so there was nothing to grade against. "
+                        "Pick a reference scheme and re-run.")
 
-    return _assemble(answers, pages_meta, method, exam, scheme,
-                     subject, max_marks_per_q, student_name, student_usn)
+    report = _assemble(answers, pages_meta, method, exam, scheme,
+                       subject, max_marks_per_q, student_name, student_usn)
+    report["grading_note"] = note
+    report["vision_key_detected"] = has_key
+    return report
 
 
 # ── Path 1: vision ────────────────────────────────────────────────────────────
