@@ -184,6 +184,24 @@ function OcrModeNote({ deps }: { deps: DepStatus }) {
   )
 }
 
+/** Read a fetch Response as JSON without ever throwing a cryptic browser
+ * parse error — an empty/non-JSON body almost always means the backend was
+ * mid-restart (uvicorn --reload) or crashed, so say that plainly instead. */
+async function safeJson(res: Response): Promise<any> {
+  const raw = await res.text()
+  if (!raw) {
+    throw new Error(
+      `Backend gave an empty response (HTTP ${res.status}). It was likely still restarting after a `
+      + `git pull / .env change — wait for "Application startup complete" in the backend terminal and try again.`
+    )
+  }
+  try {
+    return JSON.parse(raw)
+  } catch {
+    throw new Error(`Backend returned non-JSON (HTTP ${res.status}): ${raw.slice(0, 300)}`)
+  }
+}
+
 function chip(label: string, cls: string, key: string | number) {
   return <span key={key} className={`badge text-[10px] ${cls}`}>{label}</span>
 }
@@ -672,8 +690,9 @@ export default function AnswerScriptEvaluator() {
       fd.append('file', file)
       if (referenceId) fd.append('reference_id', referenceId)
       const res = await fetch('/api/eval/script', { method: 'POST', body: fd })
-      if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
-      setReport(await res.json())
+      const data = await safeJson(res)
+      if (!res.ok) throw new Error(data.detail || 'Evaluation failed')
+      setReport(data)
       loadHistory()
     } catch (e: any) { setError(e.message || 'Evaluation failed') }
     finally { clearInterval(t); setLoading(false); setProgress('') }
@@ -688,8 +707,11 @@ export default function AnswerScriptEvaluator() {
   const runSelftest = async () => {
     setTesting(true); setSelftest(null)
     try {
-      const r = await fetch('/api/eval/selftest'); setSelftest(await r.json())
-    } catch (e: any) { setSelftest({ error: e.message }) }
+      const r = await fetch('/api/eval/selftest')
+      setSelftest(await safeJson(r))
+    } catch (e: any) {
+      setSelftest({ error: e.message || 'Could not reach the backend — is uvicorn running on port 8000?' })
+    }
     finally { setTesting(false) }
   }
 
@@ -704,8 +726,9 @@ export default function AnswerScriptEvaluator() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reference_id: referenceId, student_name: studentName, answers }),
       })
-      if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
-      setReport(await res.json())
+      const data = await safeJson(res)
+      if (!res.ok) throw new Error(data.detail || 'Grading failed')
+      setReport(data)
       loadHistory()
     } catch (e: any) { setError(e.message || 'Grading failed') }
     finally { setLoading(false) }
@@ -720,8 +743,9 @@ export default function AnswerScriptEvaluator() {
       batchFiles.forEach(f => fd.append('files', f))
       if (referenceId) fd.append('reference_id', referenceId)
       const res = await fetch('/api/eval/script/batch', { method: 'POST', body: fd })
-      if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail) }
-      setBatchResult(await res.json())
+      const data = await safeJson(res)
+      if (!res.ok) throw new Error(data.detail || 'Batch evaluation failed')
+      setBatchResult(data)
     } catch (e: any) { setError(e.message || 'Batch evaluation failed') }
     finally { clearInterval(t); setLoading(false); setProgress('') }
   }
