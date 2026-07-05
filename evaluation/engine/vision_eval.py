@@ -157,10 +157,29 @@ def selftest() -> Dict:
         else:
             names = [m.get("name", "").split(":")[0] for m in r.json().get("models", [])]
             if cfg.ollama_vision_model in names:
-                out["providers"]["ollama_vision"] = {
-                    "ok": True, "model": cfg.ollama_vision_model,
-                    "note": "Local vision model ready — works with no API key and no internet.",
-                }
+                # Model is pulled — now actually exercise /api/chat the same way
+                # real grading does, so version-specific quirks (e.g. some
+                # Ollama builds rejecting "format": "json") are caught here.
+                try:
+                    _ollama_chat_call(cfg, [], "Reply with the single word OK", timeout=30, use_format_json=True)
+                    out["providers"]["ollama_vision"] = {
+                        "ok": True, "model": cfg.ollama_vision_model,
+                        "note": "Local vision model ready — works with no API key and no internet.",
+                    }
+                except Exception as e1:
+                    try:
+                        _ollama_chat_call(cfg, [], "Reply with the single word OK", timeout=30, use_format_json=False)
+                        out["providers"]["ollama_vision"] = {
+                            "ok": True, "model": cfg.ollama_vision_model,
+                            "note": "Local vision model ready (using compatibility mode for this Ollama version).",
+                        }
+                    except Exception as e2:
+                        out["providers"]["ollama_vision"] = {
+                            "ok": False,
+                            "error": f"Ollama has '{cfg.ollama_vision_model}' pulled but /api/chat rejected the "
+                                    f"request: {e2}. Try updating Ollama (winget upgrade Ollama.Ollama) or a "
+                                    f"different model (ollama pull llama3.2-vision).",
+                        }
             else:
                 out["providers"]["ollama_vision"] = {
                     "ok": False,
@@ -336,6 +355,24 @@ def _anthropic(image_paths: List[str], prompt: str, timeout: int) -> Optional[st
     return r.json()["content"][0]["text"]
 
 
+def _ollama_chat_call(cfg, images_b64: List[str], prompt: str, timeout: int, use_format_json: bool) -> str:
+    payload = {
+        "model": cfg.ollama_vision_model,
+        "messages": [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": prompt, "images": images_b64},
+        ],
+        "stream": False,
+    }
+    if use_format_json:
+        payload["format"] = "json"
+    r = _requests.post(f"{cfg.ollama_host}/api/chat", json=payload, timeout=timeout)
+    if r.status_code != 200:
+        # Surface Ollama's actual error body instead of a generic "400 Bad Request"
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
+    return r.json()["message"]["content"]
+
+
 def _ollama_vision(image_paths: List[str], prompt: str, timeout: int) -> Optional[str]:
     """
     Local vision grading via Ollama — NO API key, NO internet needed after
@@ -344,21 +381,14 @@ def _ollama_vision(image_paths: List[str], prompt: str, timeout: int) -> Optiona
     """
     cfg = get_config()
     images_b64 = [_b64(p) for p in image_paths]
-    r = _requests.post(
-        f"{cfg.ollama_host}/api/chat",
-        json={
-            "model": cfg.ollama_vision_model,
-            "messages": [
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": prompt, "images": images_b64},
-            ],
-            "stream": False,
-            "format": "json",
-        },
-        timeout=max(timeout, cfg.ollama_vision_timeout),
-    )
-    r.raise_for_status()
-    return r.json()["message"]["content"]
+    t = max(timeout, cfg.ollama_vision_timeout)
+    try:
+        return _ollama_chat_call(cfg, images_b64, prompt, t, use_format_json=True)
+    except Exception as e:
+        # Some Ollama versions reject "format": "json" alongside images — retry without it.
+        if "format" in str(e).lower() or "400" in str(e):
+            return _ollama_chat_call(cfg, images_b64, prompt, t, use_format_json=False)
+        raise
 
 
 def _extract_json(text: str) -> Optional[Dict]:
