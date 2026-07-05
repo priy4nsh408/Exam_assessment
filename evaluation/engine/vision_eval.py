@@ -42,6 +42,18 @@ def vision_available() -> bool:
 # Records the real reason the last vision attempt failed, so it can be surfaced
 # instead of silently falling back to OCR.
 LAST_ERROR: str = ""
+LAST_MODEL_USED: str = ""
+
+# Some AI Studio keys get a free-tier quota of exactly 0 for specific models
+# (commonly the newest release, e.g. gemini-2.0-flash) while other models on
+# the SAME key work fine. Try the configured model first, then fall back
+# across other commonly-available free-tier models rather than failing.
+_GEMINI_FALLBACK_MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+]
 
 
 def selftest() -> Dict:
@@ -56,23 +68,39 @@ def selftest() -> Dict:
         return out
 
     if cfg.gemini_api_key:
-        try:
-            r = _requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.gemini_model}:generateContent",
-                params={"key": cfg.gemini_api_key},
-                json={"contents": [{"parts": [{"text": "Reply with the single word OK"}]}]},
-                timeout=30,
-            )
-            if r.status_code == 200:
-                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                out["providers"]["gemini"] = {"ok": True, "model": cfg.gemini_model, "reply": txt[:40]}
-            else:
-                out["providers"]["gemini"] = {
-                    "ok": False, "model": cfg.gemini_model,
-                    "status": r.status_code, "error": r.text[:400],
-                }
-        except Exception as e:
-            out["providers"]["gemini"] = {"ok": False, "model": cfg.gemini_model, "error": str(e)[:400]}
+        models_to_try = [cfg.gemini_model] + [m for m in _GEMINI_FALLBACK_MODELS if m != cfg.gemini_model]
+        attempts = []
+        found_working = None
+        for model in models_to_try:
+            try:
+                r = _requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    params={"key": cfg.gemini_api_key},
+                    json={"contents": [{"parts": [{"text": "Reply with the single word OK"}]}]},
+                    timeout=30,
+                )
+                if r.status_code == 200:
+                    txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    attempts.append({"model": model, "ok": True, "reply": txt[:40]})
+                    found_working = model
+                    break
+                attempts.append({"model": model, "ok": False, "status": r.status_code, "error": r.text[:300]})
+            except Exception as e:
+                attempts.append({"model": model, "ok": False, "error": str(e)[:300]})
+        if found_working:
+            out["providers"]["gemini"] = {
+                "ok": True, "model": found_working,
+                "reply": attempts[-1]["reply"],
+                "note": (f"Configured model '{cfg.gemini_model}' didn't work but '{found_working}' does — "
+                         f"the app will automatically use '{found_working}'.") if found_working != cfg.gemini_model else "",
+            }
+        else:
+            out["providers"]["gemini"] = {
+                "ok": False, "model": cfg.gemini_model,
+                "error": f"All models failed. Tried: {[a['model'] for a in attempts]}. "
+                        f"Last error: {attempts[-1].get('error', '')}",
+                "attempts": attempts,
+            }
     else:
         out["providers"]["gemini"] = {"ok": False, "error": "no GEMINI_API_KEY set"}
 
@@ -179,13 +207,13 @@ def _build_prompt(exam: Dict) -> str:
 
 # ── Provider calls ────────────────────────────────────────────────────────────
 
-def _gemini(image_paths: List[str], prompt: str, timeout: int) -> Optional[str]:
+def _gemini_call_once(model: str, image_paths: List[str], prompt: str, timeout: int) -> str:
     cfg = get_config()
     parts: List[Dict] = [{"text": prompt}]
     for p in image_paths:
         parts.append({"inline_data": {"mime_type": "image/png", "data": _b64(p)}})
     r = _requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.gemini_model}:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         params={"key": cfg.gemini_api_key},
         json={
             "system_instruction": {"parts": [{"text": _SYSTEM}]},
@@ -196,6 +224,29 @@ def _gemini(image_paths: List[str], prompt: str, timeout: int) -> Optional[str]:
     )
     r.raise_for_status()
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def _gemini(image_paths: List[str], prompt: str, timeout: int) -> Optional[str]:
+    global LAST_ERROR, LAST_MODEL_USED
+    cfg = get_config()
+    models_to_try = [cfg.gemini_model] + [m for m in _GEMINI_FALLBACK_MODELS if m != cfg.gemini_model]
+
+    last_exc: Optional[Exception] = None
+    for model in models_to_try:
+        try:
+            text = _gemini_call_once(model, image_paths, prompt, timeout)
+            LAST_MODEL_USED = model
+            return text
+        except Exception as e:
+            last_exc = e
+            msg = str(e)
+            # 429 quota / 404 model-not-found → try the next model in the list
+            if "429" in msg or "404" in msg or "quota" in msg.lower():
+                continue
+            break  # any other error (auth, network) won't be fixed by switching models
+    if last_exc:
+        raise last_exc
+    return None
 
 
 def _openai(image_paths: List[str], prompt: str, timeout: int) -> Optional[str]:

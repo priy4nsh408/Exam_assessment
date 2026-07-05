@@ -92,20 +92,39 @@ def _openai_chat(prompt: str, system: str, timeout: int) -> Optional[str]:
     return r.json()["choices"][0]["message"]["content"]
 
 
+# Some AI Studio keys have zero free-tier quota for one specific model (often
+# the newest release) while other models on the same key work fine — try a
+# short list rather than hard-failing on the configured model.
+_GEMINI_FALLBACK_MODELS = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash", "gemini-1.5-pro"]
+
+
 def _gemini_chat(prompt: str, system: str, timeout: int) -> Optional[str]:
     cfg = get_config()
-    r = _requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.gemini_model}:generateContent",
-        params={"key": cfg.gemini_api_key},
-        json={
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1},
-        },
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    models = [cfg.gemini_model] + [m for m in _GEMINI_FALLBACK_MODELS if m != cfg.gemini_model]
+    last_exc = None
+    for model in models:
+        try:
+            r = _requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": cfg.gemini_api_key},
+                json={
+                    "system_instruction": {"parts": [{"text": system}]},
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.1},
+                },
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            last_exc = e
+            msg = str(e)
+            if "429" in msg or "404" in msg or "quota" in msg.lower():
+                continue
+            break
+    if last_exc:
+        raise last_exc
+    return None
 
 
 def _ollama_chat(prompt: str, system: str, timeout: int) -> Optional[str]:
