@@ -101,7 +101,6 @@ interface BatchResult {
 
 interface DepStatus {
   pymupdf:   { available: boolean; error: string }
-  tesseract: { available: boolean; error: string }
   cloud_vlm?:{ available: boolean; error: string; via?: string }
   pillow:    { available: boolean; error: string }
   ready:     boolean
@@ -166,7 +165,6 @@ async function safeJson(res: Response): Promise<any> {
 function AiStatusChip({ deps, onOpen }: { deps: DepStatus | null; onOpen: () => void }) {
   if (!deps) return null
   const ready = deps.cloud_vlm?.available
-  const via = deps.cloud_vlm?.via
   return (
     <button
       onClick={onOpen}
@@ -176,9 +174,7 @@ function AiStatusChip({ deps, onOpen }: { deps: DepStatus | null; onOpen: () => 
       title="Click to see AI reading status"
     >
       <Circle className={`w-2 h-2 fill-current ${ready ? 'text-emerald-500' : 'text-amber-500'}`} />
-      {ready
-        ? (via === 'ollama' ? 'AI reading: Local' : 'AI reading: Ready')
-        : 'AI reading: Limited'}
+      {ready ? 'AI reading: Ready' : 'AI reading: Not set up'}
     </button>
   )
 }
@@ -213,29 +209,29 @@ function AiStatusPanel({ deps, onClose }: { deps: DepStatus | null; onClose: () 
         <div className="p-6 space-y-4">
           <div className={`rounded-xl p-4 ${ready ? 'bg-emerald-50' : 'bg-amber-50'}`}>
             <p className={`text-sm font-medium ${ready ? 'text-emerald-800' : 'text-amber-800'}`}>
-              {ready ? '✓ Handwriting AI is active' : '⚠ Handwriting reading is limited right now'}
+              {ready ? '✓ Local AI reading is active' : '⚠ Handwriting reading isn\'t set up yet'}
             </p>
             <p className={`text-xs mt-1 ${ready ? 'text-emerald-700' : 'text-amber-700'}`}>
               {ready
-                ? 'Uploaded scripts will be read and graded by an AI vision model.'
-                : 'No vision AI was detected, so basic text scanning is used instead — weaker on handwriting.'}
+                ? 'Uploaded scripts are read and graded by your local Ollama vision model — fully offline, no cloud, no API key.'
+                : 'Handwritten scripts can\'t be read yet. This app runs entirely on your machine via Ollama — no cloud, no API key required.'}
             </p>
           </div>
 
           {!ready && (
             <div className="space-y-3 text-sm">
-              <p className="font-medium text-gray-700">Two ways to enable proper handwriting reading:</p>
+              <p className="font-medium text-gray-700">Set up local AI reading (one time):</p>
               <div className="rounded-lg border border-gray-100 p-3">
-                <p className="font-medium text-gray-800 text-xs mb-1">Option A — Free cloud key</p>
-                <p className="text-xs text-gray-500">Get a free key at aistudio.google.com/apikey, add
-                  <code className="bg-gray-100 px-1 rounded mx-1">GEMINI_API_KEY=...</code>
-                  to a <code className="bg-gray-100 px-1 rounded">.env</code> file in the project root, restart the backend.</p>
+                <p className="font-medium text-gray-800 text-xs mb-1">1. Install Ollama</p>
+                <p className="text-xs text-gray-500">Download from <a href="https://ollama.ai" target="_blank" rel="noreferrer" className="underline">ollama.ai</a> and install it.</p>
               </div>
               <div className="rounded-lg border border-gray-100 p-3">
-                <p className="font-medium text-gray-800 text-xs mb-1">Option B — Fully offline (no key)</p>
-                <p className="text-xs text-gray-500">Install <a href="https://ollama.ai" target="_blank" rel="noreferrer" className="underline">Ollama</a>, run
-                  <code className="bg-gray-100 px-1 rounded mx-1">ollama pull llava</code>
-                  in any terminal, restart the backend.</p>
+                <p className="font-medium text-gray-800 text-xs mb-1">2. Pull the vision model</p>
+                <p className="text-xs text-gray-500">In any terminal, run <code className="bg-gray-100 px-1 rounded">ollama pull llava</code> (one-time download).</p>
+              </div>
+              <div className="rounded-lg border border-gray-100 p-3">
+                <p className="font-medium text-gray-800 text-xs mb-1">3. Restart the backend</p>
+                <p className="text-xs text-gray-500">Make sure Ollama is running, then restart this app's backend.</p>
               </div>
             </div>
           )}

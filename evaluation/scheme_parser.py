@@ -1,22 +1,25 @@
 """
 Answer Scheme Parser
 ====================
-OCR an uploaded answer scheme PDF/image and extract structured question data:
+Read an uploaded answer scheme PDF/image and extract structured question data:
   subject, [{q_number, question, reference_answer, max_marks}, ...]
 
-Parsing strategy:
-  1. OCR the file (reuse ocr_engine)
-  2. Detect subject from header lines
-  3. Segment text by question boundaries — many formats supported
-  4. Within each segment, split into question text vs. answer text
-  5. Extract marks from patterns like "(5M)", "[10]", "5 marks", "Marks: 5"
+Reading strategy — fully local, no cloud API:
+  1. Read the embedded text layer directly (typed/digital PDFs — instant,
+     perfect, no AI needed)
+  2. If there's no text layer (scanned/handwritten scheme), fall back to the
+     local Ollama vision model for a plain transcription
+  3. Detect subject from header lines
+  4. Segment text by question boundaries — many formats supported
+  5. Within each segment, split into question text vs. answer text
+  6. Extract marks from patterns like "(5M)", "[10]", "5 marks", "Marks: 5"
 """
 
 from __future__ import annotations
 import re
 from typing import List, Dict, Tuple
 
-from evaluation.ocr_engine import ocr_pdf, ocr_image_file
+from evaluation.engine.ocr import ocr_document, page_images
 
 
 # ── Subject detection ─────────────────────────────────────────────────────────
@@ -209,26 +212,38 @@ def parse_answer_scheme(
     import os
     filename = original_filename or os.path.basename(file_path)
 
-    # OCR
-    if file_path.lower().endswith(".pdf"):
-        pages = ocr_pdf(file_path)
-    else:
-        pages = ocr_image_file(file_path)
-
-    full_text = "\n\n".join(p["text"] for p in pages)
+    # Read the embedded text layer (typed/digital PDFs — instant, no AI needed)
+    pages = ocr_document(file_path)
+    full_text = "\n\n".join(p["text"] for p in pages if p["text"])
     warnings: List[str] = []
 
     if not full_text.strip():
-        warnings.append(
-            "OCR returned no text. "
-            "Check that easyocr and pdf2image are installed and the file is a clear scan."
-        )
-        return {
-            "subject": subject_hint or "Unknown",
-            "questions": [],
-            "raw_text": "",
-            "parse_warnings": warnings,
-        }
+        # No text layer — this looks like a scanned/handwritten scheme.
+        # Fall back to the local Ollama vision model for a plain transcription.
+        vision_text = None
+        try:
+            from evaluation.engine.vision_eval import transcribe_pages
+            imgs = page_images(file_path)
+            live_imgs = [p["image_path"] for p in imgs if not p.get("blank")]
+            vision_text = transcribe_pages(live_imgs)
+        except Exception:
+            vision_text = None
+
+        if vision_text and vision_text.strip():
+            full_text = vision_text
+        else:
+            warnings.append(
+                "Could not read this file: no embedded text was found (it looks scanned or "
+                "handwritten) and the local Ollama vision model isn't available. Install Ollama "
+                "(https://ollama.ai), run 'ollama pull llava', and try again — or upload a "
+                "typed/digital PDF instead."
+            )
+            return {
+                "subject": subject_hint or "Unknown",
+                "questions": [],
+                "raw_text": "",
+                "parse_warnings": warnings,
+            }
 
     # Subject
     subject = subject_hint.strip() or _detect_subject(full_text, filename) or "Unknown"

@@ -2096,8 +2096,8 @@ async def health_deps():
         "numerical_evaluator": NUMERICAL_EVAL_AVAILABLE,
         "drawing_evaluator":  DRAWING_EVAL_AVAILABLE,
         "install_instructions": {
-            "ocr": "pip install pymupdf pytesseract Pillow (plus the tesseract-ocr system package); "
-                   "set GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY for handwriting-grade OCR",
+            "ocr": "pip install pymupdf Pillow; install Ollama (https://ollama.ai) and run "
+                   "'ollama pull llava' for handwriting reading — fully local, no API key.",
         }
     }
 

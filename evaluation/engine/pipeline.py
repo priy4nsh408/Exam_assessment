@@ -3,12 +3,20 @@ Pipeline orchestrator
 =====================
 evaluate_script(file_path, exam) → full explainable report.
 
-Two grading paths:
-  1. VISION (primary, when a vision API key is set) — page images go straight
-     to a vision model that reads the handwriting AND grades against the scheme
-     in one call. Handles shuffled order, diagrams, equations, blank pages.
-  2. OCR (fallback, no key) — Tesseract/PyMuPDF text extraction → segment →
-     rubric grading with keyword+semantic scoring.
+Two grading paths, both fully local via Ollama — no cloud API, no Tesseract:
+  1. VISION (primary) — page images go straight to the local Ollama vision
+     model (llava by default), which reads the handwriting AND grades against
+     the scheme in one call. Handles shuffled order, diagrams, equations,
+     blank pages. Requires: ollama pull llava (or another vision model).
+  2. TYPED TEXT (fallback, for digital/typed PDFs, or when vision is
+     unavailable) — PyMuPDF reads the embedded text layer directly (no AI
+     needed for this part) → segment → grade via the local Ollama text model,
+     with a deterministic keyword+semantic grader if Ollama isn't reachable.
+
+If a page is handwritten/scanned (no embedded text) and Ollama vision isn't
+available, that page is honestly reported as unread — nothing pretends to
+OCR it. Use the "Paste Answers" feature (evaluate_typed below) to grade such
+scripts by typing the text directly.
 
 exam dict (all optional except questions for best results):
   {
@@ -53,28 +61,27 @@ def evaluate_script(
     subject = exam.get("subject") or "Mechanical Engineering"
     scheme: List[Dict] = exam.get("questions") or []
 
-    # Choose path: vision when a key is set AND we have a scheme to grade against.
-    has_key = _ve.vision_available()
-    use_vision = has_key and bool(scheme)
+    ollama_ready = _ve.vision_available()
+    use_vision = ollama_ready and bool(scheme)
     note = ""
 
     if use_vision:
         answers, pages_meta, method = _run_vision(file_path, exam)
         if answers is None:            # vision failed at runtime → fall back
             use_vision = False
-            note = (f"Vision grading failed and fell back to OCR. Reason: "
-                    f"{_ve.LAST_ERROR or 'unknown error'}. Click 'Test API key' to diagnose.")
+            note = (f"Handwriting reading failed. Reason: {_ve.LAST_ERROR or 'unknown error'}. "
+                    f"Check the AI status panel to diagnose, or use 'Paste Answers' to grade this "
+                    f"script right now.")
 
     if not use_vision:
-        answers, pages_meta, method = _run_ocr(file_path, exam, subject, max_marks_per_q)
+        answers, pages_meta, method = _run_typed_text(file_path, exam, subject, max_marks_per_q)
         if not note:
-            if not has_key:
-                note = ("Handwriting could not be read: no vision AI was detected (no API key, and no "
-                        "local Ollama vision model running), so Tesseract OCR was used — it cannot read "
-                        "handwriting reliably. Fix options: set GEMINI_API_KEY in a .env file at the "
-                        "project root, OR install Ollama and run 'ollama pull llava' for a fully offline, "
-                        "no-API-key option — restart the backend after either. Or use the 'Paste Answers' "
-                        "tab to grade typed/pasted text right now.")
+            if not ollama_ready:
+                note = ("Handwriting could not be read: the local Ollama vision model isn't "
+                        "available (Ollama not running, or the vision model isn't pulled). "
+                        "Run 'ollama pull llava' in a terminal and make sure Ollama is running, "
+                        "then restart the backend — or use the 'Paste Answers' tab to grade this "
+                        "script right now by typing the answers directly.")
             elif not scheme:
                 note = ("No answer scheme was selected, so there was nothing to grade against. "
                         "Pick a reference scheme and re-run.")
@@ -82,11 +89,11 @@ def evaluate_script(
     report = _assemble(answers, pages_meta, method, exam, scheme,
                        subject, max_marks_per_q, student_name, student_usn)
     report["grading_note"] = note
-    report["vision_key_detected"] = has_key
+    report["vision_key_detected"] = ollama_ready
     return report
 
 
-# ── Path 1: vision ────────────────────────────────────────────────────────────
+# ── Path 1: vision (Ollama, local) ────────────────────────────────────────────
 
 def _run_vision(file_path: str, exam: Dict):
     imgs = page_images(file_path)                       # [{page,image_path,blank}]
@@ -99,7 +106,7 @@ def _run_vision(file_path: str, exam: Dict):
     return answers, imgs, "vision"
 
 
-# ── Path 3: typed / pasted text (always works, no OCR, no API) ────────────────
+# ── Path 3: typed / pasted text (always works, no vision needed) ─────────────
 
 def evaluate_typed(
     exam: Dict,
@@ -109,9 +116,10 @@ def evaluate_typed(
     max_marks_per_q: int = 10,
 ) -> Dict:
     """
-    Grade answers whose text is provided directly (pasted by faculty, or a
-    typed PDF). No OCR, no vision — guaranteed to produce marks against the
-    scheme. Uses the LLM grader if reachable, else the semantic fallback.
+    Grade answers whose text is provided directly (pasted by faculty). No
+    reading step at all — guaranteed to produce marks against the scheme.
+    Uses the local Ollama text model if reachable, else the deterministic
+    keyword+semantic grader.
     """
     scheme = exam.get("questions") or []
     subject = exam.get("subject") or "Mechanical Engineering"
@@ -155,9 +163,9 @@ def evaluate_typed(
                      subject, max_marks_per_q, student_name, student_usn)
 
 
-# ── Path 2: OCR fallback ──────────────────────────────────────────────────────
+# ── Path 2: typed-PDF fallback (embedded text layer, no AI reading needed) ───
 
-def _run_ocr(file_path: str, exam: Dict, subject: str, max_marks_per_q: int):
+def _run_typed_text(file_path: str, exam: Dict, subject: str, max_marks_per_q: int):
     scheme = exam.get("questions") or []
     global_instructions = exam.get("marking_instructions", "")
     pages = ocr_document(file_path)
@@ -197,7 +205,7 @@ def _run_ocr(file_path: str, exam: Dict, subject: str, max_marks_per_q: int):
             **graded,
         }
         answers.append(score_confidence(record))
-    return answers, pages, "ocr"
+    return answers, pages, "typed_text"
 
 
 # ── Shared aggregation ────────────────────────────────────────────────────────

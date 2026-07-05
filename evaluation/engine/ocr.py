@@ -1,25 +1,23 @@
 """
-Stage 1 — OCR
-=============
-Intelligent handwritten OCR with layered strategies:
+Stage 1 — Page reading (typed text + blank detection)
+======================================================
+This module handles only what doesn't need AI:
 
   1. Blank-page detection (ink-coverage) — blank pages are skipped, never
      evaluated, never penalised.
-  2. PyMuPDF direct text extraction — instant for typed/digital PDFs.
-  3. Cloud Vision-Language OCR (Gemini / GPT-4.1 / Claude vision) — best for
-     handwriting; used automatically when an API key is configured.
-  4. Tesseract — local fallback (good for print, weak on handwriting).
+  2. PyMuPDF direct text extraction — instant for typed/digital PDFs, no OCR
+     needed since the text is already embedded in the file.
 
-Every page record preserves: page number, text, image path, confidence,
-method, blank flag — answer position is preserved because segmentation
-works on the concatenated in-order text with page offsets.
+Actually reading HANDWRITING is done by the local Ollama vision model
+(evaluation.engine.vision_eval) — there is no OCR engine and no cloud API
+in this pipeline. If a page has no embedded text and Ollama vision isn't
+available, the page is honestly reported as unread rather than guessed at.
 """
 
 from __future__ import annotations
-import base64
 import os
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 from evaluation.engine.config import get_config
 
@@ -29,43 +27,22 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
 
-try:
-    import pytesseract as _tess
-    from PIL import Image as _PILImage
-    _tess.get_tesseract_version()
-    TESSERACT_AVAILABLE = True
-except Exception:
-    TESSERACT_AVAILABLE = False
-
-try:
-    import requests as _requests
-    REQUESTS_AVAILABLE = True
-except ImportError:
-    REQUESTS_AVAILABLE = False
-
 
 def dependency_status() -> Dict:
     cfg = get_config()
-    cloud_key = bool(cfg.gemini_api_key or cfg.openai_api_key or cfg.anthropic_api_key)
     try:
         from evaluation.engine.vision_eval import ollama_vision_ready
-        local_vision = ollama_vision_ready()
+        vision_ready = ollama_vision_ready()
     except Exception:
-        local_vision = False
-    cloud_vlm = cloud_key or local_vision
-    if cloud_vlm:
-        err = ""
-    else:
-        err = (f"No cloud API key set and no local Ollama vision model detected — set "
-               f"GEMINI_API_KEY (free) or run: ollama pull {cfg.ollama_vision_model}")
+        vision_ready = False
+    err = "" if vision_ready else (
+        f"Ollama vision isn't ready — install Ollama (https://ollama.ai), then run: "
+        f"ollama pull {cfg.ollama_vision_model}"
+    )
     return {
         "pymupdf":   {"available": PYMUPDF_AVAILABLE, "error": "" if PYMUPDF_AVAILABLE else "pip install pymupdf"},
-        "tesseract": {"available": TESSERACT_AVAILABLE, "error": "" if TESSERACT_AVAILABLE else "install tesseract-ocr + pip install pytesseract"},
-        "cloud_vlm": {"available": cloud_vlm, "error": err, "via": "cloud" if cloud_key else ("ollama" if local_vision else "")},
+        "cloud_vlm": {"available": vision_ready, "error": err, "via": "ollama" if vision_ready else ""},
         "pillow":    {"available": True, "error": ""},
-        # legacy keys so old health-check UI doesn't break
-        "pdf2image": {"available": True, "error": ""},
-        "easyocr":   {"available": True, "error": ""},
         "ready":     PYMUPDF_AVAILABLE,
     }
 
@@ -110,136 +87,12 @@ def is_blank_page(image_path: str, text: str = "") -> bool:
     return _ink_coverage(image_path) < cfg.blank_page_ink_threshold
 
 
-# ── OCR backends ──────────────────────────────────────────────────────────────
-
-_VLM_OCR_PROMPT = (
-    "Transcribe ALL handwritten and printed content on this exam answer page. "
-    "Preserve line breaks and the order content appears. "
-    "Write mathematical expressions in plain text (e.g. sigma = F/A, x^2). "
-    "If there is a diagram, describe it on its own line as: [DIAGRAM: <what it shows, labels visible>]. "
-    "If there is a table, transcribe it row by row. "
-    "If there is a graph, describe axes, labels and the trend as [GRAPH: ...]. "
-    "Keep question numbers exactly as written (Q1, Ans 3, 5) etc.). "
-    "Output only the transcription, nothing else."
-)
-
-
-def _b64(image_path: str) -> str:
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
-
-
-def _vlm_ocr_gemini(image_path: str) -> Optional[str]:
-    cfg = get_config()
-    r = _requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.gemini_model}:generateContent",
-        params={"key": cfg.gemini_api_key},
-        json={"contents": [{"parts": [
-            {"text": _VLM_OCR_PROMPT},
-            {"inline_data": {"mime_type": "image/png", "data": _b64(image_path)}},
-        ]}]},
-        timeout=60,
-    )
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-
-
-def _vlm_ocr_openai(image_path: str) -> Optional[str]:
-    cfg = get_config()
-    r = _requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {cfg.openai_api_key}"},
-        json={
-            "model": cfg.openai_model,
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "text": _VLM_OCR_PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_b64(image_path)}"}},
-            ]}],
-        },
-        timeout=60,
-    )
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
-
-
-def _vlm_ocr_anthropic(image_path: str) -> Optional[str]:
-    cfg = get_config()
-    r = _requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": cfg.anthropic_api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": cfg.anthropic_model,
-            "max_tokens": 3000,
-            "messages": [{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(image_path)}},
-                {"type": "text", "text": _VLM_OCR_PROMPT},
-            ]}],
-        },
-        timeout=60,
-    )
-    r.raise_for_status()
-    return r.json()["content"][0]["text"]
-
-
-def _vlm_ocr(image_path: str) -> Tuple[Optional[str], str]:
-    """Try cloud vision OCR in priority order. Returns (text, provider)."""
-    cfg = get_config()
-    if not REQUESTS_AVAILABLE or cfg.vlm_ocr == "off":
-        return None, ""
-    attempts = []
-    if cfg.gemini_api_key:
-        attempts.append(("gemini", _vlm_ocr_gemini))
-    if cfg.openai_api_key:
-        attempts.append(("openai", _vlm_ocr_openai))
-    if cfg.anthropic_api_key:
-        attempts.append(("anthropic", _vlm_ocr_anthropic))
-    for name, fn in attempts:
-        try:
-            text = fn(image_path)
-            if text and text.strip():
-                return text.strip(), name
-        except Exception:
-            continue
-    return None, ""
-
-
-def _tesseract_ocr(image_path: str) -> Tuple[str, float]:
-    """Local Tesseract with PSM cycling + upscaling. Returns (text, confidence)."""
-    if not TESSERACT_AVAILABLE:
-        return "", 0.0
-    try:
-        img = _PILImage.open(image_path)
-        w, h = img.size
-        if w < 1500:
-            scale = 1500 / w
-            img = img.resize((int(w * scale), int(h * scale)), _PILImage.LANCZOS)
-        best_text, best_conf = "", 0.0
-        for psm in ("3", "6", "4"):
-            cfg = f"--psm {psm} --oem 3"
-            try:
-                data = _tess.image_to_data(img, config=cfg, output_type=_tess.Output.DICT)
-                confs = [int(c) / 100.0 for c in data["conf"] if int(c) > 0]
-                text = _tess.image_to_string(img, config=cfg).strip()
-                avg = sum(confs) / len(confs) if confs else 0.0
-                if len(text) > len(best_text):
-                    best_text, best_conf = text, avg
-            except Exception:
-                continue
-        return best_text, best_conf
-    except Exception:
-        return "", 0.0
-
-
-# ── Public entry point ────────────────────────────────────────────────────────
+# ── Public entry points ────────────────────────────────────────────────────────
 
 def page_images(file_path: str) -> List[Dict]:
     """
-    Render pages to images WITHOUT running OCR — used by the vision-grading
-    path, which sends the images straight to a vision model.
+    Render pages to images WITHOUT running any OCR — used by the vision-grading
+    path, which sends the images straight to the local Ollama vision model.
     Returns [{page, image_path, blank}]. Blank pages are flagged.
     """
     cfg = get_config()
@@ -264,35 +117,37 @@ def page_images(file_path: str) -> List[Dict]:
 
 def ocr_document(file_path: str) -> List[Dict]:
     """
-    OCR a PDF or image into page records:
-      [{page, text, image_path, confidence, low_confidence, blank, method}]
-    Blank pages are flagged (blank=True) and carry empty text.
+    Read a PDF or image into page records using ONLY the embedded digital
+    text layer (no OCR engine, no cloud). Handwritten/scanned pages with no
+    text layer are honestly reported as unread (empty text, 0 confidence) —
+    reading those requires the Ollama vision path (see vision_eval.py).
+    Returns: [{page, text, image_path, confidence, low_confidence, blank, method}]
     """
     if file_path.lower().endswith(".pdf"):
-        return _ocr_pdf(file_path)
-    return [_ocr_page_image(file_path, page_no=1, embedded_text="")]
+        return _read_pdf(file_path)
+    return [_read_page_image(file_path, page_no=1, embedded_text="")]
 
 
-def _ocr_pdf(pdf_path: str) -> List[Dict]:
+def _read_pdf(pdf_path: str) -> List[Dict]:
     if not PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF is required — pip install pymupdf")
 
     cfg = get_config()
     doc = _fitz.open(pdf_path)
-    tmp_dir = tempfile.mkdtemp(prefix="mechassess_ocr_")
+    tmp_dir = tempfile.mkdtemp(prefix="mechassess_read_")
     pages: List[Dict] = []
 
     for i, page in enumerate(doc, start=1):
         embedded = page.get_text("text").strip()
         img_path = os.path.join(tmp_dir, f"page_{i:03d}.png")
         _render_page(page, img_path, dpi=cfg.ocr_dpi)
-        pages.append(_ocr_page_image(img_path, page_no=i, embedded_text=embedded))
+        pages.append(_read_page_image(img_path, page_no=i, embedded_text=embedded))
 
     doc.close()
     return pages
 
 
-def _ocr_page_image(image_path: str, page_no: int, embedded_text: str) -> Dict:
+def _read_page_image(image_path: str, page_no: int, embedded_text: str) -> Dict:
     rec = {
         "page": page_no,
         "image_path": image_path,
@@ -300,7 +155,7 @@ def _ocr_page_image(image_path: str, page_no: int, embedded_text: str) -> Dict:
         "confidence": 0.0,
         "low_confidence": True,
         "blank": False,
-        "method": "none",
+        "method": "unread",
     }
 
     # Blank page → skip entirely (never evaluated, never penalised)
@@ -308,23 +163,12 @@ def _ocr_page_image(image_path: str, page_no: int, embedded_text: str) -> Dict:
         rec.update({"blank": True, "confidence": 1.0, "low_confidence": False, "method": "blank_detect"})
         return rec
 
-    # Digital text layer → done, perfect confidence
+    # Digital text layer → done, perfect confidence, no AI needed
     if len(embedded_text) > 30:
         rec.update({"text": embedded_text, "confidence": 1.0, "low_confidence": False, "method": "pymupdf_text"})
         return rec
 
-    # Cloud VLM (best for handwriting)
-    vlm_text, provider = _vlm_ocr(image_path)
-    if vlm_text:
-        rec.update({"text": vlm_text, "confidence": 0.92, "low_confidence": False, "method": f"vlm_{provider}"})
-        return rec
-
-    # Tesseract fallback
-    text, conf = _tesseract_ocr(image_path)
-    rec.update({
-        "text": text,
-        "confidence": round(conf, 3),
-        "low_confidence": conf < 0.6,
-        "method": "tesseract",
-    })
+    # Handwritten/scanned with no text layer: this module does not attempt to
+    # read it — that's the local Ollama vision model's job (the primary path
+    # in pipeline.py). Report honestly as unread rather than guessing.
     return rec

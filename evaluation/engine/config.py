@@ -1,12 +1,13 @@
 """
-Engine configuration — everything is env-driven so the model stack can be
-swapped without code changes.
+Engine configuration — Ollama-only, fully local, no cloud API keys.
 
-Recommended stack (see MODELS.md at repo root for the full comparison):
-  OCR (handwriting)  : Gemini 2.x Flash / GPT-4.1 vision  (cloud, best)
-                       → Tesseract fallback (local, print-quality only)
-  Embeddings         : sentence-transformers all-MiniLM-L6-v2 (local)
-  Grading LLM        : Claude / GPT-4.1 (cloud)  → Ollama Mistral (local fallback)
+Stack:
+  Handwriting reading + grading : Ollama vision model (llava by default)
+  Text grading fallback         : Ollama text model (mistral by default)
+  Embeddings                    : sentence-transformers all-MiniLM-L6-v2 (local)
+
+Everything runs on this machine. No API keys, no quotas, no internet needed
+after the one-time `ollama pull`.
 """
 
 from __future__ import annotations
@@ -14,10 +15,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Load API keys from a .env file at the repo root (if present) so users can
-# put GEMINI_API_KEY=... in Exam_assessment/.env instead of setting env vars.
-# Works even if python-dotenv isn't installed (manual fallback parser), so a
-# key in .env is never silently ignored.
+# Load settings from a .env file at the repo root (if present).
+# Works even if python-dotenv isn't installed (manual fallback parser).
 def _load_env_file() -> None:
     env_path = Path(__file__).resolve().parents[2] / ".env"
     try:
@@ -26,7 +25,6 @@ def _load_env_file() -> None:
             return
     except ImportError:
         pass
-    # Manual fallback — no python-dotenv needed
     try:
         if not env_path.exists():
             return
@@ -48,26 +46,15 @@ _load_env_file()
 
 @dataclass
 class EngineConfig:
-    # ── LLM grading ──────────────────────────────────────────────
+    # ── Ollama (local, no API key) ────────────────────────────────
+    ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "mistral"))
     ollama_timeout: int = int(os.getenv("OLLAMA_TIMEOUT", "30"))
-    ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
-    # Local vision model for reading + grading handwriting with NO API key and
-    # NO internet (after the one-time `ollama pull`). Needs a vision-capable
-    # model: llava (best quality/size balance), llama3.2-vision, or moondream
-    # (tiny, fastest, lower quality). Runs entirely on your machine.
+    # Vision model for reading + grading handwriting: llava (default),
+    # llama3.2-vision (stronger, bigger), or moondream (tiny, fastest).
     ollama_vision_model: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "llava"))
     ollama_vision_timeout: int = int(os.getenv("OLLAMA_VISION_TIMEOUT", "180"))
-    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
-    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
-    anthropic_model: str = field(default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"))
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
 
-    # ── Vision OCR for handwriting (uses same cloud keys) ────────
-    # "auto" = use best available cloud VLM, else Tesseract
-    vlm_ocr: str = field(default_factory=lambda: os.getenv("VLM_OCR", "auto"))
     ocr_dpi: int = int(os.getenv("OCR_DPI", "200"))
 
     # ── Thresholds ───────────────────────────────────────────────

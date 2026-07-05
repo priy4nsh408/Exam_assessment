@@ -19,14 +19,16 @@ Students write exams on paper. The handwritten scripts are scanned and uploaded 
 
 ### The evaluation engine (rebuilt — `evaluation/engine/`)
 
+**Fully local — no cloud API, no Tesseract OCR engine.** Handwriting is read by a local Ollama vision model (`llava` by default); typed PDFs are read directly (no AI needed for that part, since the text is already embedded in the file).
+
 | Stage | What happens |
 |---|---|
-| **1. OCR** | Blank pages auto-detected and skipped (never penalised). Typed PDFs read instantly. Handwriting read by a cloud vision model (Gemini/GPT/Claude) if an API key is set, otherwise Tesseract. Diagrams, graphs and tables are captured as `[DIAGRAM: ...]` descriptions. OCR confidence stored per page. |
+| **1. Reading** | Blank pages auto-detected and skipped (never penalised). Typed PDFs read instantly from the embedded text layer. Handwriting, equations, diagrams and tables are read by your local **Ollama vision model** — one call reads everything on the page. |
 | **2. Question detection** | Understands `Q1`, `Q.1`, `Question 1`, `Ans 1`, `1.` and handwritten variations. Stray numbers (marks tables, page numbers) are filtered out. |
-| **3. Segmentation** | The script is split into individual answers, each carrying its text, page images, math expressions, diagram references and OCR confidence. |
-| **4. Semantic matching** | Answers are matched to the answer scheme **semantically, not positionally** — students can answer Q5, then Q1, then Q8. Un-numbered answers are matched by meaning using embeddings. |
+| **3. Segmentation** | The script is split into individual answers, each carrying its text, page images, math expressions, and diagram references. |
+| **4. Semantic matching** | Answers are matched to the answer scheme **semantically, not positionally** — students can answer Q5, then Q1, then Q8. Un-numbered answers are matched by meaning using local embeddings. |
 | **5. Rubric evaluation** | Question type auto-detected (theory / numerical / diagram / derivation / flowchart / graph / mixed). Each type has its own examiner logic: numericals are graded step-wise (formula → substitution → calculation → answer → units), theory by concepts not exact words, diagrams by components and labels not pixels. Partial marks everywhere. |
-| **6. Confidence engine** | Weighted score from OCR quality + grader certainty + rubric coverage + match certainty + completeness. **Below 80% → sent to faculty review automatically. Illegible handwriting → no marks auto-assigned at all.** |
+| **6. Confidence** | A confidence score is attached to every answer for your reference — it flags anything worth a second look, but **never withholds or zeroes out marks**. The answer scheme is always the final word on scoring. |
 | **7. Faculty override** | Approve / reject / adjust marks / rewrite feedback per question. Every override is logged in an audit trail and totals recomputed. |
 | **8. Reports** | Student report (question-wise marks + feedback + strengths/weaknesses), faculty report (review queue, common mistakes, most-missed concepts), class analytics (average, distribution, question difficulty). |
 
@@ -40,35 +42,22 @@ Students write exams on paper. The handwritten scripts are scanned and uploaded 
 
 ## ❓ Do I need an API key?
 
-**No.** There are three ways to get real marks, pick whichever fits:
+**No — never.** This app is designed to run entirely on your own machine via **Ollama**, with no cloud account, no API key, and no usage limits.
 
-| Option | Setup | Quality |
-|---|---|---|
-| **A. Cloud vision (Gemini)** | Free API key, no credit card: https://aistudio.google.com/apikey | Best — reads handwriting, equations, diagrams |
-| **B. Local vision (Ollama)** | Install [Ollama](https://ollama.ai), run `ollama pull llava` | Good, fully offline, no key, no quota limits |
-| **C. Paste Answers tab** | Nothing to install | Type/paste the answer text yourself — always works |
-| *(fallback if none set up)* | Tesseract OCR | Weak — cannot read handwriting reliably |
-
-### Option A — Gemini (free, cloud)
-```powershell
-# Create a file named .env in the project root (next to this README) containing:
-GEMINI_API_KEY=your-key-here
-# then restart the backend
-```
-
-### Option B — Ollama (free, fully offline, no API key at all)
+### One-time setup
 ```powershell
 # 1. Install Ollama: https://ollama.ai
-# 2. Pull a vision model (one-time download, then works with no internet):
+# 2. Pull the vision model (one-time download, then works fully offline):
 ollama pull llava
-# 3. Make sure Ollama is running, then restart the backend
+# 3. Make sure Ollama is running, then start/restart the backend
 ```
-The engine automatically detects a running Ollama with `llava` pulled and uses it — no config needed. Set `OLLAMA_VISION_MODEL=llama3.2-vision` in `.env` for a stronger (larger) model if your machine can run it.
+The engine automatically detects a running Ollama with `llava` pulled and uses it — no config needed. If your machine can run a bigger model, set `OLLAMA_VISION_MODEL=llama3.2-vision` in a `.env` file at the project root for stronger accuracy.
 
 ### Checking what's active
-Click **Test API key** on the Evaluate Scripts page — it makes a real test call to every provider (Gemini, OpenAI, Anthropic, Ollama) and reports the actual result, so you always know exactly which one is working.
+Click the small **AI reading** status pill (top-right of the Evaluate Scripts page) — it makes a real test call to Ollama and reports the actual result, so you always know whether it's working.
 
-If none are set up: the system still runs end-to-end via Tesseract, results are just approximate for handwriting and flagged for faculty review — or use **Paste Answers** to grade typed text directly, which never depends on OCR or any key. For demos, the seeded results (`POST /api/eval/seed-demo`) work regardless.
+### If Ollama isn't set up yet
+Use the **Paste Answers** tab — type or paste what the student wrote and it grades against the scheme instantly. No reading step involved at all, so it always works regardless of Ollama's status. For demos, the seeded results (`POST /api/eval/seed-demo`) work regardless too.
 
 ---
 
@@ -91,10 +80,7 @@ cd frontend
 npm install
 cd ..
 
-# 4. (Optional, for offline handwriting OCR) install Tesseract:
-#    https://github.com/UB-Mannheim/tesseract/wiki  → run installer, keep default path
-
-# 5. (Optional but recommended) free Gemini key — see section above
+# 4. Install Ollama and pull the vision model — see "Do I need an API key?" above
 ```
 
 ### Every time you start
@@ -127,7 +113,7 @@ Go to **Answer Schemes**, upload the answer scheme PDF (subject, questions, expe
 Go to **Evaluate Scripts**, upload the handwritten PDF, pick the scheme, click **Evaluate**. Multiple pages, blank pages, rough work, shuffled question order — all handled automatically.
 
 **Step 3 — Review**
-Every answer shows: the OCR text, awarded marks, rubric breakdown, why marks were given, what was missing, and a confidence score. Anything under 80% confidence lands in the review queue. Use **Faculty Override** to adjust — every change is logged.
+Every answer shows: what the student wrote, awarded marks, rubric breakdown, why marks were given, what was missing, and a confidence score. Low-confidence answers are flagged for a second look, but marks are never withheld — the scheme is always the final word. Use **Faculty Override** to adjust — every change is logged.
 
 **Step 4 — Reports**
 **Student Results** shows all evaluated scripts. Class analytics and faculty reports are available at `/api/eval/reports/class` and `/api/eval/reports/faculty`.
@@ -137,10 +123,11 @@ Every answer shows: the OCR text, awarded marks, rubric breakdown, why marks wer
 ## Tech Stack
 
 - **Backend:** FastAPI + SQLite (`questions.db`, `overrides.db`, `training_meta.db`, `eval_results.db`)
-- **Evaluation engine:** `evaluation/engine/` — modular pipeline (OCR → detect → segment → match → grade → confidence → reports)
-- **OCR:** PyMuPDF (typed PDFs, page rendering) → cloud VLM (handwriting, optional) → Tesseract (offline fallback)
-- **Grading LLM ladder:** Claude → OpenAI → Gemini → local Ollama Mistral (first available wins, hard timeouts — nothing ever hangs)
-- **Embeddings:** sentence-transformers `all-MiniLM-L6-v2` (local, free) for answer↔scheme semantic matching
+- **Evaluation engine:** `evaluation/engine/` — modular pipeline (read → detect → segment → match → grade → confidence → reports)
+- **Handwriting reading + grading:** local Ollama vision model (`llava` by default) — no cloud, no API key
+- **Typed PDFs:** PyMuPDF reads the embedded text layer directly (instant, no AI needed)
+- **Text-only grading fallback:** local Ollama text model (`mistral` by default), with a deterministic keyword+semantic grader if Ollama isn't reachable
+- **Embeddings:** sentence-transformers `all-MiniLM-L6-v2` (local) for answer↔scheme semantic matching
 - **Question generation:** LangGraph 11-agent RAG pipeline + ChromaDB
 - **Frontend:** React 18 + TypeScript + Vite + Tailwind
 
@@ -155,14 +142,15 @@ Exam_assessment/
 │   ├── eval_api.py          # Evaluation v2: exams, overrides, reports
 │   └── requirements.txt
 ├── evaluation/
-│   ├── engine/              # ★ the evaluation engine
-│   │   ├── ocr.py           #   blank detection, PyMuPDF, VLM, Tesseract
+│   ├── engine/              # ★ the evaluation engine (Ollama-only)
+│   │   ├── ocr.py           #   blank detection + PyMuPDF typed-text reading
+│   │   ├── vision_eval.py   #   Ollama vision: reads + grades handwriting
 │   │   ├── detect.py        #   question-number + type detection
 │   │   ├── segment.py       #   segmentation + semantic scheme matching
 │   │   ├── evaluate.py      #   rubric-based grading per question type
-│   │   ├── confidence.py    #   confidence engine + review routing
+│   │   ├── confidence.py    #   confidence scoring + review flagging
 │   │   ├── reports.py       #   student / faculty / class reports
-│   │   ├── llm.py           #   provider ladder with timeouts
+│   │   ├── llm.py           #   local Ollama text-grading client
 │   │   ├── embeddings.py    #   MiniLM similarity
 │   │   └── pipeline.py      #   orchestrator
 │   ├── scheme_parser.py     # answer scheme PDF → structured Q&A
@@ -190,12 +178,15 @@ Exam_assessment/
 | `GET` | `/api/eval/reports/faculty` | Review queue, common mistakes, missed concepts |
 | `GET` | `/api/eval/reports/class` | Class average, distribution, question difficulty |
 | `GET` | `/api/eval/validate/kappa` | Cohen's Kappa (AI vs faculty agreement, target κ ≥ 0.75) |
-| `GET` | `/api/health/deps` | Which OCR/LLM capabilities are available right now |
+| `GET` | `/api/health/deps` | Whether the local Ollama vision model is ready right now |
+| `GET` | `/api/eval/selftest` | Makes a real test call to Ollama and reports the actual result |
+| `POST` | `/api/eval/script/text` | Grade pasted/typed answers directly — no reading step, always works |
 
 ---
 
 ## Known Limitations
 
-- **Handwriting OCR without an API key is approximate.** Tesseract was built for print. Scan at ≥300 DPI, write clearly, or set a (free) Gemini key.
-- Diagram grading is concept-based (from the OCR/VLM description), so it always flags for faculty visual confirmation.
-- Grading without any LLM (no key + no Ollama) falls back to keyword + semantic similarity — clearly labelled `keyword_semantic` in the report and routed to faculty review.
+- **Handwriting reading requires Ollama.** Without it running (and `llava` pulled), handwritten scripts can't be read — use **Paste Answers** instead, or set up Ollama (see above).
+- Diagram grading is concept-based (from the vision model's description), so it always flags for faculty visual confirmation.
+- Grading without Ollama reachable falls back to keyword + semantic similarity for text answers — clearly labelled `keyword_semantic` in the report.
+- Vision models on CPU-only machines can take 30–90+ seconds per script; a GPU speeds this up significantly.
