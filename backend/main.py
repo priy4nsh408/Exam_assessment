@@ -2069,10 +2069,12 @@ async def eval_batch(
 
         n_questions = len(parsed_questions)
 
-        # Build page-to-question map once for scanned PDFs
+        # Build page-to-question map once for scanned PDFs. Pass the full
+        # parsed_questions list (not just the count) so pages with no
+        # legible number can be matched by content instead.
         page_map = None
         if scanned_page_images:
-            page_map = _map_pages_to_questions(scanned_page_images, n_questions)
+            page_map = _map_pages_to_questions(scanned_page_images, parsed_questions)
 
         def _eval_q(q, idx=0):
             return unified_evaluate(
@@ -2234,9 +2236,11 @@ async def eval_unified(
 
         n_questions = len(parsed_questions)
 
+        # Pass the full parsed_questions list (not just the count) so pages
+        # with no legible number can be matched by content instead.
         page_map = None
         if scanned_page_images:
-            page_map = _map_pages_to_questions(scanned_page_images, n_questions)
+            page_map = _map_pages_to_questions(scanned_page_images, parsed_questions)
 
         def _eval_one(q, idx=0):
             return unified_evaluate(

@@ -774,24 +774,94 @@ def _detect_question_number_vlm(image_path: str) -> List[int]:
         return []
 
 
-def _map_pages_to_questions(image_paths: List[str], total_questions: int) -> dict:
-    """Build a mapping: question_number -> [page_indices] by scanning left margins.
-    Tries fast Tesseract OCR first; for any page where that finds nothing
-    (typically handwritten numbers Tesseract can't read), falls back to
-    asking the vision model directly, which is far more robust on
-    handwriting since that's the same model already grading page content."""
+def _classify_page_content(image_path: str, questions: List[dict]) -> Optional[int]:
+    """Last-resort page classifier for pages with no legible question number
+    at all - the common case for continuation pages of a multi-page answer,
+    which students very rarely renumber. Rather than hunting for a numeral
+    that may not exist on the page, this shows LLaVA the page's actual
+    handwritten content alongside a short list of the exam's questions and
+    asks which one it answers - the same judgment call a human grader makes
+    when sorting a stack of unnumbered sheets by what they're about."""
+    if not OLLAMA_AVAILABLE or not questions:
+        return None
+    img_b64 = image_to_base64(image_path)
+    if not img_b64:
+        return None
+
+    q_list = "\n".join(
+        f"{q.get('question_number', i + 1)}. {(q.get('question_text') or '')[:150]}"
+        for i, q in enumerate(questions)
+    )
+    prompt = f"""This is one page from a student's handwritten exam answer script.
+
+Here are the exam questions:
+{q_list}
+
+Read the handwritten content on this page and decide which ONE question number it is answering. This may be a continuation page with no number written on it - judge by the topic/content, not just a numeral.
+
+Reply with ONLY the question number by itself (e.g. "3"), or the word "none" if the page is blank or you genuinely cannot tell which question it answers. No other text."""
+
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_VISION_MODEL,
+            messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
+            options={"temperature": 0.1, "num_predict": 20},
+        )
+        text = resp["message"]["content"].strip()
+        print(f"[page-classify-vlm] {Path(image_path).name}: raw reply = {text!r}")
+        m = re.search(r'\d{1,2}', text)
+        if m:
+            n = int(m.group())
+            if 1 <= n <= 30:
+                return n
+        return None
+    except Exception as e:
+        print(f"[page-classify-vlm] error on {Path(image_path).name}: {e}")
+        return None
+
+
+def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
+    """Build a mapping: question_number -> [page_indices].
+
+    `questions` accepts either an int (just the question count) or the list
+    of parsed question dicts (question_number/question_text) - passing the
+    list enables the content-matching fallback below.
+
+    Three-layer cascade per page, cheapest first:
+      1. Tesseract OCR on the left margin (fast, free; works on printed numbers)
+      2. LLaVA asked to read just the numeral (works when handwriting is clear)
+      3. LLaVA asked to match the page's actual content to a question (works
+         even on unnumbered continuation pages - confirmed to be the common
+         case: on a real scanned script, 11 of 12 pages had no numeral at
+         all, and only the page classifier stands a chance on those)
+    """
+    if isinstance(questions, int):
+        total_questions = questions
+        question_list: List[dict] = []
+    else:
+        question_list = questions or []
+        total_questions = len(question_list)
+
     q_to_pages = {q: [] for q in range(1, total_questions + 1)}
     page_detections = []
     for i, path in enumerate(image_paths):
         detected = _detect_question_numbers_on_page(path)
         if not detected:
-            print(f"[page-detect] Page {i+1}: Tesseract found nothing, trying LLaVA fallback...")
+            print(f"[page-detect] Page {i+1}: Tesseract found nothing, trying LLaVA numeral read...")
             vlm_detected = _detect_question_number_vlm(path)
             if vlm_detected:
-                print(f"[page-detect] Page {i+1}: LLaVA found {vlm_detected}")
+                print(f"[page-detect] Page {i+1}: LLaVA read numeral {vlm_detected}")
                 detected = vlm_detected
+            elif question_list:
+                print(f"[page-detect] Page {i+1}: no numeral found, trying content match...")
+                matched = _classify_page_content(path, question_list)
+                if matched:
+                    print(f"[page-detect] Page {i+1}: content match -> Q{matched}")
+                    detected = [matched]
+                else:
+                    print(f"[page-detect] Page {i+1}: content match also inconclusive")
             else:
-                print(f"[page-detect] Page {i+1}: LLaVA also found nothing")
+                print(f"[page-detect] Page {i+1}: LLaVA numeral read also found nothing")
         page_detections.append(detected)
         print(f"[page-detect] Page {i+1}: found Q numbers {detected}")
         for qn in detected:
