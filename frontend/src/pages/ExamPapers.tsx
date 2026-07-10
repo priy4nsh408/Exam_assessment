@@ -1,9 +1,26 @@
 import { useState, useEffect } from 'react'
-import { FileText, ClipboardCheck, Download } from 'lucide-react'
+import { FileText, ClipboardCheck, Download, ListChecks } from 'lucide-react'
 import { Header } from '../components/layout/Header'
 import { BloomBadge } from '../components/ui/BloomBadge'
 
 type Tab = 'paper' | 'scheme'
+
+const CO_CODES = ['CO1', 'CO2', 'CO3', 'CO4', 'CO5']
+
+async function downloadPdf(url: string, filename: string) {
+  const res = await fetch(url)
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail || 'Export failed')
+  }
+  const blob = await res.blob()
+  const objectUrl = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = objectUrl
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(objectUrl)
+}
 
 export default function ExamPapers() {
   const [exams, setExams] = useState<any[]>([])
@@ -12,6 +29,11 @@ export default function ExamPapers() {
   const [selectedExamId, setSelectedExamId] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('paper')
   const [loading, setLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
+  const [showCOEditor, setShowCOEditor] = useState(false)
+  const [coDescriptions, setCoDescriptions] = useState<Record<string, string>>({})
+  const [coLoading, setCoLoading] = useState(false)
+  const [coSaving, setCoSaving] = useState(false)
 
   useEffect(() => {
     Promise.all([
@@ -42,52 +64,60 @@ export default function ExamPapers() {
     ? selectedExam.questions.map((qid: string) => questionsById[qid]).filter(Boolean)
     : []
 
-  const handleExportPaper = () => {
+  const handleExportPaper = async () => {
     if (!selectedExam) return
-    const lines: string[] = [
-      `RVCE — ${selectedExam.subject}`,
-      `${selectedExam.title}`,
-      `Total Marks: ${selectedExam.totalMarks}  |  Duration: ${selectedExam.duration} min`,
-      '═'.repeat(70), '',
-    ]
-    examQuestions.forEach((q, i) => {
-      lines.push(`Q${i + 1}. [${q.id}] (${q.marks} marks)  CO: ${q.co}  Bloom: L${q.bloomLevel}`)
-      lines.push(q.text, '')
-    })
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${selectedExam.id}_question_paper.txt`
-    a.click()
+    setExporting(true)
+    try {
+      await downloadPdf(`/api/exams/${selectedExam.id}/export/paper`, `${selectedExam.id}_question_paper.pdf`)
+    } catch (e: any) {
+      alert(e.message || 'Export failed — is the backend running?')
+    }
+    setExporting(false)
   }
 
-  const handleExportScheme = () => {
+  const handleExportScheme = async () => {
     if (!selectedExam) return
-    const lines: string[] = [
-      `RVCE — ${selectedExam.subject} — ANSWER SCHEME`,
-      `${selectedExam.title}`,
-      '═'.repeat(70), '',
-    ]
-    examQuestions.forEach((q, i) => {
-      const scheme = schemesByQuestionId[q.id]
-      lines.push(`Q${i + 1}. [${q.id}]${scheme ? ` · Answer ID: ${scheme.id}` : ''} (${q.marks} marks)`)
-      lines.push(q.text)
-      lines.push('')
-      lines.push('Model Answer:')
-      lines.push(scheme?.answerKey || q.answerKey || '(no answer key generated)')
-      lines.push('')
-      if (scheme?.explanation || q.answerKeyExplanation) {
-        lines.push('Validation:')
-        lines.push(scheme?.explanation || q.answerKeyExplanation)
-        lines.push('')
-      }
-      lines.push('─'.repeat(50), '')
-    })
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${selectedExam.id}_answer_scheme.txt`
-    a.click()
+    setExporting(true)
+    try {
+      await downloadPdf(`/api/exams/${selectedExam.id}/export/scheme`, `${selectedExam.id}_answer_scheme.pdf`)
+    } catch (e: any) {
+      alert(e.message || 'Export failed — is the backend running?')
+    }
+    setExporting(false)
+  }
+
+  const openCOEditor = async () => {
+    if (!selectedExam) return
+    setShowCOEditor(true)
+    setCoLoading(true)
+    try {
+      const res = await fetch(`/api/co-descriptions/${encodeURIComponent(selectedExam.subject)}`)
+      const data = await res.json()
+      const merged: Record<string, string> = {}
+      for (const co of CO_CODES) merged[co] = data.descriptions?.[co] || ''
+      setCoDescriptions(merged)
+    } catch {
+      setCoDescriptions(Object.fromEntries(CO_CODES.map(co => [co, ''])))
+    }
+    setCoLoading(false)
+  }
+
+  const saveCoDescriptions = async () => {
+    if (!selectedExam) return
+    setCoSaving(true)
+    try {
+      const nonEmpty = Object.fromEntries(Object.entries(coDescriptions).filter(([, v]) => v.trim()))
+      const res = await fetch(`/api/co-descriptions/${encodeURIComponent(selectedExam.subject)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ descriptions: nonEmpty }),
+      })
+      if (!res.ok) throw new Error('Save failed')
+      setShowCOEditor(false)
+    } catch {
+      alert('Could not save CO descriptions — is the backend running?')
+    }
+    setCoSaving(false)
   }
 
   return (
@@ -97,9 +127,19 @@ export default function ExamPapers() {
         subtitle="Question paper assembly + answer scheme with validation"
         actions={
           selectedExam ? (
-            <button className="btn-secondary" onClick={tab === 'paper' ? handleExportPaper : handleExportScheme}>
-              <Download className="w-4 h-4" /> Export {tab === 'paper' ? 'Paper' : 'Scheme'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button className="btn-secondary" onClick={openCOEditor}>
+                <ListChecks className="w-4 h-4" /> CO Descriptions
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={tab === 'paper' ? handleExportPaper : handleExportScheme}
+                disabled={exporting}
+              >
+                <Download className="w-4 h-4" />
+                {exporting ? 'Exporting…' : `Export ${tab === 'paper' ? 'Paper' : 'Scheme'} (PDF)`}
+              </button>
+            </div>
           ) : null
         }
       />
@@ -158,6 +198,12 @@ export default function ExamPapers() {
                 <div>
                   <h2 className="text-sm font-semibold text-gray-900">{selectedExam.title}</h2>
                   <p className="text-xs text-gray-500">{selectedExam.subject} · {selectedExam.duration} min</p>
+                  {(selectedExam.courseCode || selectedExam.cieLabel) && (
+                    <p className="text-[11px] text-gray-400 mt-0.5">
+                      {[selectedExam.cieLabel, selectedExam.courseCode, selectedExam.semester ? `Sem ${selectedExam.semester}` : null]
+                        .filter(Boolean).join(' · ')}
+                    </p>
+                  )}
                 </div>
                 <p className="text-lg font-bold text-gray-900">{selectedExam.totalMarks} <span className="text-xs font-normal text-gray-400">marks</span></p>
               </div>
@@ -216,6 +262,45 @@ export default function ExamPapers() {
           )}
         </div>
       </div>
+
+      {showCOEditor && selectedExam && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-4">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">Course Outcome descriptions</h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                For <span className="font-medium">{selectedExam.subject}</span> — shown in the footer table of every exported PDF for this subject.
+              </p>
+            </div>
+            {coLoading ? (
+              <p className="text-xs text-gray-400">Loading…</p>
+            ) : (
+              <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+                {CO_CODES.map(co => (
+                  <label key={co} className="block text-xs text-gray-600">
+                    {co}
+                    <textarea
+                      className="input mt-1 w-full"
+                      rows={2}
+                      placeholder={`Description for ${co} (leave blank to omit from the PDF)`}
+                      value={coDescriptions[co] || ''}
+                      onChange={e => setCoDescriptions(prev => ({ ...prev, [co]: e.target.value }))}
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <button className="btn-secondary" onClick={() => setShowCOEditor(false)} disabled={coSaving}>
+                Cancel
+              </button>
+              <button className="btn-primary" onClick={saveCoDescriptions} disabled={coSaving || coLoading}>
+                {coSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -17,7 +17,7 @@ from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, Response
 from pydantic import BaseModel
 
 # ── Import LangGraph pipeline ─────────────────────────────────────────────────
@@ -63,6 +63,8 @@ try:
         save_exam as _db_save_exam,
         get_exams as _db_get_exams,
         get_exam_by_id as _db_get_exam_by_id,
+        get_co_descriptions as _db_get_co_descriptions,
+        set_co_descriptions as _db_set_co_descriptions,
         CO_PO_MAP as _CO_PO_MAP,
         LANGGRAPH_AVAILABLE,
         OLLAMA_AVAILABLE,
@@ -73,6 +75,12 @@ except Exception as _import_err:
     LANGGRAPH_AVAILABLE = False
     OLLAMA_AVAILABLE = False
     _CO_PO_MAP = {}
+
+try:
+    from exam_pdf import generate_exam_pdf
+    EXAM_PDF_AVAILABLE = True
+except Exception:
+    EXAM_PDF_AVAILABLE = False
 
 try:
     import demo_data as _demo
@@ -196,6 +204,15 @@ class ExamCreateRequest(BaseModel):
     total_marks: int
     duration: int
     question_ids: List[str]
+    department: Optional[str] = ""
+    academic_year: Optional[str] = ""
+    course_code: Optional[str] = ""
+    semester: Optional[str] = ""
+    cie_label: Optional[str] = ""
+    exam_date: Optional[str] = ""
+
+class CODescriptionsRequest(BaseModel):
+    descriptions: dict
 
 # ── Mock data stores ──────────────────────────────────────────────────────────
 
@@ -1252,6 +1269,12 @@ async def get_exams():
                 "totalMarks": e["total_marks"], "duration": e["duration"],
                 "questions": e["question_ids"], "createdAt": e["created_at"],
                 "status": e["status"],
+                "department": e.get("department") or "",
+                "academicYear": e.get("academic_year") or "",
+                "courseCode": e.get("course_code") or "",
+                "semester": e.get("semester") or "",
+                "cieLabel": e.get("cie_label") or "",
+                "examDate": e.get("exam_date") or "",
             } for e in db_exams]
             # Demo exam (from demo_data.py) is shown alongside real published
             # exams rather than replacing them - it's a fixed reference point
@@ -1281,6 +1304,12 @@ async def create_exam(body: ExamCreateRequest):
         # published immediately rather than the permanently-stuck "draft"
         # state this previously always wrote regardless of intent.
         "status": "published",
+        "department": body.department,
+        "academicYear": body.academic_year,
+        "courseCode": body.course_code,
+        "semester": body.semester,
+        "cieLabel": body.cie_label,
+        "examDate": body.exam_date,
     }
     if HAS_PIPELINE:
         try:
@@ -1289,6 +1318,9 @@ async def create_exam(body: ExamCreateRequest):
                 "total_marks": body.total_marks, "duration": body.duration,
                 "question_ids": body.question_ids, "status": "published",
                 "created_at": created_at,
+                "department": body.department, "academic_year": body.academic_year,
+                "course_code": body.course_code, "semester": body.semester,
+                "cie_label": body.cie_label, "exam_date": body.exam_date,
             })
         except Exception:
             pass
@@ -1297,6 +1329,81 @@ async def create_exam(body: ExamCreateRequest):
         activity_type="publish", subject=body.subject, detail=body.title,
     )
     return exam
+
+
+def _questions_for_exam(exam: dict) -> List[dict]:
+    out = []
+    for qid in exam.get("question_ids", []):
+        q = _db_get_question_by_id(qid)
+        if q:
+            out.append(q)
+    return out
+
+
+@app.get("/api/exams/{exam_id}/export/paper")
+async def export_exam_paper(exam_id: str):
+    """Render the exam as a blank college-format question paper PDF
+    (letterhead + SL.No/Questions/Marks/BT/CO table, no answers)."""
+    if not HAS_PIPELINE:
+        raise HTTPException(status_code=503, detail="Pipeline not available")
+    if not EXAM_PDF_AVAILABLE:
+        raise HTTPException(status_code=503, detail="PDF generator not available (install reportlab)")
+    exam = _db_get_exam_by_id(exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    questions = [_normalize_question(q) for q in _questions_for_exam(exam)]
+    co_descriptions = _db_get_co_descriptions(exam.get("subject") or "")
+    pdf_bytes = generate_exam_pdf(exam, questions, mode="paper", co_descriptions=co_descriptions)
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{exam_id}_question_paper.pdf"'},
+    )
+
+
+@app.get("/api/exams/{exam_id}/export/scheme")
+async def export_exam_scheme(exam_id: str):
+    """Render the exam as a college-format answer scheme PDF - same
+    letterhead/table layout as the paper, with the model answer + validation
+    note printed under each question."""
+    if not HAS_PIPELINE:
+        raise HTTPException(status_code=503, detail="Pipeline not available")
+    if not EXAM_PDF_AVAILABLE:
+        raise HTTPException(status_code=503, detail="PDF generator not available (install reportlab)")
+    exam = _db_get_exam_by_id(exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    questions = []
+    for q in _questions_for_exam(exam):
+        nq = _normalize_question(q)
+        scheme = _db_get_answer_scheme_by_question_id(q["id"])
+        if scheme:
+            nq["answerKey"] = scheme.get("answer_key") or nq.get("answerKey")
+            nq["answerKeyExplanation"] = scheme.get("explanation") or nq.get("answerKeyExplanation")
+        questions.append(nq)
+
+    co_descriptions = _db_get_co_descriptions(exam.get("subject") or "")
+    pdf_bytes = generate_exam_pdf(exam, questions, mode="scheme", co_descriptions=co_descriptions)
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{exam_id}_answer_scheme.pdf"'},
+    )
+
+
+@app.get("/api/co-descriptions/{subject}")
+async def get_co_descriptions_route(subject: str):
+    if not HAS_PIPELINE:
+        return {"subject": subject, "descriptions": {}}
+    return {"subject": subject, "descriptions": _db_get_co_descriptions(subject)}
+
+
+@app.post("/api/co-descriptions/{subject}")
+async def set_co_descriptions_route(subject: str, body: CODescriptionsRequest):
+    if not HAS_PIPELINE:
+        raise HTTPException(status_code=503, detail="Pipeline not available")
+    _db_set_co_descriptions(subject, body.descriptions)
+    return {"subject": subject, "descriptions": _db_get_co_descriptions(subject)}
 
 
 @app.post("/api/eval/theory")
