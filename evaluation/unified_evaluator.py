@@ -736,12 +736,55 @@ def _detect_question_numbers_on_page(image_path: str) -> List[int]:
         return []
 
 
+def _detect_question_number_vlm(image_path: str) -> List[int]:
+    """Fallback question-number detector using the vision model itself.
+
+    Tesseract only recognizes printed text reliably - on handwritten margin
+    numbers it frequently finds nothing at all. LLaVA is already looking at
+    every page for grading and is much better at reading handwriting, so
+    it's a natural fallback for the pages that defeat Tesseract, rather than
+    giving up and falling back to a blind page-count guess."""
+    if not OLLAMA_AVAILABLE:
+        return []
+    img_b64 = image_to_base64(image_path)
+    if not img_b64:
+        return []
+    prompt = ("Look only at the top of this page and its left margin. Is there a "
+              "question number written there (e.g. 'Q1', 'Q.2', '3)', '5', 'Q5 a)')? "
+              "Reply with ONLY the number by itself (e.g. '3'), or the single word "
+              "'none' if no question number is visible anywhere on the page. No other text.")
+    try:
+        resp = ollama.chat(
+            model=OLLAMA_VISION_MODEL,
+            messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
+            options={"temperature": 0.1, "num_predict": 20},
+        )
+        text = resp["message"]["content"].strip()
+        numbers = []
+        for m in re.finditer(r'(?:^|[Qq.\s])(\d{1,2})\b', text):
+            n = int(m.group(1))
+            if 1 <= n <= 30:
+                numbers.append(n)
+        return sorted(set(numbers))
+    except Exception:
+        return []
+
+
 def _map_pages_to_questions(image_paths: List[str], total_questions: int) -> dict:
-    """Build a mapping: question_number -> [page_indices] by scanning left margins."""
+    """Build a mapping: question_number -> [page_indices] by scanning left margins.
+    Tries fast Tesseract OCR first; for any page where that finds nothing
+    (typically handwritten numbers Tesseract can't read), falls back to
+    asking the vision model directly, which is far more robust on
+    handwriting since that's the same model already grading page content."""
     q_to_pages = {q: [] for q in range(1, total_questions + 1)}
     page_detections = []
     for i, path in enumerate(image_paths):
         detected = _detect_question_numbers_on_page(path)
+        if not detected:
+            vlm_detected = _detect_question_number_vlm(path)
+            if vlm_detected:
+                print(f"[page-detect] Page {i+1}: Tesseract found nothing, LLaVA found {vlm_detected}")
+                detected = vlm_detected
         page_detections.append(detected)
         print(f"[page-detect] Page {i+1}: found Q numbers {detected}")
         for qn in detected:
@@ -781,23 +824,24 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
     n_pages = len(image_paths)
     q_num = question_index + 1
 
-    # Use page_map if available, otherwise assume a fixed 2-pages-per-answer
-    # layout instead of scanning every remaining page. The old fallback tried
-    # the whole document page-by-page whenever left-margin Q-number detection
-    # came up empty (common on handwriting Tesseract can't read) - that was
-    # both slow (one LLaVA call per page) and hurt accuracy, since the model
-    # would occasionally misjudge an unrelated page as "relevant" and the
-    # wrong page's score would win.
-    PAGES_PER_ANSWER = 2
+    # Use page_map if available - it now comes from _map_pages_to_questions,
+    # which tries Tesseract then falls back to asking LLaVA itself to read
+    # the page/margin number, so this should be populated for almost every
+    # real script. Only if detection found nothing anywhere in the whole
+    # document do we fall back to a page-count guess, scaled to the actual
+    # pages-to-questions ratio (not scanning every remaining page, which was
+    # both slow and let an unrelated page win "best score" by chance).
     if page_map and q_num in page_map and page_map[q_num]:
         ordered_indices = list(page_map[q_num])
         print(f"[VLM-grade] Q{q_num}: using mapped pages {[i+1 for i in ordered_indices]}")
     else:
-        est_start = question_index * PAGES_PER_ANSWER
-        est_end = min(n_pages, est_start + PAGES_PER_ANSWER)
+        pages_per_answer = max(1, round(n_pages / max(total_questions, 1)))
+        est_start = question_index * pages_per_answer
+        est_end = min(n_pages, est_start + pages_per_answer)
         ordered_indices = list(range(est_start, est_end))
         print(f"[VLM-grade] Q{q_num}: no page map, assuming pages "
-              f"{[i + 1 for i in ordered_indices] or 'none (out of range)'} (2 pages/answer)")
+              f"{[i + 1 for i in ordered_indices] or 'none (out of range)'} "
+              f"(~{pages_per_answer} pages/answer)")
 
     best_result = None
     best_score = 0.0
