@@ -632,17 +632,17 @@ export default function Evaluator() {
                       <tbody>
                         {(student.question_results || []).map((qr: any, qi: number) => (
                           <tr key={qi} className="border-b border-gray-50 hover:bg-gray-50/50">
-                            <td className="py-1.5 px-3 font-medium text-gray-700">Q{qr.question_number}</td>
-                            <td className="py-1.5 px-3 text-gray-600 max-w-[200px] truncate">{qr.question_text}</td>
-                            <td className="py-1.5 px-3">
+                            <td className="py-1.5 px-3 font-medium text-gray-700 align-top">Q{qr.question_number}</td>
+                            <td className="py-1.5 px-3 text-gray-600 align-top w-[28%] whitespace-normal break-words">{qr.question_text}</td>
+                            <td className="py-1.5 px-3 align-top">
                               <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">{qr.question_type}</span>
                             </td>
-                            <td className="py-1.5 px-3">
+                            <td className="py-1.5 px-3 align-top">
                               <span className={`font-bold ${scoreColor(qr.ai_score || 0, qr.max_score || 1)}`}>
                                 {qr.ai_score ?? '?'}/{qr.max_score}
                               </span>
                             </td>
-                            <td className="py-1.5 px-3 text-gray-500 max-w-[300px] truncate">{qr.feedback || '—'}</td>
+                            <td className="py-1.5 px-3 text-gray-500 align-top w-[36%] whitespace-normal break-words">{qr.feedback || '—'}</td>
                           </tr>
                         ))}
                       </tbody>

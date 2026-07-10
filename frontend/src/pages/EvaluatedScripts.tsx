@@ -2,6 +2,16 @@ import { useState, useEffect } from 'react'
 import { Header } from '../components/layout/Header'
 import { FileText, AlertTriangle, CheckCircle2, Edit3, X, Save, Loader2, Camera, Trash2 } from 'lucide-react'
 
+interface QuestionResult {
+  question_number?: string | number
+  question_text?: string
+  question_type?: string
+  ai_score?: number
+  max_score?: number
+  feedback?: string
+  explanation?: string
+}
+
 interface EvalRecord {
   id: string
   student_name: string
@@ -22,6 +32,7 @@ interface EvalRecord {
   overridden_at?: string
   evaluated_at: string
   script_file?: string
+  question_results?: QuestionResult[]
 }
 
 export default function EvaluatedScripts() {
@@ -184,16 +195,52 @@ export default function EvaluatedScripts() {
                 {/* Expanded Details */}
                 {expandedId === rec.id && (
                   <div className="px-4 pb-4 border-t border-gray-100 pt-3">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <p className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Feedback</p>
-                        <p className="text-xs text-gray-700">{rec.feedback}</p>
+                    {rec.question_results && rec.question_results.length > 0 ? (
+                      <div className="border border-gray-200 rounded-lg overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-gray-50/50 border-b border-gray-100">
+                              <th className="text-left py-1.5 px-3 font-semibold text-gray-500">Q#</th>
+                              <th className="text-left py-1.5 px-3 font-semibold text-gray-500">Question</th>
+                              <th className="text-left py-1.5 px-3 font-semibold text-gray-500">Type</th>
+                              <th className="text-left py-1.5 px-3 font-semibold text-gray-500">Score</th>
+                              <th className="text-left py-1.5 px-3 font-semibold text-gray-500">Feedback</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rec.question_results.map((qr, qi) => (
+                              <tr key={qi} className="border-b border-gray-50 last:border-b-0 hover:bg-gray-50/50">
+                                <td className="py-1.5 px-3 font-medium text-gray-700 align-top">Q{qr.question_number}</td>
+                                <td className="py-1.5 px-3 text-gray-600 align-top w-[28%] whitespace-normal break-words">{qr.question_text}</td>
+                                <td className="py-1.5 px-3 align-top">
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">{qr.question_type}</span>
+                                </td>
+                                <td className="py-1.5 px-3 align-top">
+                                  <span className={`font-bold ${scoreColor(qr.ai_score || 0, qr.max_score || 1)}`}>
+                                    {qr.ai_score ?? '?'}/{qr.max_score}
+                                  </span>
+                                </td>
+                                <td className="py-1.5 px-3 text-gray-500 align-top w-[36%] whitespace-normal break-words">
+                                  {qr.feedback || '—'}
+                                  {qr.explanation && <span className="block text-gray-400 mt-1">{qr.explanation}</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
-                      <div>
-                        <p className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Explanation</p>
-                        <p className="text-xs text-gray-600">{rec.explanation}</p>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Feedback</p>
+                          <p className="text-xs text-gray-700 whitespace-normal break-words">{rec.feedback}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-semibold text-gray-500 uppercase mb-1">Explanation</p>
+                          <p className="text-xs text-gray-600 whitespace-normal break-words">{rec.explanation}</p>
+                        </div>
                       </div>
-                    </div>
+                    )}
                     {rec.overridden && (
                       <div className="mt-3 p-2 bg-yellow-50 rounded-lg text-xs">
                         <p className="text-yellow-800"><strong>Override reason:</strong> {rec.override_reason}</p>
