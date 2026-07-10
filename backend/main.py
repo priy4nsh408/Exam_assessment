@@ -2182,10 +2182,14 @@ async def eval_batch(
         # legible number can be matched by content instead. page_fragments
         # carries split half-page text for boundary pages that mix two
         # answers, so each question only sees its own relevant half.
+        # ocr_cache is scoped to this one request/script - the same page
+        # image would otherwise get OCR'd once here for classification and
+        # again per-question during grading; caching cuts that duplicate call.
         page_map = None
         page_fragments = None
+        ocr_cache: dict = {}
         if scanned_page_images:
-            page_map, page_fragments = _map_pages_to_questions(scanned_page_images, parsed_questions)
+            page_map, page_fragments = _map_pages_to_questions(scanned_page_images, parsed_questions, ocr_cache=ocr_cache)
 
         def _eval_q(q, idx=0):
             return unified_evaluate(
@@ -2204,6 +2208,7 @@ async def eval_batch(
                 total_questions=n_questions,
                 page_map=page_map,
                 page_fragments=page_fragments,
+                ocr_cache=ocr_cache,
             )
 
         question_results = []
@@ -2352,10 +2357,14 @@ async def eval_unified(
         # with no legible number can be matched by content instead.
         # page_fragments carries split half-page text for boundary pages
         # that mix two answers, so each question only sees its own half.
+        # ocr_cache is scoped to this one request/script - the same page
+        # image would otherwise get OCR'd once here for classification and
+        # again per-question during grading; caching cuts that duplicate call.
         page_map = None
         page_fragments = None
+        ocr_cache: dict = {}
         if scanned_page_images:
-            page_map, page_fragments = _map_pages_to_questions(scanned_page_images, parsed_questions)
+            page_map, page_fragments = _map_pages_to_questions(scanned_page_images, parsed_questions, ocr_cache=ocr_cache)
 
         def _eval_one(q, idx=0):
             return unified_evaluate(
@@ -2374,6 +2383,7 @@ async def eval_unified(
                 total_questions=n_questions,
                 page_map=page_map,
                 page_fragments=page_fragments,
+                ocr_cache=ocr_cache,
             )
 
         question_results = []

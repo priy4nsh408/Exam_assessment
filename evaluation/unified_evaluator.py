@@ -105,10 +105,30 @@ def image_to_base64(image_path: str) -> Optional[str]:
         return None
 
 
-def ocr_with_vlm(image_path: str, fast_mode: bool = False) -> dict:
+def ocr_with_vlm(image_path: str, fast_mode: bool = False, ocr_cache: Optional[dict] = None) -> dict:
     """Extract text from a student answer paper using LLaVA via Ollama.
     Returns {text, equations, has_diagram, method}.
-    fast_mode=True uses a simpler prompt for batch/multi-page OCR."""
+    fast_mode=True uses a simpler prompt for batch/multi-page OCR.
+
+    ocr_cache, when passed, is a plain dict scoped to a single request (one
+    script being graded) that this function reads/writes by (image_path,
+    fast_mode). The same page image otherwise gets OCR'd twice in the
+    scanned-PDF pipeline - once to classify which question it belongs to,
+    again later to grade it - which is the identical call thrown away and
+    redone. Caller-scoped (not module-global) so results never leak between
+    different uploads/requests, since page image filenames could collide
+    across separate scripts."""
+    cache_key = (image_path, fast_mode)
+    if ocr_cache is not None and cache_key in ocr_cache:
+        return ocr_cache[cache_key]
+
+    result = _ocr_with_vlm_uncached(image_path, fast_mode)
+    if ocr_cache is not None:
+        ocr_cache[cache_key] = result
+    return result
+
+
+def _ocr_with_vlm_uncached(image_path: str, fast_mode: bool) -> dict:
     if not OLLAMA_AVAILABLE:
         return {"text": "", "equations": [], "has_diagram": False, "method": "none"}
 
@@ -140,7 +160,10 @@ Output ONLY valid JSON. No explanation or markdown."""
         resp = ollama.chat(
             model=OLLAMA_VISION_MODEL,
             messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
-            options={"temperature": 0.1, "num_predict": 1024},
+            # 512 rather than 1024 - a single page's transcription rarely
+            # needs more, and the lower cap avoids the model running past
+            # where it's already done.
+            options={"temperature": 0.1, "num_predict": 512},
         )
         text = resp["message"]["content"].strip()
 
@@ -774,7 +797,8 @@ def _detect_question_number_vlm(image_path: str) -> List[int]:
         return []
 
 
-def _classify_page_by_similarity(image_path: str, questions: List[dict]) -> Optional[int]:
+def _classify_page_by_similarity(image_path: str, questions: List[dict],
+                                  ocr_cache: Optional[dict] = None) -> tuple:
     """Last-resort page classifier for pages with no legible question number
     at all - the common case for continuation pages of a multi-page answer,
     which students very rarely renumber.
@@ -795,11 +819,11 @@ def _classify_page_by_similarity(image_path: str, questions: List[dict]) -> Opti
     technique the theory evaluator already relies on for scoring, not a
     vision-model judgment call at all.
 
-    Returns the 1-based position of the best-matching question in
-    `questions` (matching q_to_pages' positional keys), or None if OCR
-    produced nothing usable."""
+    Returns (position, score) where position is the 1-based index of the
+    best-matching question (matching q_to_pages' positional keys), or
+    (None, 0.0) if OCR produced nothing usable or no candidate is confident."""
     if not questions:
-        return None
+        return None, 0.0
     if not EMBEDDINGS_AVAILABLE:
         # batch_semantic_similarity degrades to an identical constant score
         # for every candidate when the embedding model isn't installed -
@@ -807,12 +831,12 @@ def _classify_page_by_similarity(image_path: str, questions: List[dict]) -> Opti
         # position 1, reproducing the exact "everything defaults to Q1" bug
         # this function exists to fix, just from a different cause.
         print("[page-classify-sim] sentence-transformers not available - skipping similarity match")
-        return None
-    ocr_result = ocr_with_vlm(image_path, fast_mode=True)
+        return None, 0.0
+    ocr_result = ocr_with_vlm(image_path, fast_mode=True, ocr_cache=ocr_cache)
     page_text = (ocr_result or {}).get("text", "").strip()
     if not page_text or len(page_text) < 15:
         print(f"[page-classify-sim] {Path(image_path).name}: OCR produced no usable text")
-        return None
+        return None, 0.0
 
     reference_texts = [
         f"{q.get('question_text', '')} {q.get('reference_answer', '')}".strip()
@@ -820,15 +844,15 @@ def _classify_page_by_similarity(image_path: str, questions: List[dict]) -> Opti
     ]
     scores = batch_semantic_similarity(page_text, reference_texts)
     if not scores:
-        return None
+        return None, 0.0
     best_pos = max(range(len(scores)), key=lambda i: scores[i])
     best_score = scores[best_pos]
     best_label = questions[best_pos].get("question_number", best_pos + 1)
     print(f"[page-classify-sim] {Path(image_path).name}: best match Q{best_label} (score {best_score:.2f})")
     if best_score < 0.15:
         print(f"[page-classify-sim] {Path(image_path).name}: below confidence threshold, inconclusive")
-        return None
-    return best_pos + 1
+        return None, best_score
+    return best_pos + 1, best_score
 
 
 def _ocr_half_page(image_path: str, half: str) -> str:
@@ -895,13 +919,15 @@ def _split_boundary_page(image_path: str, questions: List[dict]) -> Optional[dic
     return {top_pos + 1: top_text, bottom_pos + 1: bottom_text}
 
 
-def _map_pages_to_questions(image_paths: List[str], questions) -> tuple:
+def _map_pages_to_questions(image_paths: List[str], questions, ocr_cache: Optional[dict] = None) -> tuple:
     """Build a mapping: question_number -> [page_indices], plus a
     page_fragments dict for boundary pages that mix two answers.
 
     `questions` accepts either an int (just the question count) or the list
     of parsed question dicts (question_number/question_text) - passing the
     list enables the content-matching and boundary-splitting fallbacks below.
+    ocr_cache is an optional dict scoped to this one request, reused later
+    during grading so the same page isn't OCR'd twice.
 
     Cascade per page, cheapest first:
       1. Tesseract OCR on the left margin (fast, free; works on printed numbers)
@@ -910,7 +936,10 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> tuple:
          (works even on unnumbered continuation pages - confirmed to be the
          common case: on a real scanned script, 11 of 12 pages had no
          numeral at all, so the page classifier is doing most of the work)
-      4. Check if that page is actually a boundary page mixing two answers
+      4. Only when that whole-page match is weak or inconclusive (a strong,
+         confident match is very unlikely to be hiding a real split, and
+         skipping the check there saves two extra vision calls per page),
+         check if the page is actually a boundary page mixing two answers
          (confirmed to happen in practice - a page ending one derivation and
          starting the next question on the same sheet), by classifying its
          top and bottom halves separately. If they disagree, the page
@@ -930,6 +959,8 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> tuple:
         question_list = questions or []
         total_questions = len(question_list)
 
+    CONFIDENT_MATCH = 0.35  # above this, skip the boundary-split check entirely
+
     q_to_pages = {q: [] for q in range(1, total_questions + 1)}
     page_fragments: dict = {}
     page_detections = []
@@ -943,24 +974,27 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> tuple:
                 detected = vlm_detected
             elif question_list:
                 print(f"[page-detect] Page {i+1}: no numeral found, trying OCR+similarity match...")
-                matched = _classify_page_by_similarity(path, question_list)
-                # Always check for a boundary split, even when the whole-page
-                # match was inconclusive - blending two topics into one
-                # page's text dilutes the score against BOTH candidates
-                # (confirmed in practice: a page mixing the tail of one
-                # answer with the start of the next scored only 0.10 as a
-                # whole page, below threshold for either, while each half
-                # alone classifies cleanly).
-                boundary = _split_boundary_page(path, question_list)
-                if boundary:
-                    print(f"[page-detect] Page {i+1}: boundary page - {boundary}")
-                    detected = list(boundary.keys())
-                    page_fragments[i] = boundary
-                elif matched:
+                matched, match_score = _classify_page_by_similarity(path, question_list, ocr_cache=ocr_cache)
+                if matched and match_score >= CONFIDENT_MATCH:
                     print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
                     detected = [matched]
                 else:
-                    print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
+                    # Weak or inconclusive whole-page match - blending two
+                    # topics into one page's text dilutes the score against
+                    # BOTH candidates (confirmed in practice: a page mixing
+                    # the tail of one answer with the start of the next
+                    # scored only 0.10 as a whole page, below threshold for
+                    # either, while each half alone classifies cleanly).
+                    boundary = _split_boundary_page(path, question_list)
+                    if boundary:
+                        print(f"[page-detect] Page {i+1}: boundary page - {boundary}")
+                        detected = list(boundary.keys())
+                        page_fragments[i] = boundary
+                    elif matched:
+                        print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
+                        detected = [matched]
+                    else:
+                        print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
             else:
                 print(f"[page-detect] Page {i+1}: LLaVA numeral read also found nothing")
         page_detections.append(detected)
@@ -1005,7 +1039,8 @@ def _resolve_page_indices(page_map: Optional[dict], question_index: int,
 
 def _ocr_pages(image_paths: List[str], page_indices: List[int],
                question_position: Optional[int] = None,
-               page_fragments: Optional[dict] = None) -> str:
+               page_fragments: Optional[dict] = None,
+               ocr_cache: Optional[dict] = None) -> str:
     """OCR a specific set of already-identified pages and concatenate their
     text, so grading can go through the normal text-based path instead of
     asking the vision model to judge relevance and assign a score directly
@@ -1020,7 +1055,8 @@ def _ocr_pages(image_paths: List[str], page_indices: List[int],
     tail of one answer with the start of the next), uses the already-split
     half-page fragment for this specific question instead of re-OCRing the
     whole page, which would otherwise pull in the other question's content
-    too."""
+    too. ocr_cache reuses the whole-page OCR already done during page
+    mapping instead of redoing the identical call here."""
     texts = []
     for idx in page_indices:
         if idx < 0 or idx >= len(image_paths):
@@ -1031,7 +1067,7 @@ def _ocr_pages(image_paths: List[str], page_indices: List[int],
         if fragment is not None:
             page_text = fragment.strip()
         else:
-            ocr_result = ocr_with_vlm(image_paths[idx], fast_mode=True)
+            ocr_result = ocr_with_vlm(image_paths[idx], fast_mode=True, ocr_cache=ocr_cache)
             page_text = (ocr_result or {}).get("text", "").strip()
         if page_text:
             texts.append(page_text)
@@ -1062,6 +1098,7 @@ def evaluate(
     total_questions: int = 1,
     page_map: Optional[dict] = None,
     page_fragments: Optional[dict] = None,
+    ocr_cache: Optional[dict] = None,
 ) -> dict:
     """
     Unified evaluation entry point.
@@ -1107,7 +1144,8 @@ def evaluate(
     if answer_image_paths and not student_answer.strip() and question_type != "drawing":
         page_indices = _resolve_page_indices(page_map, question_index, total_questions, len(answer_image_paths))
         combined_text = _ocr_pages(answer_image_paths, page_indices,
-                                   question_position=question_index + 1, page_fragments=page_fragments)
+                                   question_position=question_index + 1, page_fragments=page_fragments,
+                                   ocr_cache=ocr_cache)
         if combined_text:
             student_answer = combined_text
             ocr_result = {"text": combined_text, "equations": [], "has_diagram": False, "method": "vlm_pages"}
