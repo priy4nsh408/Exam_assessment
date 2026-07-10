@@ -759,44 +759,6 @@ def _detect_question_numbers_on_page(image_path: str) -> List[int]:
         return []
 
 
-def _detect_question_number_vlm(image_path: str) -> List[int]:
-    """Fallback question-number detector using the vision model itself.
-
-    Tesseract only recognizes printed text reliably - on handwritten margin
-    numbers it frequently finds nothing at all. LLaVA is already looking at
-    every page for grading and is much better at reading handwriting, so
-    it's a natural fallback for the pages that defeat Tesseract, rather than
-    giving up and falling back to a blind page-count guess."""
-    if not OLLAMA_AVAILABLE:
-        print("[page-detect-vlm] ollama package not importable - skipping VLM fallback")
-        return []
-    img_b64 = image_to_base64(image_path)
-    if not img_b64:
-        print(f"[page-detect-vlm] could not read image: {image_path}")
-        return []
-    prompt = ("Look only at the top of this page and its left margin. Is there a "
-              "question number written there (e.g. 'Q1', 'Q.2', '3)', '5', 'Q5 a)')? "
-              "Reply with ONLY the number by itself (e.g. '3'), or the single word "
-              "'none' if no question number is visible anywhere on the page. No other text.")
-    try:
-        resp = ollama.chat(
-            model=OLLAMA_VISION_MODEL,
-            messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
-            options={"temperature": 0.1, "num_predict": 20},
-        )
-        text = resp["message"]["content"].strip()
-        print(f"[page-detect-vlm] {Path(image_path).name}: raw reply = {text!r}")
-        numbers = []
-        for m in re.finditer(r'(?:^|[Qq.\s])(\d{1,2})\b', text):
-            n = int(m.group(1))
-            if 1 <= n <= 30:
-                numbers.append(n)
-        return sorted(set(numbers))
-    except Exception as e:
-        print(f"[page-detect-vlm] error on {Path(image_path).name}: {e}")
-        return []
-
-
 def _classify_page_by_similarity(image_path: str, questions: List[dict],
                                   ocr_cache: Optional[dict] = None) -> tuple:
     """Last-resort page classifier for pages with no legible question number
@@ -964,37 +926,37 @@ def _map_pages_to_questions(image_paths: List[str], questions, ocr_cache: Option
     page_detections = []
     for i, path in enumerate(image_paths):
         detected = _detect_question_numbers_on_page(path)
-        if not detected:
-            print(f"[page-detect] Page {i+1}: Tesseract found nothing, trying LLaVA numeral read...")
-            vlm_detected = _detect_question_number_vlm(path)
-            if vlm_detected:
-                print(f"[page-detect] Page {i+1}: LLaVA read numeral {vlm_detected}")
-                detected = vlm_detected
-            elif question_list:
-                print(f"[page-detect] Page {i+1}: no numeral found, trying OCR+similarity match...")
-                matched, match_score = _classify_page_by_similarity(path, question_list, ocr_cache=ocr_cache)
-                # Always check for a boundary split, regardless of how
-                # confident the whole-page match looked. A "skip the check
-                # when confident" gate was tried and reverted: real data
-                # showed a genuine boundary page (mixing two answers) can
-                # score just as confidently (0.43) as a correctly-classified
-                # single-topic page (0.20-0.36) - there's no score threshold
-                # that safely separates them, so gating on confidence
-                # silently let a real boundary page slip through unsplit,
-                # which cascaded into 8 of 12 pages being misassigned to one
-                # question.
-                boundary = _split_boundary_page(path, question_list)
-                if boundary:
-                    print(f"[page-detect] Page {i+1}: boundary page - {boundary}")
-                    detected = list(boundary.keys())
-                    page_fragments[i] = boundary
-                elif matched:
-                    print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
-                    detected = [matched]
-                else:
-                    print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
+        if not detected and question_list:
+            # Skips straight from Tesseract to OCR+similarity - a separate
+            # LLaVA "just read the numeral" call used to sit here, but
+            # across every real test it succeeded once and returned nothing
+            # every other time, while still costing a full model call each
+            # time it was tried. Not worth a guaranteed cost for a ~3% hit
+            # rate on this handwriting.
+            print(f"[page-detect] Page {i+1}: Tesseract found nothing, trying OCR+similarity match...")
+            matched, match_score = _classify_page_by_similarity(path, question_list, ocr_cache=ocr_cache)
+            # Always check for a boundary split, regardless of how
+            # confident the whole-page match looked. A "skip the check
+            # when confident" gate was tried and reverted: real data
+            # showed a genuine boundary page (mixing two answers) can
+            # score just as confidently (0.43) as a correctly-classified
+            # single-topic page (0.20-0.36) - there's no score threshold
+            # that safely separates them, so gating on confidence
+            # silently let a real boundary page slip through unsplit,
+            # which cascaded into 8 of 12 pages being misassigned to one
+            # question.
+            boundary = _split_boundary_page(path, question_list)
+            if boundary:
+                print(f"[page-detect] Page {i+1}: boundary page - {boundary}")
+                detected = list(boundary.keys())
+                page_fragments[i] = boundary
+            elif matched:
+                print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
+                detected = [matched]
             else:
-                print(f"[page-detect] Page {i+1}: LLaVA numeral read also found nothing")
+                print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
+        elif not detected:
+            print(f"[page-detect] Page {i+1}: Tesseract found nothing and no question list available")
         page_detections.append(detected)
         print(f"[page-detect] Page {i+1}: found Q numbers {detected}")
         for qn in detected:
