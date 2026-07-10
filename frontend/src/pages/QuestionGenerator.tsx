@@ -85,6 +85,16 @@ export default function QuestionGenerator() {
   const [publishDone, setPublishDone] = useState(false)
   const [warning, setWarning] = useState<string | null>(null)
   const [groundingNotice, setGroundingNotice] = useState<string | null>(null)
+  const [showPublishModal, setShowPublishModal] = useState(false)
+  const [publishMeta, setPublishMeta] = useState({
+    department: 'Department of Artificial Intelligence and Machine Learning',
+    academicYear: '',
+    courseCode: '',
+    semester: '',
+    cieLabel: 'CIE-I',
+    examDate: '',
+    duration: 90,
+  })
 
   const addSpecRow = () => setSpecRows(prev => [...prev, newRow(COs[prev.length % COs.length])])
   const removeSpecRow = (id: string) => setSpecRows(prev => prev.length > 1 ? prev.filter(r => r.id !== id) : prev)
@@ -196,11 +206,18 @@ export default function QuestionGenerator() {
           title: `${subject} — ${unit}`,
           subject,
           total_marks: selectedQs.reduce((s, q) => s + (q.marks ?? 0), 0),
-          duration: 180,
+          duration: publishMeta.duration,
           question_ids: selectedQs.map(q => q.id),
+          department: publishMeta.department,
+          academic_year: publishMeta.academicYear,
+          course_code: publishMeta.courseCode,
+          semester: publishMeta.semester,
+          cie_label: publishMeta.cieLabel,
+          exam_date: publishMeta.examDate,
         })
       })
       if (!res.ok) throw new Error('Server error')
+      setShowPublishModal(false)
       setPublishDone(true)
       setTimeout(() => setPublishDone(false), 3000)
     } catch {
@@ -227,7 +244,11 @@ export default function QuestionGenerator() {
               <button className="btn-secondary" onClick={handleExport}>
                 <Download className="w-4 h-4" /> Export Paper
               </button>
-              <button className="btn-primary" onClick={handlePublish} disabled={publishing || selected.size === 0}>
+              <button
+                className="btn-primary"
+                onClick={() => setShowPublishModal(true)}
+                disabled={publishing || selected.size === 0}
+              >
                 {publishDone
                   ? <><CheckCircle className="w-4 h-4" /> Published!</>
                   : publishing
@@ -475,6 +496,92 @@ export default function QuestionGenerator() {
           )}
         </div>
       </div>
+
+      {showPublishModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+            <h2 className="text-sm font-semibold text-gray-900">Exam paper details</h2>
+            <p className="text-xs text-gray-500 -mt-2">
+              Used to fill in the letterhead when this exam is exported as a college-format PDF.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-gray-600 col-span-2">
+                Department
+                <input
+                  className="input mt-1 w-full"
+                  value={publishMeta.department}
+                  onChange={e => setPublishMeta(m => ({ ...m, department: e.target.value }))}
+                />
+              </label>
+              <label className="text-xs text-gray-600">
+                Course Code
+                <input
+                  className="input mt-1 w-full"
+                  placeholder="e.g. 21AI62"
+                  value={publishMeta.courseCode}
+                  onChange={e => setPublishMeta(m => ({ ...m, courseCode: e.target.value }))}
+                />
+              </label>
+              <label className="text-xs text-gray-600">
+                Semester
+                <input
+                  className="input mt-1 w-full"
+                  placeholder="e.g. VI"
+                  value={publishMeta.semester}
+                  onChange={e => setPublishMeta(m => ({ ...m, semester: e.target.value }))}
+                />
+              </label>
+              <label className="text-xs text-gray-600">
+                CIE Label
+                <input
+                  className="input mt-1 w-full"
+                  placeholder="e.g. CIE-I"
+                  value={publishMeta.cieLabel}
+                  onChange={e => setPublishMeta(m => ({ ...m, cieLabel: e.target.value }))}
+                />
+              </label>
+              <label className="text-xs text-gray-600">
+                Duration (minutes)
+                <input
+                  type="number"
+                  className="input mt-1 w-full"
+                  value={publishMeta.duration}
+                  onChange={e => setPublishMeta(m => ({ ...m, duration: Number(e.target.value) || 0 }))}
+                />
+              </label>
+              <label className="text-xs text-gray-600">
+                Academic Year
+                <input
+                  className="input mt-1 w-full"
+                  placeholder="e.g. 2025-2026 (Even Semester)"
+                  value={publishMeta.academicYear}
+                  onChange={e => setPublishMeta(m => ({ ...m, academicYear: e.target.value }))}
+                />
+              </label>
+              <label className="text-xs text-gray-600">
+                Exam Date (optional)
+                <input
+                  className="input mt-1 w-full"
+                  placeholder="leave blank to fill by hand"
+                  value={publishMeta.examDate}
+                  onChange={e => setPublishMeta(m => ({ ...m, examDate: e.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button className="btn-secondary" onClick={() => setShowPublishModal(false)} disabled={publishing}>
+                Cancel
+              </button>
+              <button className="btn-primary" onClick={handlePublish} disabled={publishing}>
+                {publishing
+                  ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Publishing...</>
+                  : <><Send className="w-4 h-4" /> Publish</>
+                }
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

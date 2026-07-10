@@ -112,6 +112,25 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+    # Migration: exam letterhead/header fields needed to render a college-
+    # format question paper PDF (course code, semester, CIE label, etc.) -
+    # these didn't exist when exams only needed title/subject/marks/duration.
+    existing_exam_cols = {row[1] for row in conn.execute("PRAGMA table_info(exams)").fetchall()}
+    for col in ("department", "academic_year", "course_code", "semester", "cie_label", "exam_date"):
+        if col not in existing_exam_cols:
+            conn.execute(f"ALTER TABLE exams ADD COLUMN {col} TEXT")
+
+    # Per-subject Course Outcome descriptions (CO1: "Understand and apply...",
+    # etc.) - faculty-authored text reused in every exported exam's footer
+    # table for that subject, entered once rather than per exam.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS co_descriptions (
+            subject TEXT NOT NULL,
+            co TEXT NOT NULL,
+            description TEXT NOT NULL,
+            PRIMARY KEY (subject, co)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -322,11 +341,14 @@ def save_exam(exam: dict):
     init_db()
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "INSERT INTO exams (id, title, subject, total_marks, duration, question_ids, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO exams (id, title, subject, total_marks, duration, question_ids, status, created_at, "
+        "department, academic_year, course_code, semester, cie_label, exam_date) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (exam["id"], exam["title"], exam.get("subject", ""), exam.get("total_marks", 0),
          exam.get("duration", 0), json.dumps(exam.get("question_ids", [])),
-         exam.get("status", "draft"), exam.get("created_at") or datetime.now().isoformat()),
+         exam.get("status", "draft"), exam.get("created_at") or datetime.now().isoformat(),
+         exam.get("department", ""), exam.get("academic_year", ""), exam.get("course_code", ""),
+         exam.get("semester", ""), exam.get("cie_label", ""), exam.get("exam_date", "")),
     )
     conn.commit()
     conn.close()
@@ -349,6 +371,33 @@ def get_exam_by_id(exam_id: str) -> Optional[dict]:
         if e["id"] == exam_id:
             return e
     return None
+
+# ── Course Outcome descriptions (per subject) ───────────────────────────────
+# Faculty-authored CO1..CO5 wording for a subject, entered once and reused
+# in every exported exam's Course Outcome footer table for that subject.
+
+def get_co_descriptions(subject: str) -> dict:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT co, description FROM co_descriptions WHERE subject = ?", (subject,)
+    ).fetchall()
+    conn.close()
+    return {co: desc for co, desc in rows}
+
+def set_co_descriptions(subject: str, descriptions: dict):
+    """Upsert CO1..CO5 descriptions for a subject. `descriptions` maps CO
+    code (e.g. "CO1") to its description text."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    for co, desc in descriptions.items():
+        conn.execute(
+            "INSERT INTO co_descriptions (subject, co, description) VALUES (?, ?, ?) "
+            "ON CONFLICT(subject, co) DO UPDATE SET description = excluded.description",
+            (subject, co, desc),
+        )
+    conn.commit()
+    conn.close()
 
 # ── Bloom config ───────────────────────────────────────────────────────────────
 
