@@ -1725,11 +1725,119 @@ def _ocr_scanned_pdf(pdf_path: str, upload_dir: str) -> str:
     return combined
 
 
+def _parse_rvce_table_scheme(text: str) -> list:
+    """Parse the SL.No/Questions/Marks/BT/CO table produced by this app's
+    own exam_pdf.py exporter.
+
+    That PDF is a visual reportlab table (to match the college's printed
+    letterhead), not a "Q1. text (10 marks)" line the older heuristic
+    parser below expects. PyMuPDF/pypdf extract a reportlab table's cells
+    in row-then-column reading order, one value per line - e.g. for a
+    single row: "1", "<question text>", "5", "1", "1" - so this recovers
+    the original rows from that flat line sequence instead of trying to
+    force the visual table into a different text layout just to satisfy
+    the old parser.
+    """
+    lines = [l.strip() for l in text.split('\n')]
+
+    header_idx = None
+    for i in range(len(lines) - 5):
+        window = [lines[i + k].lower() for k in range(6)]
+        if (window[0].startswith('sl') and window[1] == 'no'
+                and window[2] == 'questions' and window[3] == 'marks'
+                and window[4] == 'bt' and window[5] == 'co'):
+            header_idx = i + 6
+            break
+    if header_idx is None:
+        return []
+
+    # The question table ends at the Course Outcome footer or the
+    # "M-Marks, BT-Blooms..." note, whichever comes first.
+    end_idx = len(lines)
+    for i in range(header_idx, len(lines)):
+        low = lines[i].lower()
+        if low.startswith('course outcome') or low.startswith('m-marks'):
+            end_idx = i
+            break
+
+    body = [l for l in lines[header_idx:end_idx] if l]
+
+    questions = []
+    i = 0
+    expected_num = 1
+    while i < len(body):
+        if not body[i].isdigit() or int(body[i]) != expected_num:
+            i += 1
+            continue
+        sl_no = int(body[i])
+        i += 1
+        text_lines = []
+        marks = bt = co = None
+        while i < len(body):
+            is_triple = (
+                i + 2 < len(body) and body[i].isdigit() and body[i + 1].isdigit()
+                and body[i + 2].isdigit()
+                and (i + 3 >= len(body) or not body[i + 3].isdigit()
+                     or int(body[i + 3]) == expected_num + 1)
+            )
+            if is_triple:
+                marks, bt, co = int(body[i]), int(body[i + 1]), int(body[i + 2])
+                i += 3
+                break
+            text_lines.append(body[i])
+            i += 1
+        if marks is None:
+            break  # ran out of lines without finding a valid marks/BT/CO triple
+
+        # The scheme export (mode="scheme") embeds "Model Answer:" and
+        # "Validation:" markers within the same cell, after the question
+        # text - split those out so reference_answer is actually usable for
+        # grading instead of being folded into the question text.
+        question_lines, answer_lines = [], []
+        section = "question"
+        for line in text_lines:
+            low = line.lower()
+            if low == "model answer:":
+                section = "answer"
+                continue
+            if low == "validation:":
+                section = "validation"
+                continue
+            if section == "question":
+                question_lines.append(line)
+            elif section == "answer":
+                answer_lines.append(line)
+            # "validation" section lines are discarded - not used for grading
+
+        question_text = ' '.join(question_lines).strip()
+        reference_answer = ' '.join(answer_lines).strip()
+        if question_text:
+            questions.append({
+                "question_number": str(sl_no),
+                "question_text": question_text,
+                "reference_answer": reference_answer,
+                "marks": marks,
+                "question_type": "theory",
+                "expected_formula": "",
+                "expected_final_answer": "",
+            })
+        expected_num += 1
+    return questions
+
+
 def _parse_answer_scheme(pdf_text: str) -> list:
     """Extract structured questions from answer scheme text.
     Uses heuristic parser first (reliable for structured schemes), falls back to LLM."""
     if not pdf_text.strip():
         return []
+
+    # Try our own exporter's table layout first - it's a precise, known
+    # structure so this is unambiguous whenever it matches.
+    table_result = _parse_rvce_table_scheme(pdf_text)
+    if table_result:
+        total_m = sum(q['marks'] for q in table_result)
+        print(f"[parse-scheme] RVCE table parser found {len(table_result)} questions, total: {total_m} marks")
+        return table_result
 
     # Try heuristic parser first — it handles the full document
     heuristic_result = _heuristic_parse_scheme(pdf_text)
