@@ -774,50 +774,61 @@ def _detect_question_number_vlm(image_path: str) -> List[int]:
         return []
 
 
-def _classify_page_content(image_path: str, questions: List[dict]) -> Optional[int]:
+def _classify_page_by_similarity(image_path: str, questions: List[dict]) -> Optional[int]:
     """Last-resort page classifier for pages with no legible question number
     at all - the common case for continuation pages of a multi-page answer,
-    which students very rarely renumber. Rather than hunting for a numeral
-    that may not exist on the page, this shows LLaVA the page's actual
-    handwritten content alongside a short list of the exam's questions and
-    asks which one it answers - the same judgment call a human grader makes
-    when sorting a stack of unnumbered sheets by what they're about."""
-    if not OLLAMA_AVAILABLE or not questions:
+    which students very rarely renumber.
+
+    An earlier version of this asked the vision model to read the page AND
+    pick from a numbered list of questions in a single prompt. Testing
+    against a real scanned script showed that fails badly: it defaulted to
+    guessing question 1 on pages with completely unrelated content (a page
+    unmistakably about widespread fatigue damage - Q4 - was misclassified
+    as Q1), while other clearly-attributable pages came back "none". A
+    small local vision model isn't reliable at that compound a judgment
+    call in one shot.
+
+    This splits the task instead: OCR the page with `ocr_with_vlm` (the
+    same call already proven reliable for transcribing typed single-image
+    submissions elsewhere in this module), then match the extracted text to
+    the closest question by sentence-embedding cosine similarity - the same
+    technique the theory evaluator already relies on for scoring, not a
+    vision-model judgment call at all.
+
+    Returns the 1-based position of the best-matching question in
+    `questions` (matching q_to_pages' positional keys), or None if OCR
+    produced nothing usable."""
+    if not questions:
         return None
-    img_b64 = image_to_base64(image_path)
-    if not img_b64:
+    if not EMBEDDINGS_AVAILABLE:
+        # batch_semantic_similarity degrades to an identical constant score
+        # for every candidate when the embedding model isn't installed -
+        # picking a "best" match out of a tie would silently always return
+        # position 1, reproducing the exact "everything defaults to Q1" bug
+        # this function exists to fix, just from a different cause.
+        print("[page-classify-sim] sentence-transformers not available - skipping similarity match")
+        return None
+    ocr_result = ocr_with_vlm(image_path, fast_mode=True)
+    page_text = (ocr_result or {}).get("text", "").strip()
+    if not page_text or len(page_text) < 15:
+        print(f"[page-classify-sim] {Path(image_path).name}: OCR produced no usable text")
         return None
 
-    q_list = "\n".join(
-        f"{q.get('question_number', i + 1)}. {(q.get('question_text') or '')[:150]}"
-        for i, q in enumerate(questions)
-    )
-    prompt = f"""This is one page from a student's handwritten exam answer script.
-
-Here are the exam questions:
-{q_list}
-
-Read the handwritten content on this page and decide which ONE question number it is answering. This may be a continuation page with no number written on it - judge by the topic/content, not just a numeral.
-
-Reply with ONLY the question number by itself (e.g. "3"), or the word "none" if the page is blank or you genuinely cannot tell which question it answers. No other text."""
-
-    try:
-        resp = ollama.chat(
-            model=OLLAMA_VISION_MODEL,
-            messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
-            options={"temperature": 0.1, "num_predict": 20},
-        )
-        text = resp["message"]["content"].strip()
-        print(f"[page-classify-vlm] {Path(image_path).name}: raw reply = {text!r}")
-        m = re.search(r'\d{1,2}', text)
-        if m:
-            n = int(m.group())
-            if 1 <= n <= 30:
-                return n
+    reference_texts = [
+        f"{q.get('question_text', '')} {q.get('reference_answer', '')}".strip()
+        for q in questions
+    ]
+    scores = batch_semantic_similarity(page_text, reference_texts)
+    if not scores:
         return None
-    except Exception as e:
-        print(f"[page-classify-vlm] error on {Path(image_path).name}: {e}")
+    best_pos = max(range(len(scores)), key=lambda i: scores[i])
+    best_score = scores[best_pos]
+    best_label = questions[best_pos].get("question_number", best_pos + 1)
+    print(f"[page-classify-sim] {Path(image_path).name}: best match Q{best_label} (score {best_score:.2f})")
+    if best_score < 0.15:
+        print(f"[page-classify-sim] {Path(image_path).name}: below confidence threshold, inconclusive")
         return None
+    return best_pos + 1
 
 
 def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
@@ -830,10 +841,10 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
     Three-layer cascade per page, cheapest first:
       1. Tesseract OCR on the left margin (fast, free; works on printed numbers)
       2. LLaVA asked to read just the numeral (works when handwriting is clear)
-      3. LLaVA asked to match the page's actual content to a question (works
-         even on unnumbered continuation pages - confirmed to be the common
-         case: on a real scanned script, 11 of 12 pages had no numeral at
-         all, and only the page classifier stands a chance on those)
+      3. OCR the page + match its text to a question by semantic similarity
+         (works even on unnumbered continuation pages - confirmed to be the
+         common case: on a real scanned script, 11 of 12 pages had no
+         numeral at all, so the page classifier is doing most of the work)
     """
     if isinstance(questions, int):
         total_questions = questions
@@ -853,13 +864,13 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
                 print(f"[page-detect] Page {i+1}: LLaVA read numeral {vlm_detected}")
                 detected = vlm_detected
             elif question_list:
-                print(f"[page-detect] Page {i+1}: no numeral found, trying content match...")
-                matched = _classify_page_content(path, question_list)
+                print(f"[page-detect] Page {i+1}: no numeral found, trying OCR+similarity match...")
+                matched = _classify_page_by_similarity(path, question_list)
                 if matched:
-                    print(f"[page-detect] Page {i+1}: content match -> Q{matched}")
+                    print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
                     detected = [matched]
                 else:
-                    print(f"[page-detect] Page {i+1}: content match also inconclusive")
+                    print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
             else:
                 print(f"[page-detect] Page {i+1}: LLaVA numeral read also found nothing")
         page_detections.append(detected)
