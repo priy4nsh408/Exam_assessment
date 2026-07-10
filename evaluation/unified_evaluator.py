@@ -861,7 +861,7 @@ def _ocr_half_page(image_path: str, half: str) -> str:
         return ""
 
 
-def _split_boundary_page(image_path: str, questions: List[dict], whole_page_match: int) -> Optional[dict]:
+def _split_boundary_page(image_path: str, questions: List[dict]) -> Optional[dict]:
     """Check whether a page classified via _classify_page_by_similarity is
     actually a boundary page mixing two answers, by classifying its top and
     bottom halves separately. Returns {question_position: fragment_text}
@@ -944,13 +944,21 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> tuple:
             elif question_list:
                 print(f"[page-detect] Page {i+1}: no numeral found, trying OCR+similarity match...")
                 matched = _classify_page_by_similarity(path, question_list)
-                if matched:
+                # Always check for a boundary split, even when the whole-page
+                # match was inconclusive - blending two topics into one
+                # page's text dilutes the score against BOTH candidates
+                # (confirmed in practice: a page mixing the tail of one
+                # answer with the start of the next scored only 0.10 as a
+                # whole page, below threshold for either, while each half
+                # alone classifies cleanly).
+                boundary = _split_boundary_page(path, question_list)
+                if boundary:
+                    print(f"[page-detect] Page {i+1}: boundary page - {boundary}")
+                    detected = list(boundary.keys())
+                    page_fragments[i] = boundary
+                elif matched:
                     print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
                     detected = [matched]
-                    boundary = _split_boundary_page(path, question_list, matched)
-                    if boundary:
-                        detected = list(boundary.keys())
-                        page_fragments[i] = boundary
                 else:
                     print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
             else:
