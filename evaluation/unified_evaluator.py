@@ -781,19 +781,23 @@ def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: Li
     n_pages = len(image_paths)
     q_num = question_index + 1
 
-    # Use page_map if available, otherwise fall back to estimation
+    # Use page_map if available, otherwise assume a fixed 2-pages-per-answer
+    # layout instead of scanning every remaining page. The old fallback tried
+    # the whole document page-by-page whenever left-margin Q-number detection
+    # came up empty (common on handwriting Tesseract can't read) - that was
+    # both slow (one LLaVA call per page) and hurt accuracy, since the model
+    # would occasionally misjudge an unrelated page as "relevant" and the
+    # wrong page's score would win.
+    PAGES_PER_ANSWER = 2
     if page_map and q_num in page_map and page_map[q_num]:
         ordered_indices = list(page_map[q_num])
         print(f"[VLM-grade] Q{q_num}: using mapped pages {[i+1 for i in ordered_indices]}")
     else:
-        pages_per_q = max(1, n_pages / max(total_questions, 1))
-        est_start = int(question_index * pages_per_q)
-        est_end = min(n_pages, int((question_index + 1) * pages_per_q) + 1)
+        est_start = question_index * PAGES_PER_ANSWER
+        est_end = min(n_pages, est_start + PAGES_PER_ANSWER)
         ordered_indices = list(range(est_start, est_end))
-        for i in range(n_pages):
-            if i not in ordered_indices:
-                ordered_indices.append(i)
-        print(f"[VLM-grade] Q{q_num}: no page map, using estimated order")
+        print(f"[VLM-grade] Q{q_num}: no page map, assuming pages "
+              f"{[i + 1 for i in ordered_indices] or 'none (out of range)'} (2 pages/answer)")
 
     best_result = None
     best_score = 0.0
