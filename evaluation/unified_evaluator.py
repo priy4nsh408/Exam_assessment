@@ -745,9 +745,11 @@ def _detect_question_number_vlm(image_path: str) -> List[int]:
     it's a natural fallback for the pages that defeat Tesseract, rather than
     giving up and falling back to a blind page-count guess."""
     if not OLLAMA_AVAILABLE:
+        print("[page-detect-vlm] ollama package not importable - skipping VLM fallback")
         return []
     img_b64 = image_to_base64(image_path)
     if not img_b64:
+        print(f"[page-detect-vlm] could not read image: {image_path}")
         return []
     prompt = ("Look only at the top of this page and its left margin. Is there a "
               "question number written there (e.g. 'Q1', 'Q.2', '3)', '5', 'Q5 a)')? "
@@ -760,13 +762,15 @@ def _detect_question_number_vlm(image_path: str) -> List[int]:
             options={"temperature": 0.1, "num_predict": 20},
         )
         text = resp["message"]["content"].strip()
+        print(f"[page-detect-vlm] {Path(image_path).name}: raw reply = {text!r}")
         numbers = []
         for m in re.finditer(r'(?:^|[Qq.\s])(\d{1,2})\b', text):
             n = int(m.group(1))
             if 1 <= n <= 30:
                 numbers.append(n)
         return sorted(set(numbers))
-    except Exception:
+    except Exception as e:
+        print(f"[page-detect-vlm] error on {Path(image_path).name}: {e}")
         return []
 
 
@@ -781,10 +785,13 @@ def _map_pages_to_questions(image_paths: List[str], total_questions: int) -> dic
     for i, path in enumerate(image_paths):
         detected = _detect_question_numbers_on_page(path)
         if not detected:
+            print(f"[page-detect] Page {i+1}: Tesseract found nothing, trying LLaVA fallback...")
             vlm_detected = _detect_question_number_vlm(path)
             if vlm_detected:
-                print(f"[page-detect] Page {i+1}: Tesseract found nothing, LLaVA found {vlm_detected}")
+                print(f"[page-detect] Page {i+1}: LLaVA found {vlm_detected}")
                 detected = vlm_detected
+            else:
+                print(f"[page-detect] Page {i+1}: LLaVA also found nothing")
         page_detections.append(detected)
         print(f"[page-detect] Page {i+1}: found Q numbers {detected}")
         for qn in detected:
