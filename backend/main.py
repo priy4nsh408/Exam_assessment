@@ -2179,10 +2179,13 @@ async def eval_batch(
 
         # Build page-to-question map once for scanned PDFs. Pass the full
         # parsed_questions list (not just the count) so pages with no
-        # legible number can be matched by content instead.
+        # legible number can be matched by content instead. page_fragments
+        # carries split half-page text for boundary pages that mix two
+        # answers, so each question only sees its own relevant half.
         page_map = None
+        page_fragments = None
         if scanned_page_images:
-            page_map = _map_pages_to_questions(scanned_page_images, parsed_questions)
+            page_map, page_fragments = _map_pages_to_questions(scanned_page_images, parsed_questions)
 
         def _eval_q(q, idx=0):
             return unified_evaluate(
@@ -2200,6 +2203,7 @@ async def eval_batch(
                 question_index=idx,
                 total_questions=n_questions,
                 page_map=page_map,
+                page_fragments=page_fragments,
             )
 
         question_results = []
@@ -2346,9 +2350,12 @@ async def eval_unified(
 
         # Pass the full parsed_questions list (not just the count) so pages
         # with no legible number can be matched by content instead.
+        # page_fragments carries split half-page text for boundary pages
+        # that mix two answers, so each question only sees its own half.
         page_map = None
+        page_fragments = None
         if scanned_page_images:
-            page_map = _map_pages_to_questions(scanned_page_images, parsed_questions)
+            page_map, page_fragments = _map_pages_to_questions(scanned_page_images, parsed_questions)
 
         def _eval_one(q, idx=0):
             return unified_evaluate(
@@ -2366,6 +2373,7 @@ async def eval_unified(
                 question_index=idx,
                 total_questions=n_questions,
                 page_map=page_map,
+                page_fragments=page_fragments,
             )
 
         question_results = []

@@ -831,20 +831,97 @@ def _classify_page_by_similarity(image_path: str, questions: List[dict]) -> Opti
     return best_pos + 1
 
 
-def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
-    """Build a mapping: question_number -> [page_indices].
+def _ocr_half_page(image_path: str, half: str) -> str:
+    """OCR just the top or bottom ~58% of a page (slight overlap so a
+    sentence straddling the middle isn't cleanly severed), saved to a temp
+    file since ocr_with_vlm takes a path. Used to detect and split
+    boundary pages that mix the tail of one answer with the start of the
+    next - confirmed to happen in practice (a page ending one derivation
+    and starting the next question's on the same sheet)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""
+    try:
+        img = Image.open(image_path)
+        w, h = img.size
+        if half == "top":
+            crop = img.crop((0, 0, w, int(h * 0.58)))
+        else:
+            crop = img.crop((0, int(h * 0.42), w, h))
+        tmp_path = image_path.rsplit(".", 1)[0] + f"_{half}half.png"
+        crop.save(tmp_path)
+        result = ocr_with_vlm(tmp_path, fast_mode=True)
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        return (result or {}).get("text", "").strip()
+    except Exception:
+        return ""
+
+
+def _split_boundary_page(image_path: str, questions: List[dict], whole_page_match: int) -> Optional[dict]:
+    """Check whether a page classified via _classify_page_by_similarity is
+    actually a boundary page mixing two answers, by classifying its top and
+    bottom halves separately. Returns {question_position: fragment_text}
+    for both halves if they disagree (each above the confidence threshold),
+    or None if the page is a normal single-question page.
+    """
+    if not EMBEDDINGS_AVAILABLE or len(questions) < 2:
+        return None
+    top_text = _ocr_half_page(image_path, "top")
+    bottom_text = _ocr_half_page(image_path, "bottom")
+    if not top_text or not bottom_text:
+        return None
+
+    reference_texts = [
+        f"{q.get('question_text', '')} {q.get('reference_answer', '')}".strip()
+        for q in questions
+    ]
+    top_scores = batch_semantic_similarity(top_text, reference_texts)
+    bottom_scores = batch_semantic_similarity(bottom_text, reference_texts)
+    if not top_scores or not bottom_scores:
+        return None
+
+    top_pos = max(range(len(top_scores)), key=lambda i: top_scores[i])
+    bottom_pos = max(range(len(bottom_scores)), key=lambda i: bottom_scores[i])
+    if (top_pos == bottom_pos or top_scores[top_pos] < 0.15
+            or bottom_scores[bottom_pos] < 0.15):
+        return None  # not a boundary page - one question dominates the whole page
+
+    print(f"[page-detect] {Path(image_path).name}: boundary page detected - "
+          f"top half -> position {top_pos + 1}, bottom half -> position {bottom_pos + 1}")
+    return {top_pos + 1: top_text, bottom_pos + 1: bottom_text}
+
+
+def _map_pages_to_questions(image_paths: List[str], questions) -> tuple:
+    """Build a mapping: question_number -> [page_indices], plus a
+    page_fragments dict for boundary pages that mix two answers.
 
     `questions` accepts either an int (just the question count) or the list
     of parsed question dicts (question_number/question_text) - passing the
-    list enables the content-matching fallback below.
+    list enables the content-matching and boundary-splitting fallbacks below.
 
-    Three-layer cascade per page, cheapest first:
+    Cascade per page, cheapest first:
       1. Tesseract OCR on the left margin (fast, free; works on printed numbers)
       2. LLaVA asked to read just the numeral (works when handwriting is clear)
       3. OCR the page + match its text to a question by semantic similarity
          (works even on unnumbered continuation pages - confirmed to be the
          common case: on a real scanned script, 11 of 12 pages had no
          numeral at all, so the page classifier is doing most of the work)
+      4. Check if that page is actually a boundary page mixing two answers
+         (confirmed to happen in practice - a page ending one derivation and
+         starting the next question on the same sheet), by classifying its
+         top and bottom halves separately. If they disagree, the page
+         contributes its relevant half to each question instead of being
+         forced entirely into whichever one won the whole-page classification
+         - which was flipping non-deterministically between runs since
+         OCR sampling isn't fully deterministic right at a genuine 50/50
+         content boundary.
+
+    Returns (q_to_pages, page_fragments) where page_fragments maps
+    page_index -> {question_position: fragment_text} for boundary pages only.
     """
     if isinstance(questions, int):
         total_questions = questions
@@ -854,6 +931,7 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
         total_questions = len(question_list)
 
     q_to_pages = {q: [] for q in range(1, total_questions + 1)}
+    page_fragments: dict = {}
     page_detections = []
     for i, path in enumerate(image_paths):
         detected = _detect_question_numbers_on_page(path)
@@ -869,6 +947,10 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
                 if matched:
                     print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
                     detected = [matched]
+                    boundary = _split_boundary_page(path, question_list, matched)
+                    if boundary:
+                        detected = list(boundary.keys())
+                        page_fragments[i] = boundary
                 else:
                     print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
             else:
@@ -888,7 +970,7 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
             q_to_pages[last_q].append(i)
             print(f"[page-detect] Page {i+1}: no Q number, assigned to Q{last_q} (continuation)")
 
-    return q_to_pages
+    return q_to_pages, page_fragments
 
 
 def _resolve_page_indices(page_map: Optional[dict], question_index: int,
@@ -913,7 +995,9 @@ def _resolve_page_indices(page_map: Optional[dict], question_index: int,
     return indices
 
 
-def _ocr_pages(image_paths: List[str], page_indices: List[int]) -> str:
+def _ocr_pages(image_paths: List[str], page_indices: List[int],
+               question_position: Optional[int] = None,
+               page_fragments: Optional[dict] = None) -> str:
     """OCR a specific set of already-identified pages and concatenate their
     text, so grading can go through the normal text-based path instead of
     asking the vision model to judge relevance and assign a score directly
@@ -922,13 +1006,25 @@ def _ocr_pages(image_paths: List[str], page_indices: List[int]) -> str:
     "not relevant" even when they were, in fact, the correct answer, which
     silently collapsed every score to a fixed 30% neutral default via
     semantic_similarity's empty-text fallback). Plain OCR transcription is
-    the same call already proven reliable for the page-classification fix."""
+    the same call already proven reliable for the page-classification fix.
+
+    For a boundary page (recorded in page_fragments - one that mixes the
+    tail of one answer with the start of the next), uses the already-split
+    half-page fragment for this specific question instead of re-OCRing the
+    whole page, which would otherwise pull in the other question's content
+    too."""
     texts = []
     for idx in page_indices:
         if idx < 0 or idx >= len(image_paths):
             continue
-        ocr_result = ocr_with_vlm(image_paths[idx], fast_mode=True)
-        page_text = (ocr_result or {}).get("text", "").strip()
+        fragment = None
+        if page_fragments and idx in page_fragments and question_position is not None:
+            fragment = page_fragments[idx].get(question_position)
+        if fragment is not None:
+            page_text = fragment.strip()
+        else:
+            ocr_result = ocr_with_vlm(image_paths[idx], fast_mode=True)
+            page_text = (ocr_result or {}).get("text", "").strip()
         if page_text:
             texts.append(page_text)
     return "\n".join(texts)
@@ -957,6 +1053,7 @@ def evaluate(
     question_index: int = 0,
     total_questions: int = 1,
     page_map: Optional[dict] = None,
+    page_fragments: Optional[dict] = None,
 ) -> dict:
     """
     Unified evaluation entry point.
@@ -1001,7 +1098,8 @@ def evaluate(
     # directly from the raw image, which testing showed is unreliable.
     if answer_image_paths and not student_answer.strip() and question_type != "drawing":
         page_indices = _resolve_page_indices(page_map, question_index, total_questions, len(answer_image_paths))
-        combined_text = _ocr_pages(answer_image_paths, page_indices)
+        combined_text = _ocr_pages(answer_image_paths, page_indices,
+                                   question_position=question_index + 1, page_fragments=page_fragments)
         if combined_text:
             student_answer = combined_text
             ocr_result = {"text": combined_text, "equations": [], "has_diagram": False, "method": "vlm_pages"}
