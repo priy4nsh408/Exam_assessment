@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 data/questions.db
+data/eval_history.db
 data/demo_grades_cache.json
 data/db/chroma_pyq/
 models/
