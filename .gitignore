@@ -6,3 +6,8 @@ data/demo_grades_cache.json
 data/db/chroma_pyq/
 models/
 backend/__pycache__/
+venv/
+.venv/
+env/
+*.egg-info/
+node_modules/
