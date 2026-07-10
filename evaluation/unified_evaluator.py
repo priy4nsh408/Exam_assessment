@@ -959,8 +959,6 @@ def _map_pages_to_questions(image_paths: List[str], questions, ocr_cache: Option
         question_list = questions or []
         total_questions = len(question_list)
 
-    CONFIDENT_MATCH = 0.35  # above this, skip the boundary-split check entirely
-
     q_to_pages = {q: [] for q in range(1, total_questions + 1)}
     page_fragments: dict = {}
     page_detections = []
@@ -975,26 +973,26 @@ def _map_pages_to_questions(image_paths: List[str], questions, ocr_cache: Option
             elif question_list:
                 print(f"[page-detect] Page {i+1}: no numeral found, trying OCR+similarity match...")
                 matched, match_score = _classify_page_by_similarity(path, question_list, ocr_cache=ocr_cache)
-                if matched and match_score >= CONFIDENT_MATCH:
+                # Always check for a boundary split, regardless of how
+                # confident the whole-page match looked. A "skip the check
+                # when confident" gate was tried and reverted: real data
+                # showed a genuine boundary page (mixing two answers) can
+                # score just as confidently (0.43) as a correctly-classified
+                # single-topic page (0.20-0.36) - there's no score threshold
+                # that safely separates them, so gating on confidence
+                # silently let a real boundary page slip through unsplit,
+                # which cascaded into 8 of 12 pages being misassigned to one
+                # question.
+                boundary = _split_boundary_page(path, question_list)
+                if boundary:
+                    print(f"[page-detect] Page {i+1}: boundary page - {boundary}")
+                    detected = list(boundary.keys())
+                    page_fragments[i] = boundary
+                elif matched:
                     print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
                     detected = [matched]
                 else:
-                    # Weak or inconclusive whole-page match - blending two
-                    # topics into one page's text dilutes the score against
-                    # BOTH candidates (confirmed in practice: a page mixing
-                    # the tail of one answer with the start of the next
-                    # scored only 0.10 as a whole page, below threshold for
-                    # either, while each half alone classifies cleanly).
-                    boundary = _split_boundary_page(path, question_list)
-                    if boundary:
-                        print(f"[page-detect] Page {i+1}: boundary page - {boundary}")
-                        detected = list(boundary.keys())
-                        page_fragments[i] = boundary
-                    elif matched:
-                        print(f"[page-detect] Page {i+1}: similarity match -> position {matched}")
-                        detected = [matched]
-                    else:
-                        print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
+                    print(f"[page-detect] Page {i+1}: similarity match also inconclusive")
             else:
                 print(f"[page-detect] Page {i+1}: LLaVA numeral read also found nothing")
         page_detections.append(detected)
