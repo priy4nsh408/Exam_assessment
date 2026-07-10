@@ -891,128 +891,47 @@ def _map_pages_to_questions(image_paths: List[str], questions) -> dict:
     return q_to_pages
 
 
-def _vlm_grade_with_images(question: str, reference_answer: str, image_paths: List[str],
-                           max_marks: int, subject: str, question_type: str,
-                           expected_formula: str = "", expected_final_answer: str = "",
-                           question_index: int = 0, total_questions: int = 1,
-                           page_map: Optional[dict] = None) -> Optional[dict]:
-    """Grade a student's answer by trying each page image one at a time with LLaVA.
-    Uses page_map (from left-margin Q-number detection) to pick relevant pages first."""
-    if not OLLAMA_AVAILABLE or not image_paths:
-        return None
-
-    formula_section = ""
-    if expected_formula:
-        formula_section = f"\nEXPECTED FORMULA: {expected_formula}"
-    if expected_final_answer:
-        formula_section += f"\nEXPECTED FINAL ANSWER: {expected_final_answer}"
-
-    ref_short = reference_answer[:800] if reference_answer else "Not provided"
-
-    n_pages = len(image_paths)
+def _resolve_page_indices(page_map: Optional[dict], question_index: int,
+                          total_questions: int, n_pages: int) -> List[int]:
+    """Pick which page indices belong to a question: use page_map (from
+    _map_pages_to_questions) when it found something, otherwise fall back
+    to a page-count estimate scaled to the actual pages-to-questions ratio
+    (not scanning every remaining page)."""
     q_num = question_index + 1
-
-    # Use page_map if available - it now comes from _map_pages_to_questions,
-    # which tries Tesseract then falls back to asking LLaVA itself to read
-    # the page/margin number, so this should be populated for almost every
-    # real script. Only if detection found nothing anywhere in the whole
-    # document do we fall back to a page-count guess, scaled to the actual
-    # pages-to-questions ratio (not scanning every remaining page, which was
-    # both slow and let an unrelated page win "best score" by chance).
     if page_map and q_num in page_map and page_map[q_num]:
-        ordered_indices = list(page_map[q_num])
-        print(f"[VLM-grade] Q{q_num}: using mapped pages {[i+1 for i in ordered_indices]}")
-    else:
-        pages_per_answer = max(1, round(n_pages / max(total_questions, 1)))
-        est_start = question_index * pages_per_answer
-        est_end = min(n_pages, est_start + pages_per_answer)
-        ordered_indices = list(range(est_start, est_end))
-        print(f"[VLM-grade] Q{q_num}: no page map, assuming pages "
-              f"{[i + 1 for i in ordered_indices] or 'none (out of range)'} "
-              f"(~{pages_per_answer} pages/answer)")
+        indices = list(page_map[q_num])
+        print(f"[grade-pages] Q{q_num}: using mapped pages {[i + 1 for i in indices]}")
+        return indices
 
-    best_result = None
-    best_score = 0.0
+    pages_per_answer = max(1, round(n_pages / max(total_questions, 1)))
+    est_start = question_index * pages_per_answer
+    est_end = min(n_pages, est_start + pages_per_answer)
+    indices = list(range(est_start, est_end))
+    print(f"[grade-pages] Q{q_num}: no page map, assuming pages "
+          f"{[i + 1 for i in indices] or 'none (out of range)'} "
+          f"(~{pages_per_answer} pages/answer)")
+    return indices
 
-    for page_idx in ordered_indices:
-        img_b64 = image_to_base64(image_paths[page_idx])
-        if not img_b64:
+
+def _ocr_pages(image_paths: List[str], page_indices: List[int]) -> str:
+    """OCR a specific set of already-identified pages and concatenate their
+    text, so grading can go through the normal text-based path instead of
+    asking the vision model to judge relevance and assign a score directly
+    from the raw image in a single prompt - testing against a real scanned
+    script showed that compound task is unreliable (LLaVA marking pages
+    "not relevant" even when they were, in fact, the correct answer, which
+    silently collapsed every score to a fixed 30% neutral default via
+    semantic_similarity's empty-text fallback). Plain OCR transcription is
+    the same call already proven reliable for the page-classification fix."""
+    texts = []
+    for idx in page_indices:
+        if idx < 0 or idx >= len(image_paths):
             continue
-
-        prompt = f"""Look at this handwritten answer page. Does it contain an answer to this question?
-
-QUESTION ({max_marks} marks): {question}
-{formula_section}
-KEY POINTS: {ref_short}
-
-If this page has the answer (or part of it), grade what you see out of {max_marks}.
-If this page does NOT contain an answer to this question, set score to -1.
-
-Reply ONLY in JSON:
-{{"score": <-1 or 0-{max_marks}>, "student_wrote": "what you see on this page", "feedback": "brief explanation", "confidence": 0.7}}
-Output ONLY valid JSON."""
-
-        try:
-            resp = ollama.chat(
-                model=OLLAMA_VISION_MODEL,
-                messages=[{"role": "user", "content": prompt, "images": [img_b64]}],
-                options={"temperature": 0.2, "num_predict": 200},
-            )
-            raw = resp["message"]["content"].strip()
-            parsed = _parse_json(raw)
-
-            if parsed and "score" in parsed:
-                score = float(parsed["score"])
-                if score < 0:
-                    print(f"[VLM-grade] Q{question_index+1} page {page_idx+1}: not relevant")
-                    continue
-                score = min(score, max_marks)
-                print(f"[VLM-grade] Q{question_index+1} page {page_idx+1}: {score}/{max_marks}")
-                if score > best_score:
-                    best_score = score
-                    best_result = {
-                        "ai_score": round(score, 1),
-                        "max_score": max_marks,
-                        "confidence": min(0.95, max(0.3, float(parsed.get("confidence", 0.6)))),
-                        "feedback": parsed.get("feedback", ""),
-                        "explanation": parsed.get("student_wrote", ""),
-                        "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
-                        "llm_graded": True,
-                        "vision_graded": True,
-                    }
-                # Found a good answer, stop searching
-                if score >= max_marks * 0.5:
-                    break
-            else:
-                # Try to find score in raw text
-                import re as _re
-                score_match = _re.search(r'"?score"?\s*:\s*(-?\d+(?:\.\d+)?)', raw)
-                if score_match:
-                    score = float(score_match.group(1))
-                    if score < 0:
-                        continue
-                    score = min(score, max_marks)
-                    if score > best_score:
-                        best_score = score
-                        best_result = {
-                            "ai_score": round(score, 1),
-                            "max_score": max_marks,
-                            "confidence": 0.5,
-                            "feedback": raw[:200],
-                            "explanation": "",
-                            "keywords": {"found": [], "missing": [], "matched_count": 0, "total_count": 0, "coverage_ratio": 0.5},
-                            "llm_graded": True,
-                            "vision_graded": True,
-                        }
-                    if score >= max_marks * 0.5:
-                        break
-        except Exception as e:
-            print(f"[VLM-grade] Q{question_index+1} page {page_idx+1} error: {e}")
-            continue
-
-    if best_result:
-        return best_result
-    return None
+        ocr_result = ocr_with_vlm(image_paths[idx], fast_mode=True)
+        page_text = (ocr_result or {}).get("text", "").strip()
+        if page_text:
+            texts.append(page_text)
+    return "\n".join(texts)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1075,17 +994,17 @@ def evaluate(
     # ── Step 3: Grade ──────────────────────────────────────────────────
     result = None
 
-    # Vision-based grading: send page images directly to LLaVA (best for handwritten scanned PDFs)
+    # Scanned/handwritten PDF: OCR the pages already identified as this
+    # question's answer (via page_map or the estimated range), then let it
+    # flow through the normal text-based grading path below - rather than
+    # asking the vision model to judge relevance and assign a score
+    # directly from the raw image, which testing showed is unreliable.
     if answer_image_paths and not student_answer.strip() and question_type != "drawing":
-        result = _vlm_grade_with_images(
-            question, reference_answer, answer_image_paths,
-            max_marks, subject, question_type, expected_formula, expected_final_answer,
-            question_index=question_index, total_questions=total_questions,
-            page_map=page_map,
-        )
-        if result:
-            result["ocr_used"] = True
-            result["ocr_method"] = "vlm_direct"
+        page_indices = _resolve_page_indices(page_map, question_index, total_questions, len(answer_image_paths))
+        combined_text = _ocr_pages(answer_image_paths, page_indices)
+        if combined_text:
+            student_answer = combined_text
+            ocr_result = {"text": combined_text, "equations": [], "has_diagram": False, "method": "vlm_pages"}
 
     # Text-based LLM grading (reads both documents)
     if result is None and question_type != "drawing" and student_answer.strip():
